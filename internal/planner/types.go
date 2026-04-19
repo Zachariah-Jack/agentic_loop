@@ -31,6 +31,8 @@ type InputEnvelope struct {
 	RunStatus        string                   `json:"run_status"`
 	LatestCheckpoint Checkpoint               `json:"latest_checkpoint"`
 	RecentEvents     []EventPreview           `json:"recent_events,omitempty"`
+	ExecutorResult   *ExecutorResultSummary   `json:"executor_result,omitempty"`
+	CollectedContext *CollectedContextSummary `json:"collected_context,omitempty"`
 	RepoContracts    RepoContractAvailability `json:"repo_contracts"`
 	RawHumanReplies  []RawHumanReply          `json:"raw_human_replies,omitempty"`
 	Capabilities     CapabilityMarkers        `json:"capabilities"`
@@ -53,10 +55,17 @@ type EventPreview struct {
 }
 
 type RepoContractAvailability struct {
-	HasAgentsMD       bool `json:"has_agents_md"`
-	HasUpdatedSpec    bool `json:"has_updated_spec"`
-	HasNonNegotiables bool `json:"has_non_negotiables"`
-	HasExecPlan       bool `json:"has_exec_plan"`
+	HasAgentsMD         bool   `json:"has_agents_md"`
+	AgentsMDPath        string `json:"agents_md_path"`
+	HasUpdatedSpec      bool   `json:"has_updated_spec"`
+	UpdatedSpecPath     string `json:"updated_spec_path"`
+	HasNonNegotiables   bool   `json:"has_non_negotiables"`
+	NonNegotiablesPath  string `json:"non_negotiables_path"`
+	HasExecPlan         bool   `json:"has_exec_plan"`
+	ExecPlanPath        string `json:"exec_plan_path"`
+	OrchestratorDirPath string `json:"orchestrator_dir_path"`
+	RoadmapPath         string `json:"roadmap_path"`
+	DecisionsPath       string `json:"decisions_path"`
 }
 
 type RawHumanReply struct {
@@ -70,6 +79,28 @@ type CapabilityMarkers struct {
 	Planner  CapabilityStatus `json:"planner"`
 	Executor CapabilityStatus `json:"executor"`
 	NTFY     CapabilityStatus `json:"ntfy"`
+}
+
+type ExecutorResultSummary struct {
+	FinalMessage string `json:"final_message"`
+	Success      bool   `json:"success"`
+	ThreadID     string `json:"thread_id,omitempty"`
+}
+
+type CollectedContextSummary struct {
+	Focus     string                   `json:"focus"`
+	Questions []string                 `json:"questions,omitempty"`
+	Results   []CollectedContextResult `json:"results,omitempty"`
+}
+
+type CollectedContextResult struct {
+	RequestedPath string   `json:"requested_path"`
+	ResolvedPath  string   `json:"resolved_path,omitempty"`
+	Kind          string   `json:"kind"`
+	Detail        string   `json:"detail,omitempty"`
+	Preview       string   `json:"preview,omitempty"`
+	Entries       []string `json:"entries,omitempty"`
+	Truncated     bool     `json:"truncated,omitempty"`
 }
 
 type OutputEnvelope struct {

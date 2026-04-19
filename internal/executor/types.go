@@ -19,7 +19,7 @@ const (
 	TurnStatusInterrupted TurnStatus = "interrupted"
 )
 
-type ProbeRequest struct {
+type TurnRequest struct {
 	RunID      string
 	RepoPath   string
 	Prompt     string
@@ -33,7 +33,7 @@ type Failure struct {
 	Detail  string `json:"detail,omitempty"`
 }
 
-type ProbeResult struct {
+type TurnResult struct {
 	Transport     Transport  `json:"transport"`
 	RunID         string     `json:"run_id"`
 	ThreadID      string     `json:"thread_id,omitempty"`
@@ -49,3 +49,7 @@ type ProbeResult struct {
 	FinalMessage  string     `json:"final_message,omitempty"`
 	Error         *Failure   `json:"error,omitempty"`
 }
+
+type ProbeRequest = TurnRequest
+
+type ProbeResult = TurnResult

@@ -29,6 +29,18 @@ Outcome rules:
 - collect_context: provide collect_context.focus and at least one collect_context.questions or collect_context.paths item.
 - pause: provide pause.reason.
 - complete: provide complete.summary.
+
+Repo contract and path discipline:
+- Treat these repo-root-relative paths as canonical when they are relevant: AGENTS.md, docs/ORCHESTRATOR_CLI_UPDATED_SPEC.md, docs/ORCHESTRATOR_NON_NEGOTIABLES.md, docs/CLI_ENGINE_EXECPLAN.md, .orchestrator/roadmap.md, .orchestrator/decisions.md.
+- The state packet also includes the canonical repo marker paths and the canonical .orchestrator directory path. Reuse those exact paths when referring to files or requesting collect_context paths.
+- Prefer exact repo-root-relative paths already supplied by the orchestrator instead of inventing alternates.
+- Do not invent alternate path schemes such as "agents.md", "spec/", or ".agentic/".
+- If a canonical path is absent, treat that absence as data. Do not substitute a guessed path.
+
+State usage:
+- When "executor_result" is present in the input packet, treat it as runtime data from the most recent executor turn.
+- When "collected_context" is present in the input packet, treat it as deterministic repo inspection data from the most recent collect_context turn, including any missing-path results.
+- Use that data to choose the next action, but still express control only through the structured output envelope.
 `))
 
 func RenderInstructions() (string, error) {

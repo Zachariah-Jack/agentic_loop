@@ -93,6 +93,10 @@ func TestRenderInstructionsIncludesContractRules(t *testing.T) {
 		`These instructions are resent every planner turn`,
 		`Set "contract_version" to "planner.v1".`,
 		`Set "outcome" to exactly one of: execute, ask_human, collect_context, pause, complete.`,
+		`AGENTS.md, docs/ORCHESTRATOR_CLI_UPDATED_SPEC.md, docs/ORCHESTRATOR_NON_NEGOTIABLES.md, docs/CLI_ENGINE_EXECPLAN.md, .orchestrator/roadmap.md, .orchestrator/decisions.md`,
+		`Do not invent alternate path schemes such as "agents.md", "spec/", or ".agentic/".`,
+		`When "executor_result" is present in the input packet`,
+		`When "collected_context" is present in the input packet`,
 	} {
 		if !strings.Contains(rendered, snippet) {
 			t.Fatalf("rendered template missing %q\n%s", snippet, rendered)
@@ -102,6 +106,23 @@ func TestRenderInstructionsIncludesContractRules(t *testing.T) {
 
 func TestMarshalInputPacketIncludesState(t *testing.T) {
 	input := validInputEnvelope()
+	input.ExecutorResult = &ExecutorResultSummary{
+		FinalMessage: "Implemented the bounded slice.",
+		Success:      true,
+		ThreadID:     "thr_123",
+	}
+	input.CollectedContext = &CollectedContextSummary{
+		Focus:     "Inspect the planner persistence seam.",
+		Questions: []string{"What changed under internal/state?"},
+		Results: []CollectedContextResult{
+			{
+				RequestedPath: "internal/state",
+				ResolvedPath:  `D:\Projects\agentic_loop\internal\state`,
+				Kind:          "dir",
+				Entries:       []string{"layout.go", "store.go"},
+			},
+		},
+	}
 
 	packet, err := MarshalInputPacket(input)
 	if err != nil {
@@ -112,6 +133,15 @@ func TestMarshalInputPacketIncludesState(t *testing.T) {
 		`"contract_version": "planner.v1"`,
 		`"run_id": "run_123"`,
 		`"goal": "stabilize the planner contract"`,
+		`"executor_result": {`,
+		`"final_message": "Implemented the bounded slice."`,
+		`"collected_context": {`,
+		`"requested_path": "internal/state"`,
+		`"agents_md_path": "AGENTS.md"`,
+		`"updated_spec_path": "docs/ORCHESTRATOR_CLI_UPDATED_SPEC.md"`,
+		`"orchestrator_dir_path": ".orchestrator"`,
+		`"roadmap_path": ".orchestrator/roadmap.md"`,
+		`"decisions_path": ".orchestrator/decisions.md"`,
 	} {
 		if !strings.Contains(packet, snippet) {
 			t.Fatalf("input packet missing %q\n%s", snippet, packet)
@@ -133,6 +163,23 @@ func TestMarshalInputPacketRejectsInvalidInput(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "capabilities.executor must be a known capability status") {
 		t.Fatalf("expected capability validation error, got: %v", err)
+	}
+}
+
+func TestMarshalInputPacketRejectsMissingCanonicalRepoPaths(t *testing.T) {
+	input := validInputEnvelope()
+	input.RepoContracts.AgentsMDPath = ""
+	input.RepoContracts.OrchestratorDirPath = ""
+
+	_, err := MarshalInputPacket(input)
+	if err == nil {
+		t.Fatal("MarshalInputPacket unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "repo_contracts.agents_md_path is required") {
+		t.Fatalf("expected agents_md_path validation error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "repo_contracts.orchestrator_dir_path is required") {
+		t.Fatalf("expected orchestrator_dir_path validation error, got: %v", err)
 	}
 }
 
@@ -161,10 +208,17 @@ func validInputEnvelope() InputEnvelope {
 			},
 		},
 		RepoContracts: RepoContractAvailability{
-			HasAgentsMD:       true,
-			HasUpdatedSpec:    true,
-			HasNonNegotiables: true,
-			HasExecPlan:       true,
+			HasAgentsMD:         true,
+			AgentsMDPath:        "AGENTS.md",
+			HasUpdatedSpec:      true,
+			UpdatedSpecPath:     "docs/ORCHESTRATOR_CLI_UPDATED_SPEC.md",
+			HasNonNegotiables:   true,
+			NonNegotiablesPath:  "docs/ORCHESTRATOR_NON_NEGOTIABLES.md",
+			HasExecPlan:         true,
+			ExecPlanPath:        "docs/CLI_ENGINE_EXECPLAN.md",
+			OrchestratorDirPath: ".orchestrator",
+			RoadmapPath:         ".orchestrator/roadmap.md",
+			DecisionsPath:       ".orchestrator/decisions.md",
 		},
 		RawHumanReplies: []RawHumanReply{
 			{

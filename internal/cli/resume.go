@@ -5,8 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"os"
-	"time"
 
 	"orchestrator/internal/journal"
 )
@@ -14,13 +12,14 @@ import (
 func newResumeCommand() Command {
 	return Command{
 		Name:    "resume",
-		Summary: "Locate the latest unfinished run mechanically.",
+		Summary: "Continue the latest unfinished run for one bounded cycle.",
 		Description: stringsJoin(
 			"Usage:",
 			"  orchestrator resume",
 			"",
-			"Looks up the latest unfinished run mechanically from persisted state.",
-			"It does not decide whether work should continue and does not run a planner.",
+			"Loads the latest unfinished run from persisted state, performs one bounded",
+			"planner-led continuation cycle on that existing run, persists the result,",
+			"and stops again at the next safe pause point.",
 		),
 		Run: runResume,
 	}
@@ -37,19 +36,15 @@ func runResume(ctx context.Context, inv Invocation) error {
 		return err
 	}
 
-	store, err := openExistingStore(inv.Layout)
+	if !pathExists(inv.Layout.DBPath) {
+		fmt.Fprintln(inv.Stdout, "resume_lookup: no unfinished run found")
+		return nil
+	}
+	store, journalWriter, err := ensureRuntime(ctx, inv.Layout)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintln(inv.Stdout, "resume_lookup: no persisted runs found")
-			return nil
-		}
 		return err
 	}
 	defer store.Close()
-
-	if err := store.EnsureSchema(ctx); err != nil {
-		return err
-	}
 
 	run, found, err := store.LatestResumableRun(ctx)
 	if err != nil {
@@ -60,35 +55,25 @@ func runResume(ctx context.Context, inv Invocation) error {
 		return nil
 	}
 
-	journalWriter, err := openExistingJournal(inv.Layout)
-	if err == nil {
-		_ = journalWriter.Append(journal.Event{
-			Type:     "run.resume_lookup",
-			RunID:    run.ID,
-			RepoPath: run.RepoPath,
-			Goal:     run.Goal,
-			Status:   string(run.Status),
-			Message:  "latest unfinished run located",
-			Checkpoint: &journal.CheckpointRef{
-				Sequence:  run.LatestCheckpoint.Sequence,
-				Stage:     run.LatestCheckpoint.Stage,
-				Label:     run.LatestCheckpoint.Label,
-				SafePause: run.LatestCheckpoint.SafePause,
-			},
-		})
+	if err := journalWriter.Append(journal.Event{
+		Type:     "run.resumed",
+		RunID:    run.ID,
+		RepoPath: run.RepoPath,
+		Goal:     run.Goal,
+		Status:   string(run.Status),
+		Message:  "bounded continuation started from latest unfinished run",
+		Checkpoint: &journal.CheckpointRef{
+			Sequence:  run.LatestCheckpoint.Sequence,
+			Stage:     run.LatestCheckpoint.Stage,
+			Label:     run.LatestCheckpoint.Label,
+			SafePause: run.LatestCheckpoint.SafePause,
+		},
+	}); err != nil {
+		return err
 	}
 
-	fmt.Fprintf(inv.Stdout, "run_id: %s\n", run.ID)
-	fmt.Fprintf(inv.Stdout, "goal: %s\n", run.Goal)
-	fmt.Fprintf(inv.Stdout, "status: %s\n", run.Status)
-	fmt.Fprintf(inv.Stdout, "repo_path: %s\n", run.RepoPath)
-	fmt.Fprintf(inv.Stdout, "created_at: %s\n", run.CreatedAt.Format(time.RFC3339Nano))
-	fmt.Fprintf(inv.Stdout, "updated_at: %s\n", run.UpdatedAt.Format(time.RFC3339Nano))
-	fmt.Fprintf(inv.Stdout, "previous_response_id: %s\n", run.PreviousResponseID)
-	fmt.Fprintf(inv.Stdout, "latest_checkpoint.sequence: %d\n", run.LatestCheckpoint.Sequence)
-	fmt.Fprintf(inv.Stdout, "latest_checkpoint.stage: %s\n", run.LatestCheckpoint.Stage)
-	fmt.Fprintf(inv.Stdout, "latest_checkpoint.label: %s\n", run.LatestCheckpoint.Label)
-	fmt.Fprintf(inv.Stdout, "latest_checkpoint.safe_pause: %t\n", run.LatestCheckpoint.SafePause)
-	fmt.Fprintln(inv.Stdout, "resume_action: planner loop not implemented in this slice")
-	return nil
+	return executeBoundedCycle(ctx, inv, store, journalWriter, run, boundedCycleMode{
+		Command:   "resume",
+		RunAction: "resumed_existing_run",
+	})
 }

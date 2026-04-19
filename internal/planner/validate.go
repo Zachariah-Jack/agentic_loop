@@ -27,6 +27,7 @@ func ValidateInput(input InputEnvelope) error {
 
 	issues = append(issues, validateCheckpoint("latest_checkpoint", input.LatestCheckpoint)...)
 	issues = append(issues, validateCapabilities(input.Capabilities)...)
+	issues = append(issues, validateRepoContracts(input.RepoContracts)...)
 
 	for i, event := range input.RecentEvents {
 		prefix := fmt.Sprintf("recent_events[%d]", i)
@@ -54,6 +55,24 @@ func ValidateInput(input InputEnvelope) error {
 		}
 		if strings.TrimSpace(reply.Payload) == "" {
 			issues = append(issues, prefix+".payload is required")
+		}
+	}
+
+	if input.CollectedContext != nil {
+		if strings.TrimSpace(input.CollectedContext.Focus) == "" {
+			issues = append(issues, "collected_context.focus is required")
+		}
+
+		for i, result := range input.CollectedContext.Results {
+			prefix := fmt.Sprintf("collected_context.results[%d]", i)
+			if strings.TrimSpace(result.RequestedPath) == "" {
+				issues = append(issues, prefix+".requested_path is required")
+			}
+			switch strings.TrimSpace(result.Kind) {
+			case "file", "dir", "missing":
+			default:
+				issues = append(issues, prefix+".kind must be file, dir, or missing")
+			}
 		}
 	}
 
@@ -196,6 +215,29 @@ func validateCapabilities(markers CapabilityMarkers) []string {
 	} {
 		if !isKnownCapabilityStatus(item.value) {
 			issues = append(issues, item.name+" must be a known capability status")
+		}
+	}
+
+	return issues
+}
+
+func validateRepoContracts(contracts RepoContractAvailability) []string {
+	var issues []string
+
+	for _, item := range []struct {
+		name  string
+		value string
+	}{
+		{name: "repo_contracts.agents_md_path", value: contracts.AgentsMDPath},
+		{name: "repo_contracts.updated_spec_path", value: contracts.UpdatedSpecPath},
+		{name: "repo_contracts.non_negotiables_path", value: contracts.NonNegotiablesPath},
+		{name: "repo_contracts.exec_plan_path", value: contracts.ExecPlanPath},
+		{name: "repo_contracts.orchestrator_dir_path", value: contracts.OrchestratorDirPath},
+		{name: "repo_contracts.roadmap_path", value: contracts.RoadmapPath},
+		{name: "repo_contracts.decisions_path", value: contracts.DecisionsPath},
+	} {
+		if strings.TrimSpace(item.value) == "" {
+			issues = append(issues, item.name+" is required")
 		}
 	}
 

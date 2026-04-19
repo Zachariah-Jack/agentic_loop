@@ -21,8 +21,8 @@ func newStatusCommand() Command {
 			"Usage:",
 			"  orchestrator status",
 			"",
-			"Prints current persistence and live planner transport health for the inert CLI shell.",
-			"It reports what has been persisted without pretending executor behavior exists.",
+			"Prints current persistence plus live planner and primary executor transport health",
+			"for the inert CLI shell. It reports only persisted runtime state.",
 		),
 		Run: runStatus,
 	}
@@ -97,6 +97,7 @@ func runStatus(ctx context.Context, inv Invocation) error {
 			fmt.Fprintf(inv.Stdout, "latest_run.executor_turn_id: %s\n", latest.ExecutorTurnID)
 			fmt.Fprintf(inv.Stdout, "latest_run.executor_turn_status: %s\n", latest.ExecutorTurnStatus)
 			fmt.Fprintf(inv.Stdout, "latest_run.executor_last_error: %s\n", latest.ExecutorLastError)
+			fmt.Fprintf(inv.Stdout, "latest_run.executor_last_message_preview: %s\n", previewString(latest.ExecutorLastMessage, 240))
 			fmt.Fprintf(inv.Stdout, "latest_run.checkpoint.sequence: %d\n", latest.LatestCheckpoint.Sequence)
 			fmt.Fprintf(inv.Stdout, "latest_run.checkpoint.label: %s\n", latest.LatestCheckpoint.Label)
 			fmt.Fprintf(inv.Stdout, "latest_run.checkpoint.safe_pause: %t\n", latest.LatestCheckpoint.SafePause)
@@ -138,7 +139,7 @@ func executorRuntimeState() string {
 	if _, err := appserver.ResolveLaunchPlan(); err != nil {
 		return "primary executor transport blocked"
 	}
-	return "primary executor probe ready"
+	return "primary executor single-turn dispatch ready"
 }
 
 func pathExists(path string) bool {

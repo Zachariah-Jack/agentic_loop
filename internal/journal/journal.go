@@ -25,11 +25,17 @@ type Event struct {
 	ResponseID            string         `json:"response_id,omitempty"`
 	PreviousResponseID    string         `json:"previous_response_id,omitempty"`
 	PlannerOutcome        string         `json:"planner_outcome,omitempty"`
+	ContextRequestedPath  string         `json:"context_requested_path,omitempty"`
+	ContextResolvedPath   string         `json:"context_resolved_path,omitempty"`
+	ContextKind           string         `json:"context_kind,omitempty"`
+	ContextDetail         string         `json:"context_detail,omitempty"`
+	ContextPreview        string         `json:"context_preview,omitempty"`
 	ExecutorTransport     string         `json:"executor_transport,omitempty"`
 	ExecutorThreadID      string         `json:"executor_thread_id,omitempty"`
 	ExecutorThreadPath    string         `json:"executor_thread_path,omitempty"`
 	ExecutorTurnID        string         `json:"executor_turn_id,omitempty"`
 	ExecutorTurnStatus    string         `json:"executor_turn_status,omitempty"`
+	ExecutorFailureStage  string         `json:"executor_failure_stage,omitempty"`
 	ExecutorOutputPreview string         `json:"executor_output_preview,omitempty"`
 	Checkpoint            *CheckpointRef `json:"checkpoint,omitempty"`
 }

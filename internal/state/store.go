@@ -28,20 +28,24 @@ const (
 )
 
 type Run struct {
-	ID                 string
-	RepoPath           string
-	Goal               string
-	Status             RunStatus
-	PreviousResponseID string
-	ExecutorTransport  string
-	ExecutorThreadID   string
-	ExecutorThreadPath string
-	ExecutorTurnID     string
-	ExecutorTurnStatus string
-	ExecutorLastError  string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	LatestCheckpoint   Checkpoint
+	ID                       string
+	RepoPath                 string
+	Goal                     string
+	Status                   RunStatus
+	PreviousResponseID       string
+	CollectedContext         *CollectedContextState
+	ExecutorTransport        string
+	ExecutorThreadID         string
+	ExecutorThreadPath       string
+	ExecutorTurnID           string
+	ExecutorTurnStatus       string
+	ExecutorLastSuccess      *bool
+	ExecutorLastFailureStage string
+	ExecutorLastError        string
+	ExecutorLastMessage      string
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+	LatestCheckpoint         Checkpoint
 }
 
 type Checkpoint struct {
@@ -67,12 +71,31 @@ type Stats struct {
 }
 
 type ExecutorState struct {
-	Transport  string
-	ThreadID   string
-	ThreadPath string
-	TurnID     string
-	TurnStatus string
-	LastError  string
+	Transport        string
+	ThreadID         string
+	ThreadPath       string
+	TurnID           string
+	TurnStatus       string
+	LastSuccess      *bool
+	LastFailureStage string
+	LastError        string
+	LastMessage      string
+}
+
+type CollectedContextState struct {
+	Focus     string                   `json:"focus"`
+	Questions []string                 `json:"questions,omitempty"`
+	Results   []CollectedContextResult `json:"results,omitempty"`
+}
+
+type CollectedContextResult struct {
+	RequestedPath string   `json:"requested_path"`
+	ResolvedPath  string   `json:"resolved_path,omitempty"`
+	Kind          string   `json:"kind"`
+	Detail        string   `json:"detail,omitempty"`
+	Preview       string   `json:"preview,omitempty"`
+	Entries       []string `json:"entries,omitempty"`
+	Truncated     bool     `json:"truncated,omitempty"`
 }
 
 func Open(path string) (*Store, error) {
@@ -117,12 +140,16 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			updated_at TEXT NOT NULL,
 			latest_checkpoint_json TEXT NOT NULL,
 			previous_response_id TEXT NOT NULL DEFAULT '',
+			collected_context_json TEXT NOT NULL DEFAULT '',
 			executor_transport TEXT NOT NULL DEFAULT '',
 			executor_thread_id TEXT NOT NULL DEFAULT '',
 			executor_thread_path TEXT NOT NULL DEFAULT '',
 			executor_turn_id TEXT NOT NULL DEFAULT '',
 			executor_turn_status TEXT NOT NULL DEFAULT '',
-			executor_last_error TEXT NOT NULL DEFAULT ''
+			executor_last_success INTEGER,
+			executor_last_failure_stage TEXT NOT NULL DEFAULT '',
+			executor_last_error TEXT NOT NULL DEFAULT '',
+			executor_last_message TEXT NOT NULL DEFAULT ''
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_runs_status_updated_at
 			ON runs(status, updated_at DESC);`,
@@ -151,6 +178,9 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	if err := s.ensureRunsColumn(ctx, "previous_response_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureRunsColumn(ctx, "collected_context_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if err := s.ensureRunsColumn(ctx, "executor_transport", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -166,11 +196,20 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	if err := s.ensureRunsColumn(ctx, "executor_turn_status", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureRunsColumn(ctx, "executor_last_success", "INTEGER"); err != nil {
+		return err
+	}
+	if err := s.ensureRunsColumn(ctx, "executor_last_failure_stage", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if err := s.ensureRunsColumn(ctx, "executor_last_error", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureRunsColumn(ctx, "executor_last_message", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 
-	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version = 3;"); err != nil {
+	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version = 7;"); err != nil {
 		return err
 	}
 
@@ -227,9 +266,9 @@ func (s *Store) CreateRun(ctx context.Context, params CreateRunParams) (Run, err
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO runs (
-			id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, previous_response_id,
-			executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_error
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, previous_response_id, collected_context_json,
+			executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		runID,
 		params.RepoPath,
 		params.Goal,
@@ -241,6 +280,10 @@ func (s *Store) CreateRun(ctx context.Context, params CreateRunParams) (Run, err
 		"",
 		"",
 		"",
+		"",
+		"",
+		"",
+		nil,
 		"",
 		"",
 		"",
@@ -262,6 +305,7 @@ func (s *Store) CreateRun(ctx context.Context, params CreateRunParams) (Run, err
 		Goal:               params.Goal,
 		Status:             status,
 		PreviousResponseID: "",
+		CollectedContext:   nil,
 		CreatedAt:          createdAt,
 		UpdatedAt:          updatedAt,
 		LatestCheckpoint:   checkpoint,
@@ -280,6 +324,40 @@ func (s *Store) SavePlannerTurn(ctx context.Context, runID string, previousRespo
 	return s.saveCheckpointAndResponseID(ctx, runID, previousResponseID, true, checkpoint)
 }
 
+func (s *Store) SaveCollectedContext(ctx context.Context, runID string, collectedContext *CollectedContextState) error {
+	if strings.TrimSpace(runID) == "" {
+		return errors.New("run id is required")
+	}
+
+	encoded, err := marshalCollectedContext(collectedContext)
+	if err != nil {
+		return err
+	}
+
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE runs
+		 SET updated_at = ?,
+		     collected_context_json = ?
+		 WHERE id = ?`,
+		formatTime(time.Now().UTC()),
+		encoded,
+		runID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("run %s not found", runID)
+	}
+
+	return nil
+}
+
 func (s *Store) SaveExecutorState(ctx context.Context, runID string, executorState ExecutorState) error {
 	if strings.TrimSpace(runID) == "" {
 		return errors.New("run id is required")
@@ -293,7 +371,10 @@ func (s *Store) SaveExecutorState(ctx context.Context, runID string, executorSta
 		     executor_thread_path = ?,
 		     executor_turn_id = ?,
 		     executor_turn_status = ?,
-		     executor_last_error = ?
+		     executor_last_success = ?,
+		     executor_last_failure_stage = ?,
+		     executor_last_error = ?,
+		     executor_last_message = ?
 		 WHERE id = ?`,
 		formatTime(time.Now().UTC()),
 		strings.TrimSpace(executorState.Transport),
@@ -301,7 +382,10 @@ func (s *Store) SaveExecutorState(ctx context.Context, runID string, executorSta
 		strings.TrimSpace(executorState.ThreadPath),
 		strings.TrimSpace(executorState.TurnID),
 		strings.TrimSpace(executorState.TurnStatus),
+		optionalBoolToSQL(executorState.LastSuccess),
+		strings.TrimSpace(executorState.LastFailureStage),
 		strings.TrimSpace(executorState.LastError),
+		strings.TrimSpace(executorState.LastMessage),
 		runID,
 	)
 	if err != nil {
@@ -363,7 +447,10 @@ func (s *Store) SaveExecutorTurn(ctx context.Context, runID string, executorStat
 		     executor_thread_path = ?,
 		     executor_turn_id = ?,
 		     executor_turn_status = ?,
-		     executor_last_error = ?
+		     executor_last_success = ?,
+		     executor_last_failure_stage = ?,
+		     executor_last_error = ?,
+		     executor_last_message = ?
 		 WHERE id = ?`,
 		formatTime(checkpoint.CreatedAt),
 		string(checkpointJSON),
@@ -372,7 +459,10 @@ func (s *Store) SaveExecutorTurn(ctx context.Context, runID string, executorStat
 		strings.TrimSpace(executorState.ThreadPath),
 		strings.TrimSpace(executorState.TurnID),
 		strings.TrimSpace(executorState.TurnStatus),
+		optionalBoolToSQL(executorState.LastSuccess),
+		strings.TrimSpace(executorState.LastFailureStage),
 		strings.TrimSpace(executorState.LastError),
+		strings.TrimSpace(executorState.LastMessage),
 		runID,
 	)
 	if err != nil {
@@ -392,8 +482,8 @@ func (s *Store) SaveExecutorTurn(ctx context.Context, runID string, executorStat
 
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, bool, error) {
 	return s.querySingleRun(ctx,
-		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, previous_response_id,
-		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_error
+		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, previous_response_id, collected_context_json,
+		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message
 		 FROM runs
 		 WHERE id = ?
 		 LIMIT 1`,
@@ -457,8 +547,8 @@ func (s *Store) saveCheckpointAndResponseID(ctx context.Context, runID string, p
 
 func (s *Store) LatestResumableRun(ctx context.Context) (Run, bool, error) {
 	return s.querySingleRun(ctx,
-		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, previous_response_id,
-		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_error
+		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, previous_response_id, collected_context_json,
+		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message
 		 FROM runs
 		 WHERE status NOT IN (?, ?, ?)
 		 ORDER BY updated_at DESC, created_at DESC
@@ -471,8 +561,8 @@ func (s *Store) LatestResumableRun(ctx context.Context) (Run, bool, error) {
 
 func (s *Store) LatestRun(ctx context.Context) (Run, bool, error) {
 	return s.querySingleRun(ctx,
-		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, previous_response_id,
-		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_error
+		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, previous_response_id, collected_context_json,
+		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message
 		 FROM runs
 		 ORDER BY updated_at DESC, created_at DESC
 		 LIMIT 1`,
@@ -518,18 +608,22 @@ func (s *Store) querySingleRun(ctx context.Context, query string, args ...any) (
 	row := s.db.QueryRowContext(ctx, query, args...)
 
 	var (
-		run                Run
-		status             string
-		createdAtRaw       string
-		updatedAtRaw       string
-		checkpointJSON     string
-		previousResponseID string
-		executorTransport  string
-		executorThreadID   string
-		executorThreadPath string
-		executorTurnID     string
-		executorTurnStatus string
-		executorLastError  string
+		run                      Run
+		status                   string
+		createdAtRaw             string
+		updatedAtRaw             string
+		checkpointJSON           string
+		previousResponseID       string
+		collectedContextJSON     string
+		executorTransport        string
+		executorThreadID         string
+		executorThreadPath       string
+		executorTurnID           string
+		executorTurnStatus       string
+		executorLastSuccess      sql.NullInt64
+		executorLastFailureStage string
+		executorLastError        string
+		executorLastMessage      string
 	)
 
 	if err := row.Scan(
@@ -541,12 +635,16 @@ func (s *Store) querySingleRun(ctx context.Context, query string, args ...any) (
 		&updatedAtRaw,
 		&checkpointJSON,
 		&previousResponseID,
+		&collectedContextJSON,
 		&executorTransport,
 		&executorThreadID,
 		&executorThreadPath,
 		&executorTurnID,
 		&executorTurnStatus,
+		&executorLastSuccess,
+		&executorLastFailureStage,
 		&executorLastError,
+		&executorLastMessage,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Run{}, false, nil
@@ -570,12 +668,20 @@ func (s *Store) querySingleRun(ctx context.Context, query string, args ...any) (
 
 	run.Status = RunStatus(status)
 	run.PreviousResponseID = previousResponseID
+	collectedContext, err := unmarshalCollectedContext(collectedContextJSON)
+	if err != nil {
+		return Run{}, false, err
+	}
+	run.CollectedContext = collectedContext
 	run.ExecutorTransport = executorTransport
 	run.ExecutorThreadID = executorThreadID
 	run.ExecutorThreadPath = executorThreadPath
 	run.ExecutorTurnID = executorTurnID
 	run.ExecutorTurnStatus = executorTurnStatus
+	run.ExecutorLastSuccess = sqlToOptionalBool(executorLastSuccess)
+	run.ExecutorLastFailureStage = executorLastFailureStage
 	run.ExecutorLastError = executorLastError
+	run.ExecutorLastMessage = executorLastMessage
 	run.CreatedAt = createdAt
 	run.UpdatedAt = updatedAt
 	run.LatestCheckpoint = checkpoint
@@ -642,6 +748,30 @@ func updateRunArgs(runID string, checkpoint Checkpoint, checkpointJSON string, p
 	}
 }
 
+func marshalCollectedContext(collectedContext *CollectedContextState) (string, error) {
+	if collectedContext == nil {
+		return "", nil
+	}
+
+	encoded, err := json.Marshal(collectedContext)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func unmarshalCollectedContext(value string) (*CollectedContextState, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+
+	var collectedContext CollectedContextState
+	if err := json.Unmarshal([]byte(value), &collectedContext); err != nil {
+		return nil, err
+	}
+	return &collectedContext, nil
+}
+
 func newRunID() (string, error) {
 	bytes := make([]byte, 16)
 	if _, err := rand.Read(bytes); err != nil {
@@ -660,4 +790,19 @@ func boolToInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func optionalBoolToSQL(value *bool) any {
+	if value == nil {
+		return nil
+	}
+	return boolToInt(*value)
+}
+
+func sqlToOptionalBool(value sql.NullInt64) *bool {
+	if !value.Valid {
+		return nil
+	}
+	result := value.Int64 != 0
+	return &result
 }

@@ -26,8 +26,10 @@ const (
 	defaultClientName  = "orchestrator"
 	defaultClientTitle = "Orchestrator CLI"
 
-	defaultProbeTimeout = 2 * time.Minute
-	probeInstructions   = "You are an executor probe. Operate read-only. Do not modify files, apply patches, create commits, or run mutating commands. Inspect and report only."
+	defaultProbeTimeout   = 2 * time.Minute
+	defaultExecuteTimeout = 20 * time.Minute
+	probeInstructions     = "You are an executor probe. Operate read-only. Do not modify files, apply patches, create commits, or run mutating commands. Inspect and report only."
+	executeInstructions   = "You are the primary executor for the orchestrator. Perform only the bounded task provided in the current turn. Do not choose a new task and do not decide whether the overall run is complete."
 )
 
 type LaunchPlan struct {
@@ -145,6 +147,13 @@ type probeAccumulator struct {
 	deltaText strings.Builder
 }
 
+type turnMode struct {
+	threadSandbox      string
+	threadInstructions string
+	turnSandboxPolicy  map[string]any
+	waitTimeout        time.Duration
+}
+
 func NewClient(version string) (Client, error) {
 	plan, err := ResolveLaunchPlan()
 	if err != nil {
@@ -153,7 +162,7 @@ func NewClient(version string) (Client, error) {
 
 	return Client{
 		LaunchPlan:    plan,
-		Timeout:       defaultProbeTimeout,
+		Timeout:       0,
 		ClientName:    defaultClientName,
 		ClientTitle:   defaultClientTitle,
 		ClientVersion: version,
@@ -199,23 +208,38 @@ func deriveCodexJSPath(codexPath string) string {
 }
 
 func (c Client) Probe(ctx context.Context, req executor.ProbeRequest) (executor.ProbeResult, error) {
+	return c.runTurn(ctx, req, turnMode{
+		threadSandbox:      "read-only",
+		threadInstructions: probeInstructions,
+		turnSandboxPolicy:  readOnlySandboxPolicy(),
+		waitTimeout:        defaultProbeTimeout,
+	})
+}
+
+func (c Client) Execute(ctx context.Context, req executor.TurnRequest) (executor.TurnResult, error) {
+	return c.runTurn(ctx, req, turnMode{
+		threadSandbox:      "workspace-write",
+		threadInstructions: executeInstructions,
+		turnSandboxPolicy:  workspaceWriteSandboxPolicy(),
+		waitTimeout:        defaultExecuteTimeout,
+	})
+}
+
+func (c Client) runTurn(ctx context.Context, req executor.TurnRequest, mode turnMode) (executor.TurnResult, error) {
 	if strings.TrimSpace(req.RunID) == "" {
-		return executor.ProbeResult{}, errors.New("run id is required")
+		return executor.TurnResult{}, errors.New("run id is required")
 	}
 	if strings.TrimSpace(req.RepoPath) == "" {
-		return executor.ProbeResult{}, errors.New("repo path is required")
+		return executor.TurnResult{}, errors.New("repo path is required")
 	}
 	if strings.TrimSpace(req.Prompt) == "" {
-		return executor.ProbeResult{}, errors.New("prompt is required")
+		return executor.TurnResult{}, errors.New("prompt is required")
 	}
 	if strings.TrimSpace(c.LaunchPlan.Command) == "" {
-		return executor.ProbeResult{}, errors.New("app-server launch plan is required")
+		return executor.TurnResult{}, errors.New("app-server launch plan is required")
 	}
 
-	timeout := c.Timeout
-	if timeout <= 0 {
-		timeout = defaultProbeTimeout
-	}
+	timeout := c.turnTimeout(mode)
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -225,21 +249,21 @@ func (c Client) Probe(ctx context.Context, req executor.ProbeRequest) (executor.
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return executor.ProbeResult{}, err
+		return executor.TurnResult{}, err
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return executor.ProbeResult{}, err
+		return executor.TurnResult{}, err
 	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return executor.ProbeResult{}, err
+		return executor.TurnResult{}, err
 	}
 
 	if err := cmd.Start(); err != nil {
-		return executor.ProbeResult{}, err
+		return executor.TurnResult{}, err
 	}
 
 	defer func() {
@@ -279,7 +303,7 @@ func (c Client) Probe(ctx context.Context, req executor.ProbeRequest) (executor.
 
 	initMsg, err := waitForResponse(ctx, stream, initializeRequestID, &acc, stderrBuf)
 	if err != nil {
-		return acc.fail("initialize_wait", err.Error(), stderrBuf.String())
+		return acc.failWaitError("initialize_wait", err, stderrBuf.String(), timeout)
 	}
 
 	if err := parseResponse(initMsg, &initResponse{}); err != nil {
@@ -294,15 +318,10 @@ func (c Client) Probe(ctx context.Context, req executor.ProbeRequest) (executor.
 	}
 
 	threadMethod := "thread/start"
-	threadParams := buildThreadStartParams(req.RepoPath)
+	threadParams := buildThreadStartParams(req.RepoPath, mode.threadSandbox, mode.threadInstructions)
 	if acc.result.ThreadID != "" {
 		threadMethod = "thread/resume"
-		threadParams = map[string]any{
-			"threadId":       acc.result.ThreadID,
-			"cwd":            req.RepoPath,
-			"approvalPolicy": "never",
-			"sandbox":        "read-only",
-		}
+		threadParams = buildThreadResumeParams(acc.result.ThreadID, req.RepoPath, mode.threadSandbox, mode.threadInstructions)
 		acc.result.ResumedThread = true
 	}
 
@@ -316,7 +335,7 @@ func (c Client) Probe(ctx context.Context, req executor.ProbeRequest) (executor.
 
 	threadMsg, err := waitForResponse(ctx, stream, threadRequestID, &acc, stderrBuf)
 	if err != nil {
-		return acc.fail("thread_wait", err.Error(), stderrBuf.String())
+		return acc.failWaitError("thread_wait", err, stderrBuf.String(), timeout)
 	}
 
 	if threadMethod == "thread/start" {
@@ -346,14 +365,14 @@ func (c Client) Probe(ctx context.Context, req executor.ProbeRequest) (executor.
 	if err := sendMessage(sender, map[string]any{
 		"method": "turn/start",
 		"id":     turnRequestID,
-		"params": buildTurnStartParams(acc.result.ThreadID, req.RepoPath, req.Prompt),
+		"params": buildTurnStartParams(acc.result.ThreadID, req.RepoPath, req.Prompt, mode.turnSandboxPolicy),
 	}); err != nil {
 		return acc.fail("turn_send", err.Error(), stderrBuf.String())
 	}
 
 	turnMsg, err := waitForResponse(ctx, stream, turnRequestID, &acc, stderrBuf)
 	if err != nil {
-		return acc.fail("turn_wait", err.Error(), stderrBuf.String())
+		return acc.failWaitError("turn_wait", err, stderrBuf.String(), timeout)
 	}
 
 	var turnResponse turnStartResponse
@@ -369,7 +388,7 @@ func (c Client) Probe(ctx context.Context, req executor.ProbeRequest) (executor.
 	for !acc.turnFinished() {
 		msg, err := nextMessage(ctx, stream)
 		if err != nil {
-			return acc.fail("turn_stream", err.Error(), stderrBuf.String())
+			return acc.failWaitError("turn_stream", err, stderrBuf.String(), timeout)
 		}
 
 		if err := acc.observe(msg); err != nil {
@@ -402,16 +421,36 @@ func (c Client) Probe(ctx context.Context, req executor.ProbeRequest) (executor.
 	}
 }
 
-func buildThreadStartParams(repoPath string) map[string]any {
+func (c Client) turnTimeout(mode turnMode) time.Duration {
+	if c.Timeout > 0 {
+		return c.Timeout
+	}
+	if mode.waitTimeout > 0 {
+		return mode.waitTimeout
+	}
+	return defaultProbeTimeout
+}
+
+func buildThreadStartParams(repoPath string, sandbox string, developerInstructions string) map[string]any {
 	return map[string]any{
 		"cwd":                   repoPath,
 		"approvalPolicy":        "never",
-		"sandbox":               "read-only",
-		"developerInstructions": probeInstructions,
+		"sandbox":               sandbox,
+		"developerInstructions": developerInstructions,
 	}
 }
 
-func buildTurnStartParams(threadID string, repoPath string, prompt string) map[string]any {
+func buildThreadResumeParams(threadID string, repoPath string, sandbox string, developerInstructions string) map[string]any {
+	return map[string]any{
+		"threadId":              threadID,
+		"cwd":                   repoPath,
+		"approvalPolicy":        "never",
+		"sandbox":               sandbox,
+		"developerInstructions": developerInstructions,
+	}
+}
+
+func buildTurnStartParams(threadID string, repoPath string, prompt string, sandboxPolicy map[string]any) map[string]any {
 	return map[string]any{
 		"threadId":       threadID,
 		"cwd":            repoPath,
@@ -422,11 +461,23 @@ func buildTurnStartParams(threadID string, repoPath string, prompt string) map[s
 				"text": strings.TrimSpace(prompt),
 			},
 		},
-		"sandboxPolicy": map[string]any{
-			"type":          "readOnly",
-			"access":        map[string]any{"type": "fullAccess"},
-			"networkAccess": false,
-		},
+		"sandboxPolicy": sandboxPolicy,
+	}
+}
+
+func readOnlySandboxPolicy() map[string]any {
+	return map[string]any{
+		"type":          "readOnly",
+		"access":        map[string]any{"type": "fullAccess"},
+		"networkAccess": false,
+	}
+}
+
+func workspaceWriteSandboxPolicy() map[string]any {
+	return map[string]any{
+		"type":           "workspaceWrite",
+		"networkAccess":  false,
+		"readOnlyAccess": map[string]any{"type": "fullAccess"},
 	}
 }
 
@@ -643,7 +694,46 @@ func (a *probeAccumulator) fail(stage string, message string, detail string) (ex
 	}
 	if a.result.TurnStatus == "" {
 		a.result.TurnStatus = executor.TurnStatusPending
+	} else if a.result.TurnStatus == executor.TurnStatusInProgress {
+		a.result.TurnStatus = executor.TurnStatusFailed
 	}
+	return a.result, errors.New(message)
+}
+
+func (a *probeAccumulator) failWaitError(stage string, err error, detail string, timeout time.Duration) (executor.ProbeResult, error) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return a.failWithStatus(
+			timeoutFailureStage(stage),
+			timeoutFailureMessage(stage, timeout, a.result.TurnID != ""),
+			mergeFailureDetail(detail, err),
+			executor.TurnStatusFailed,
+		)
+	case errors.Is(err, context.Canceled):
+		return a.failWithStatus(
+			cancelFailureStage(stage),
+			"executor app-server wait was canceled",
+			mergeFailureDetail(detail, err),
+			executor.TurnStatusInterrupted,
+		)
+	default:
+		return a.fail(stage, err.Error(), detail)
+	}
+}
+
+func (a *probeAccumulator) failWithStatus(stage string, message string, detail string, status executor.TurnStatus) (executor.ProbeResult, error) {
+	a.result.Error = &executor.Failure{
+		Stage:   stage,
+		Message: message,
+		Detail:  strings.TrimSpace(detail),
+	}
+
+	switch a.result.TurnStatus {
+	case executor.TurnStatusCompleted, executor.TurnStatusFailed, executor.TurnStatusInterrupted:
+	default:
+		a.result.TurnStatus = status
+	}
+
 	return a.result, errors.New(message)
 }
 
@@ -660,6 +750,38 @@ func normalizeTurnStatus(status string) executor.TurnStatus {
 	default:
 		return executor.TurnStatusPending
 	}
+}
+
+func timeoutFailureStage(stage string) string {
+	if strings.HasPrefix(stage, "turn_") {
+		return "turn_timeout"
+	}
+	return stage + "_timeout"
+}
+
+func cancelFailureStage(stage string) string {
+	if strings.HasPrefix(stage, "turn_") {
+		return "turn_canceled"
+	}
+	return stage + "_canceled"
+}
+
+func timeoutFailureMessage(stage string, timeout time.Duration, turnStarted bool) string {
+	if turnStarted || strings.HasPrefix(stage, "turn_") {
+		return fmt.Sprintf("executor turn exceeded app-server wait deadline (%s)", timeout)
+	}
+	return fmt.Sprintf("executor app-server request exceeded wait deadline (%s)", timeout)
+}
+
+func mergeFailureDetail(detail string, err error) string {
+	pieces := make([]string, 0, 2)
+	if trimmed := strings.TrimSpace(detail); trimmed != "" {
+		pieces = append(pieces, trimmed)
+	}
+	if err != nil {
+		pieces = append(pieces, err.Error())
+	}
+	return strings.Join(pieces, " | ")
 }
 
 func (c Client) clientName() string {

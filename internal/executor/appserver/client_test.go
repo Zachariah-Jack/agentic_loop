@@ -1,6 +1,7 @@
 package appserver
 
 import (
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"runtime"
@@ -28,7 +29,7 @@ func TestDeriveCodexJSPath(t *testing.T) {
 func TestBuildThreadStartParams(t *testing.T) {
 	t.Parallel()
 
-	params := buildThreadStartParams(`D:\repo`)
+	params := buildThreadStartParams(`D:\repo`, "read-only", probeInstructions)
 	if params["cwd"] != `D:\repo` {
 		t.Fatalf("cwd = %v, want repo path", params["cwd"])
 	}
@@ -45,10 +46,24 @@ func TestBuildThreadStartParams(t *testing.T) {
 	}
 }
 
+func TestBuildThreadStartParamsWorkspaceWrite(t *testing.T) {
+	t.Parallel()
+
+	params := buildThreadStartParams(`D:\repo`, "workspace-write", executeInstructions)
+	if params["sandbox"] != "workspace-write" {
+		t.Fatalf("sandbox = %v, want workspace-write", params["sandbox"])
+	}
+
+	instructions, _ := params["developerInstructions"].(string)
+	if !strings.Contains(strings.ToLower(instructions), "primary executor") {
+		t.Fatalf("developerInstructions should mention primary executor behavior, got %q", instructions)
+	}
+}
+
 func TestBuildTurnStartParams(t *testing.T) {
 	t.Parallel()
 
-	params := buildTurnStartParams("thr_123", `D:\repo`, "Reply with ok.")
+	params := buildTurnStartParams("thr_123", `D:\repo`, "Reply with ok.", readOnlySandboxPolicy())
 	if params["threadId"] != "thr_123" {
 		t.Fatalf("threadId = %v, want thr_123", params["threadId"])
 	}
@@ -67,6 +82,22 @@ func TestBuildTurnStartParams(t *testing.T) {
 	}
 	if sandbox["type"] != "readOnly" {
 		t.Fatalf("sandboxPolicy.type = %v, want readOnly", sandbox["type"])
+	}
+}
+
+func TestBuildTurnStartParamsWorkspaceWrite(t *testing.T) {
+	t.Parallel()
+
+	params := buildTurnStartParams("thr_123", `D:\repo`, "Implement the bounded slice.", workspaceWriteSandboxPolicy())
+	sandbox, ok := params["sandboxPolicy"].(map[string]any)
+	if !ok {
+		t.Fatalf("sandboxPolicy = %#v, want map", params["sandboxPolicy"])
+	}
+	if sandbox["type"] != "workspaceWrite" {
+		t.Fatalf("sandboxPolicy.type = %v, want workspaceWrite", sandbox["type"])
+	}
+	if sandbox["networkAccess"] != false {
+		t.Fatalf("sandboxPolicy.networkAccess = %v, want false", sandbox["networkAccess"])
 	}
 }
 
@@ -118,5 +149,48 @@ func TestProbeAccumulatorObserve(t *testing.T) {
 	}
 	if acc.result.CompletedAt.IsZero() {
 		t.Fatal("CompletedAt should be set")
+	}
+}
+
+func TestTurnTimeoutUsesExecuteDefault(t *testing.T) {
+	t.Parallel()
+
+	client := Client{}
+	timeout := client.turnTimeout(turnMode{waitTimeout: defaultExecuteTimeout})
+	if timeout != defaultExecuteTimeout {
+		t.Fatalf("turnTimeout() = %s, want %s", timeout, defaultExecuteTimeout)
+	}
+}
+
+func TestFailWaitErrorDeadlineExceededMarksTurnFailed(t *testing.T) {
+	t.Parallel()
+
+	acc := &probeAccumulator{
+		result: executor.ProbeResult{
+			Transport:  executor.TransportAppServer,
+			RunID:      "run_123",
+			TurnID:     "turn_123",
+			TurnStatus: executor.TurnStatusInProgress,
+		},
+	}
+
+	result, err := acc.failWaitError("turn_stream", context.DeadlineExceeded, "", defaultExecuteTimeout)
+	if err == nil {
+		t.Fatal("failWaitError() error = nil, want error")
+	}
+	if result.TurnStatus != executor.TurnStatusFailed {
+		t.Fatalf("TurnStatus = %q, want failed", result.TurnStatus)
+	}
+	if result.Error == nil {
+		t.Fatal("Error = nil, want structured failure")
+	}
+	if result.Error.Stage != "turn_timeout" {
+		t.Fatalf("Error.Stage = %q, want turn_timeout", result.Error.Stage)
+	}
+	if !strings.Contains(result.Error.Message, "executor turn exceeded app-server wait deadline") {
+		t.Fatalf("Error.Message = %q", result.Error.Message)
+	}
+	if !strings.Contains(result.Error.Detail, "context deadline exceeded") {
+		t.Fatalf("Error.Detail = %q", result.Error.Detail)
 	}
 }

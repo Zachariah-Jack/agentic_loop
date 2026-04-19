@@ -72,12 +72,15 @@ func runExecutorProbe(ctx context.Context, inv Invocation) error {
 	})
 
 	executorState := state.ExecutorState{
-		Transport:  string(result.Transport),
-		ThreadID:   result.ThreadID,
-		ThreadPath: result.ThreadPath,
-		TurnID:     result.TurnID,
-		TurnStatus: string(result.TurnStatus),
-		LastError:  executorFailureMessage(result),
+		Transport:        string(result.Transport),
+		ThreadID:         result.ThreadID,
+		ThreadPath:       result.ThreadPath,
+		TurnID:           result.TurnID,
+		TurnStatus:       string(result.TurnStatus),
+		LastSuccess:      executorProbeSuccess(result),
+		LastFailureStage: executorProbeFailureStage(result),
+		LastError:        executorFailureMessage(result),
+		LastMessage:      result.FinalMessage,
 	}
 
 	var checkpoint *state.Checkpoint
@@ -310,4 +313,20 @@ func checkpointLabel(checkpoint *state.Checkpoint) string {
 		return ""
 	}
 	return checkpoint.Label
+}
+
+func executorProbeSuccess(result executor.ProbeResult) *bool {
+	if result.CompletedAt.IsZero() {
+		return nil
+	}
+
+	success := result.TurnStatus == executor.TurnStatusCompleted
+	return &success
+}
+
+func executorProbeFailureStage(result executor.ProbeResult) string {
+	if result.Error == nil {
+		return ""
+	}
+	return strings.TrimSpace(result.Error.Stage)
 }
