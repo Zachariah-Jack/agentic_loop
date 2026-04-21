@@ -53,7 +53,7 @@ func ValidateInput(input InputEnvelope) error {
 		if reply.ReceivedAt.IsZero() {
 			issues = append(issues, prefix+".received_at is required")
 		}
-		if strings.TrimSpace(reply.Payload) == "" {
+		if reply.Payload == "" {
 			issues = append(issues, prefix+".payload is required")
 		}
 	}
@@ -72,6 +72,149 @@ func ValidateInput(input InputEnvelope) error {
 			case "file", "dir", "missing":
 			default:
 				issues = append(issues, prefix+".kind must be file, dir, or missing")
+			}
+		}
+	}
+
+	if input.DriftReview != nil {
+		if strings.TrimSpace(input.DriftReview.Reviewer) == "" {
+			issues = append(issues, "drift_review.reviewer is required")
+		}
+		for i, concern := range input.DriftReview.Concerns {
+			if strings.TrimSpace(concern) == "" {
+				issues = append(issues, fmt.Sprintf("drift_review.concerns[%d] must be non-empty when set", i))
+			}
+		}
+		for i, item := range input.DriftReview.MissingContext {
+			if strings.TrimSpace(item) == "" {
+				issues = append(issues, fmt.Sprintf("drift_review.missing_context[%d] must be non-empty when set", i))
+			}
+		}
+		for i, item := range input.DriftReview.RecommendedPlannerAdjustments {
+			if strings.TrimSpace(item) == "" {
+				issues = append(issues, fmt.Sprintf("drift_review.recommended_planner_adjustments[%d] must be non-empty when set", i))
+			}
+		}
+		for i, path := range input.DriftReview.EvidencePaths {
+			if strings.TrimSpace(path) == "" {
+				issues = append(issues, fmt.Sprintf("drift_review.evidence_paths[%d] must be non-empty when set", i))
+			}
+		}
+	}
+
+	for i, tool := range input.PluginTools {
+		prefix := fmt.Sprintf("plugin_tools[%d]", i)
+		if strings.TrimSpace(tool.Name) == "" {
+			issues = append(issues, prefix+".name is required")
+		}
+		if strings.TrimSpace(tool.Description) == "" {
+			issues = append(issues, prefix+".description is required")
+		}
+	}
+
+	if input.CollectedContext != nil {
+		for i, result := range input.CollectedContext.ToolResults {
+			prefix := fmt.Sprintf("collected_context.tool_results[%d]", i)
+			if strings.TrimSpace(result.Tool) == "" {
+				issues = append(issues, prefix+".tool is required")
+			}
+		}
+		for i, result := range input.CollectedContext.WorkerResults {
+			prefix := fmt.Sprintf("collected_context.worker_results[%d]", i)
+			if !isKnownWorkerActionKind(result.Action) {
+				issues = append(issues, prefix+".action must be create, dispatch, list, remove, integrate, or apply")
+			}
+			if result.Worker != nil {
+				if strings.TrimSpace(result.Worker.WorkerStatus) == "" {
+					issues = append(issues, prefix+".worker.worker_status is required when worker is set")
+				}
+				if strings.TrimSpace(result.Worker.WorktreePath) == "" {
+					issues = append(issues, prefix+".worker.worktree_path is required when worker is set")
+				}
+			}
+			for listedIdx, worker := range result.ListedWorkers {
+				workerPrefix := fmt.Sprintf("%s.listed_workers[%d]", prefix, listedIdx)
+				if strings.TrimSpace(worker.WorkerStatus) == "" {
+					issues = append(issues, workerPrefix+".worker_status is required")
+				}
+				if strings.TrimSpace(worker.WorktreePath) == "" {
+					issues = append(issues, workerPrefix+".worktree_path is required")
+				}
+			}
+			if result.Integration != nil {
+				for workerIdx, worker := range result.Integration.Workers {
+					workerPrefix := fmt.Sprintf("%s.integration.workers[%d]", prefix, workerIdx)
+					if strings.TrimSpace(worker.WorkerID) == "" {
+						issues = append(issues, workerPrefix+".worker_id is required")
+					}
+					if strings.TrimSpace(worker.WorktreePath) == "" {
+						issues = append(issues, workerPrefix+".worktree_path is required")
+					}
+				}
+				for conflictIdx, candidate := range result.Integration.ConflictCandidates {
+					conflictPrefix := fmt.Sprintf("%s.integration.conflict_candidates[%d]", prefix, conflictIdx)
+					if strings.TrimSpace(candidate.Path) == "" {
+						issues = append(issues, conflictPrefix+".path is required")
+					}
+					if strings.TrimSpace(candidate.Reason) == "" {
+						issues = append(issues, conflictPrefix+".reason is required")
+					}
+				}
+			}
+			if result.Apply != nil {
+				if strings.TrimSpace(result.Apply.Status) == "" {
+					issues = append(issues, prefix+".apply.status is required")
+				}
+				if strings.TrimSpace(result.Apply.SourceArtifactPath) == "" {
+					issues = append(issues, prefix+".apply.source_artifact_path is required")
+				}
+				if !isKnownWorkerApplyMode(result.Apply.ApplyMode) {
+					issues = append(issues, prefix+".apply.apply_mode must be abort_if_conflicts or apply_non_conflicting")
+				}
+				for appliedIdx, item := range result.Apply.FilesApplied {
+					appliedPrefix := fmt.Sprintf("%s.apply.files_applied[%d]", prefix, appliedIdx)
+					if strings.TrimSpace(item.Path) == "" {
+						issues = append(issues, appliedPrefix+".path is required")
+					}
+					if strings.TrimSpace(item.ChangeKind) == "" {
+						issues = append(issues, appliedPrefix+".change_kind is required")
+					}
+				}
+				for skippedIdx, item := range result.Apply.FilesSkipped {
+					skippedPrefix := fmt.Sprintf("%s.apply.files_skipped[%d]", prefix, skippedIdx)
+					if strings.TrimSpace(item.Path) == "" {
+						issues = append(issues, skippedPrefix+".path is required")
+					}
+					if strings.TrimSpace(item.ChangeKind) == "" {
+						issues = append(issues, skippedPrefix+".change_kind is required")
+					}
+					if strings.TrimSpace(item.Reason) == "" {
+						issues = append(issues, skippedPrefix+".reason is required")
+					}
+				}
+			}
+		}
+		if input.CollectedContext.WorkerPlan != nil {
+			if strings.TrimSpace(input.CollectedContext.WorkerPlan.Status) == "" {
+				issues = append(issues, "collected_context.worker_plan.status is required")
+			}
+			if !isKnownWorkerPlanApplyMode(input.CollectedContext.WorkerPlan.ApplyMode) {
+				issues = append(issues, "collected_context.worker_plan.apply_mode must be abort_if_conflicts, apply_non_conflicting, or unavailable")
+			}
+			if input.CollectedContext.WorkerPlan.Apply != nil && strings.TrimSpace(input.CollectedContext.WorkerPlan.ApplyArtifactPath) == "" {
+				issues = append(issues, "collected_context.worker_plan.apply_artifact_path is required when worker_plan.apply is set")
+			}
+			for i, worker := range input.CollectedContext.WorkerPlan.Workers {
+				prefix := fmt.Sprintf("collected_context.worker_plan.workers[%d]", i)
+				if strings.TrimSpace(worker.WorkerID) == "" {
+					issues = append(issues, prefix+".worker_id is required")
+				}
+				if strings.TrimSpace(worker.WorkerStatus) == "" {
+					issues = append(issues, prefix+".worker_status is required")
+				}
+				if strings.TrimSpace(worker.WorktreePath) == "" {
+					issues = append(issues, prefix+".worktree_path is required")
+				}
 			}
 		}
 	}
@@ -144,8 +287,86 @@ func ValidateOutput(output OutputEnvelope) error {
 		if strings.TrimSpace(output.CollectContext.Focus) == "" {
 			issues = append(issues, "collect_context.focus is required")
 		}
-		if len(nonEmpty(output.CollectContext.Questions)) == 0 && len(nonEmpty(output.CollectContext.Paths)) == 0 {
-			issues = append(issues, "collect_context must include at least one non-empty question or path")
+		if len(nonEmpty(output.CollectContext.Questions)) == 0 &&
+			len(nonEmpty(output.CollectContext.Paths)) == 0 &&
+			len(nonEmptyToolCalls(output.CollectContext.ToolCalls)) == 0 &&
+			len(nonEmptyWorkerActions(output.CollectContext.WorkerActions)) == 0 &&
+			output.CollectContext.WorkerPlan == nil {
+			issues = append(issues, "collect_context must include at least one non-empty question, path, tool_call, worker_action, or worker_plan")
+		}
+		for i, call := range output.CollectContext.ToolCalls {
+			if strings.TrimSpace(call.Tool) == "" {
+				issues = append(issues, fmt.Sprintf("collect_context.tool_calls[%d].tool is required", i))
+			}
+		}
+		for i, action := range output.CollectContext.WorkerActions {
+			prefix := fmt.Sprintf("collect_context.worker_actions[%d]", i)
+			if !isKnownWorkerActionKind(action.Action) {
+				issues = append(issues, prefix+".action must be create, dispatch, list, remove, integrate, or apply")
+				continue
+			}
+			switch action.Action {
+			case WorkerActionCreate:
+				if strings.TrimSpace(action.WorkerName) == "" {
+					issues = append(issues, prefix+".worker_name is required for create")
+				}
+				if strings.TrimSpace(action.Scope) == "" {
+					issues = append(issues, prefix+".scope is required for create")
+				}
+			case WorkerActionDispatch:
+				if strings.TrimSpace(action.WorkerID) == "" && strings.TrimSpace(action.WorkerName) == "" {
+					issues = append(issues, prefix+".worker_id or worker_name is required for dispatch")
+				}
+				if strings.TrimSpace(action.TaskSummary) == "" {
+					issues = append(issues, prefix+".task_summary is required for dispatch")
+				}
+				if strings.TrimSpace(action.ExecutorPrompt) == "" {
+					issues = append(issues, prefix+".executor_prompt is required for dispatch")
+				}
+			case WorkerActionRemove:
+				if strings.TrimSpace(action.WorkerID) == "" && strings.TrimSpace(action.WorkerName) == "" {
+					issues = append(issues, prefix+".worker_id or worker_name is required for remove")
+				}
+			case WorkerActionList:
+			case WorkerActionIntegrate:
+				if len(nonEmpty(action.WorkerIDs)) == 0 {
+					issues = append(issues, prefix+".worker_ids must contain at least one worker id for integrate")
+				}
+			case WorkerActionApply:
+				if !isKnownWorkerApplyMode(action.ApplyMode) {
+					issues = append(issues, prefix+".apply_mode must be abort_if_conflicts or apply_non_conflicting for apply")
+				}
+				if strings.TrimSpace(action.ArtifactPath) == "" && len(nonEmpty(action.WorkerIDs)) == 0 {
+					issues = append(issues, prefix+".artifact_path or worker_ids is required for apply")
+				}
+			}
+		}
+		if output.CollectContext.WorkerPlan != nil {
+			if len(output.CollectContext.WorkerPlan.Workers) == 0 {
+				issues = append(issues, "collect_context.worker_plan.workers must contain at least one worker")
+			}
+			if !isKnownWorkerPlanApplyMode(output.CollectContext.WorkerPlan.ApplyMode) {
+				issues = append(issues, "collect_context.worker_plan.apply_mode must be abort_if_conflicts, apply_non_conflicting, or unavailable")
+			}
+			if strings.TrimSpace(output.CollectContext.WorkerPlan.ApplyMode) != string(WorkerApplyModeUnavailable) &&
+				!output.CollectContext.WorkerPlan.IntegrationRequested {
+				issues = append(issues, "collect_context.worker_plan.integration_requested must be true when apply_mode is not unavailable")
+			}
+			for i, worker := range output.CollectContext.WorkerPlan.Workers {
+				prefix := fmt.Sprintf("collect_context.worker_plan.workers[%d]", i)
+				if strings.TrimSpace(worker.Name) == "" {
+					issues = append(issues, prefix+".name is required")
+				}
+				if strings.TrimSpace(worker.Scope) == "" {
+					issues = append(issues, prefix+".scope is required")
+				}
+				if strings.TrimSpace(worker.TaskSummary) == "" {
+					issues = append(issues, prefix+".task_summary is required")
+				}
+				if strings.TrimSpace(worker.ExecutorPrompt) == "" {
+					issues = append(issues, prefix+".executor_prompt is required")
+				}
+			}
 		}
 		if output.Execute != nil || output.AskHuman != nil || output.Pause != nil || output.Complete != nil {
 			issues = append(issues, "only collect_context payload may be set when outcome=collect_context")
@@ -261,4 +482,55 @@ func nonEmpty(items []string) []string {
 		}
 	}
 	return out
+}
+
+func nonEmptyToolCalls(calls []PluginToolCall) []PluginToolCall {
+	out := make([]PluginToolCall, 0, len(calls))
+	for _, call := range calls {
+		if strings.TrimSpace(call.Tool) == "" {
+			continue
+		}
+		out = append(out, call)
+	}
+	return out
+}
+
+func nonEmptyWorkerActions(actions []WorkerAction) []WorkerAction {
+	out := make([]WorkerAction, 0, len(actions))
+	for _, action := range actions {
+		if !isKnownWorkerActionKind(action.Action) {
+			continue
+		}
+		out = append(out, action)
+	}
+	return out
+}
+
+func isKnownWorkerActionKind(kind WorkerActionKind) bool {
+	switch kind {
+	case WorkerActionCreate, WorkerActionDispatch, WorkerActionList, WorkerActionRemove:
+		return true
+	case WorkerActionIntegrate, WorkerActionApply:
+		return true
+	default:
+		return false
+	}
+}
+
+func isKnownWorkerApplyMode(mode string) bool {
+	switch WorkerApplyMode(strings.TrimSpace(mode)) {
+	case WorkerApplyModeAbortIfConflicts, WorkerApplyModeNonConflicting:
+		return true
+	default:
+		return false
+	}
+}
+
+func isKnownWorkerPlanApplyMode(mode string) bool {
+	switch WorkerApplyMode(strings.TrimSpace(mode)) {
+	case WorkerApplyModeAbortIfConflicts, WorkerApplyModeNonConflicting, WorkerApplyModeUnavailable:
+		return true
+	default:
+		return false
+	}
 }

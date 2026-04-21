@@ -12,14 +12,16 @@ import (
 func newResumeCommand() Command {
 	return Command{
 		Name:    "resume",
-		Summary: "Continue the latest unfinished run for one bounded cycle.",
+		Summary: "Execute one bounded cycle on the latest unfinished run.",
 		Description: stringsJoin(
 			"Usage:",
 			"  orchestrator resume",
 			"",
-			"Loads the latest unfinished run from persisted state, performs one bounded",
-			"planner-led continuation cycle on that existing run, persists the result,",
-			"and stops again at the next safe pause point.",
+			"Requires the target repo contract scaffold created by `orchestrator init`.",
+			"",
+			"Loads the latest unfinished run from persisted state, executes one",
+			"bounded continuation cycle on that existing run, persists the result,",
+			"and stops again at the next durable cycle boundary.",
 		),
 		Run: runResume,
 	}
@@ -34,6 +36,9 @@ func runResume(ctx context.Context, inv Invocation) error {
 			return nil
 		}
 		return err
+	}
+	if contract := inspectTargetRepoContract(inv.RepoRoot); !contract.Ready {
+		return writeMissingRepoContractReport(inv.Stdout, "resume", inv.RepoRoot, "", contract)
 	}
 
 	if !pathExists(inv.Layout.DBPath) {

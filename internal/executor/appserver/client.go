@@ -76,14 +76,26 @@ type threadStartResponse struct {
 }
 
 type threadResumeResponse struct {
-	Thread        threadRef `json:"thread"`
-	Model         string    `json:"model"`
-	ModelProvider string    `json:"modelProvider"`
+	Thread        threadState `json:"thread"`
+	Model         string      `json:"model"`
+	ModelProvider string      `json:"modelProvider"`
 }
 
 type threadRef struct {
 	ID   string `json:"id"`
 	Path string `json:"path"`
+}
+
+type threadState struct {
+	ID     string       `json:"id"`
+	Path   string       `json:"path"`
+	Status threadStatus `json:"status"`
+	Turns  []turnRef    `json:"turns"`
+}
+
+type threadStatus struct {
+	Type        string   `json:"type"`
+	ActiveFlags []string `json:"activeFlags"`
 }
 
 type turnStartResponse struct {
@@ -142,6 +154,36 @@ type errorNotificationParams struct {
 	WillRetry bool      `json:"willRetry"`
 }
 
+type threadStatusChangedParams struct {
+	ThreadID string       `json:"threadId"`
+	Status   threadStatus `json:"status"`
+}
+
+type commandExecutionApprovalParams struct {
+	ThreadID   string `json:"threadId"`
+	TurnID     string `json:"turnId"`
+	ItemID     string `json:"itemId"`
+	ApprovalID string `json:"approvalId"`
+	Command    string `json:"command"`
+	CWD        string `json:"cwd"`
+	Reason     string `json:"reason"`
+}
+
+type fileChangeApprovalParams struct {
+	ThreadID  string `json:"threadId"`
+	TurnID    string `json:"turnId"`
+	ItemID    string `json:"itemId"`
+	GrantRoot string `json:"grantRoot"`
+	Reason    string `json:"reason"`
+}
+
+type permissionsApprovalParams struct {
+	ThreadID string `json:"threadId"`
+	TurnID   string `json:"turnId"`
+	ItemID   string `json:"itemId"`
+	Reason   string `json:"reason"`
+}
+
 type probeAccumulator struct {
 	result    executor.ProbeResult
 	deltaText strings.Builder
@@ -151,6 +193,7 @@ type turnMode struct {
 	threadSandbox      string
 	threadInstructions string
 	turnSandboxPolicy  map[string]any
+	approvalPolicy     string
 	waitTimeout        time.Duration
 }
 
@@ -212,6 +255,7 @@ func (c Client) Probe(ctx context.Context, req executor.ProbeRequest) (executor.
 		threadSandbox:      "read-only",
 		threadInstructions: probeInstructions,
 		turnSandboxPolicy:  readOnlySandboxPolicy(),
+		approvalPolicy:     "never",
 		waitTimeout:        defaultProbeTimeout,
 	})
 }
@@ -221,18 +265,21 @@ func (c Client) Execute(ctx context.Context, req executor.TurnRequest) (executor
 		threadSandbox:      "workspace-write",
 		threadInstructions: executeInstructions,
 		turnSandboxPolicy:  workspaceWriteSandboxPolicy(),
+		approvalPolicy:     "on-request",
 		waitTimeout:        defaultExecuteTimeout,
 	})
 }
 
 func (c Client) runTurn(ctx context.Context, req executor.TurnRequest, mode turnMode) (executor.TurnResult, error) {
+	continueTurn := req.Continue && strings.TrimSpace(req.TurnID) != ""
+
 	if strings.TrimSpace(req.RunID) == "" {
 		return executor.TurnResult{}, errors.New("run id is required")
 	}
 	if strings.TrimSpace(req.RepoPath) == "" {
 		return executor.TurnResult{}, errors.New("repo path is required")
 	}
-	if strings.TrimSpace(req.Prompt) == "" {
+	if !continueTurn && strings.TrimSpace(req.Prompt) == "" {
 		return executor.TurnResult{}, errors.New("prompt is required")
 	}
 	if strings.TrimSpace(c.LaunchPlan.Command) == "" {
@@ -281,6 +328,7 @@ func (c Client) runTurn(ctx context.Context, req executor.TurnRequest, mode turn
 			RunID:      req.RunID,
 			ThreadID:   strings.TrimSpace(req.ThreadID),
 			ThreadPath: strings.TrimSpace(req.ThreadPath),
+			TurnID:     strings.TrimSpace(req.TurnID),
 		},
 	}
 
@@ -301,7 +349,7 @@ func (c Client) runTurn(ctx context.Context, req executor.TurnRequest, mode turn
 		return acc.fail("initialize_send", err.Error(), stderrBuf.String())
 	}
 
-	initMsg, err := waitForResponse(ctx, stream, initializeRequestID, &acc, stderrBuf)
+	initMsg, err := waitForResponse(ctx, stream, initializeRequestID, &acc, stderrBuf, nil)
 	if err != nil {
 		return acc.failWaitError("initialize_wait", err, stderrBuf.String(), timeout)
 	}
@@ -318,10 +366,10 @@ func (c Client) runTurn(ctx context.Context, req executor.TurnRequest, mode turn
 	}
 
 	threadMethod := "thread/start"
-	threadParams := buildThreadStartParams(req.RepoPath, mode.threadSandbox, mode.threadInstructions)
+	threadParams := buildThreadStartParams(req.RepoPath, mode.threadSandbox, mode.threadInstructions, mode.approvalPolicy)
 	if acc.result.ThreadID != "" {
 		threadMethod = "thread/resume"
-		threadParams = buildThreadResumeParams(acc.result.ThreadID, req.RepoPath, mode.threadSandbox, mode.threadInstructions)
+		threadParams = buildThreadResumeParams(acc.result.ThreadID, req.RepoPath, mode.threadSandbox, mode.threadInstructions, mode.approvalPolicy)
 		acc.result.ResumedThread = true
 	}
 
@@ -333,7 +381,7 @@ func (c Client) runTurn(ctx context.Context, req executor.TurnRequest, mode turn
 		return acc.fail("thread_send", err.Error(), stderrBuf.String())
 	}
 
-	threadMsg, err := waitForResponse(ctx, stream, threadRequestID, &acc, stderrBuf)
+	threadMsg, err := waitForResponse(ctx, stream, threadRequestID, &acc, stderrBuf, acc.handleServerRequest)
 	if err != nil {
 		return acc.failWaitError("thread_wait", err, stderrBuf.String(), timeout)
 	}
@@ -356,44 +404,75 @@ func (c Client) runTurn(ctx context.Context, req executor.TurnRequest, mode turn
 		acc.result.ThreadPath = response.Thread.Path
 		acc.result.Model = response.Model
 		acc.result.ModelProvider = response.ModelProvider
+		if continueTurn {
+			acc.resumeExistingTurn(response.Thread, strings.TrimSpace(req.TurnID))
+		}
 	}
 
 	if acc.result.ThreadID == "" {
 		return acc.fail("thread_parse", "app-server did not return a thread id", stderrBuf.String())
 	}
-
-	if err := sendMessage(sender, map[string]any{
-		"method": "turn/start",
-		"id":     turnRequestID,
-		"params": buildTurnStartParams(acc.result.ThreadID, req.RepoPath, req.Prompt, mode.turnSandboxPolicy),
-	}); err != nil {
-		return acc.fail("turn_send", err.Error(), stderrBuf.String())
+	if continueTurn && acc.result.TurnID == "" {
+		acc.result.TurnID = strings.TrimSpace(req.TurnID)
+	}
+	if continueTurn && acc.result.TurnStatus == "" {
+		acc.result.TurnStatus = executor.TurnStatusInProgress
+	}
+	if continueTurn {
+		acc.result.Interruptible = true
+		acc.result.Steerable = true
 	}
 
-	turnMsg, err := waitForResponse(ctx, stream, turnRequestID, &acc, stderrBuf)
-	if err != nil {
-		return acc.failWaitError("turn_wait", err, stderrBuf.String(), timeout)
+	if !continueTurn {
+		if err := sendMessage(sender, map[string]any{
+			"method": "turn/start",
+			"id":     turnRequestID,
+			"params": buildTurnStartParams(acc.result.ThreadID, req.RepoPath, req.Prompt, mode.turnSandboxPolicy, mode.approvalPolicy),
+		}); err != nil {
+			return acc.fail("turn_send", err.Error(), stderrBuf.String())
+		}
+
+		turnMsg, err := waitForResponse(ctx, stream, turnRequestID, &acc, stderrBuf, acc.handleServerRequest)
+		if err != nil {
+			return acc.failWaitError("turn_wait", err, stderrBuf.String(), timeout)
+		}
+
+		var turnResponse turnStartResponse
+		if err := parseResponse(turnMsg, &turnResponse); err != nil {
+			return acc.fail("turn_parse", err.Error(), stderrBuf.String())
+		}
+		acc.result.TurnID = turnResponse.Turn.ID
+		acc.result.TurnStatus = normalizeTurnStatus(turnResponse.Turn.Status)
+		acc.result.Interruptible = true
+		acc.result.Steerable = true
+		if acc.result.StartedAt.IsZero() {
+			acc.result.StartedAt = time.Now().UTC()
+		}
 	}
 
-	var turnResponse turnStartResponse
-	if err := parseResponse(turnMsg, &turnResponse); err != nil {
-		return acc.fail("turn_parse", err.Error(), stderrBuf.String())
-	}
-	acc.result.TurnID = turnResponse.Turn.ID
-	acc.result.TurnStatus = normalizeTurnStatus(turnResponse.Turn.Status)
-	if acc.result.StartedAt.IsZero() {
-		acc.result.StartedAt = time.Now().UTC()
-	}
-
-	for !acc.turnFinished() {
+	for !acc.turnFinished() && !acc.approvalRequired() {
 		msg, err := nextMessage(ctx, stream)
 		if err != nil {
 			return acc.failWaitError("turn_stream", err, stderrBuf.String(), timeout)
 		}
 
+		if msg.isServerRequest() {
+			if err := acc.handleServerRequest(msg); err != nil {
+				return acc.fail("turn_stream", err.Error(), stderrBuf.String())
+			}
+			continue
+		}
+
 		if err := acc.observe(msg); err != nil {
 			return acc.fail("turn_stream", err.Error(), stderrBuf.String())
 		}
+	}
+
+	if acc.approvalRequired() {
+		if acc.result.FinalMessage == "" {
+			acc.result.FinalMessage = strings.TrimSpace(acc.deltaText.String())
+		}
+		return acc.result, nil
 	}
 
 	if acc.result.FinalMessage == "" {
@@ -431,30 +510,30 @@ func (c Client) turnTimeout(mode turnMode) time.Duration {
 	return defaultProbeTimeout
 }
 
-func buildThreadStartParams(repoPath string, sandbox string, developerInstructions string) map[string]any {
+func buildThreadStartParams(repoPath string, sandbox string, developerInstructions string, approvalPolicy string) map[string]any {
 	return map[string]any{
 		"cwd":                   repoPath,
-		"approvalPolicy":        "never",
+		"approvalPolicy":        approvalPolicy,
 		"sandbox":               sandbox,
 		"developerInstructions": developerInstructions,
 	}
 }
 
-func buildThreadResumeParams(threadID string, repoPath string, sandbox string, developerInstructions string) map[string]any {
+func buildThreadResumeParams(threadID string, repoPath string, sandbox string, developerInstructions string, approvalPolicy string) map[string]any {
 	return map[string]any{
 		"threadId":              threadID,
 		"cwd":                   repoPath,
-		"approvalPolicy":        "never",
+		"approvalPolicy":        approvalPolicy,
 		"sandbox":               sandbox,
 		"developerInstructions": developerInstructions,
 	}
 }
 
-func buildTurnStartParams(threadID string, repoPath string, prompt string, sandboxPolicy map[string]any) map[string]any {
+func buildTurnStartParams(threadID string, repoPath string, prompt string, sandboxPolicy map[string]any, approvalPolicy string) map[string]any {
 	return map[string]any{
 		"threadId":       threadID,
 		"cwd":            repoPath,
-		"approvalPolicy": "never",
+		"approvalPolicy": approvalPolicy,
 		"input": []map[string]any{
 			{
 				"type": "text",
@@ -485,7 +564,14 @@ func sendMessage(encoder *json.Encoder, payload map[string]any) error {
 	return encoder.Encode(payload)
 }
 
-func waitForResponse(ctx context.Context, stream <-chan streamEvent, responseID string, acc *probeAccumulator, stderrBuf *limitedBuffer) (wireMessage, error) {
+func waitForResponse(
+	ctx context.Context,
+	stream <-chan streamEvent,
+	responseID string,
+	acc *probeAccumulator,
+	stderrBuf *limitedBuffer,
+	serverRequestHandler func(wireMessage) error,
+) (wireMessage, error) {
 	for {
 		msg, err := nextMessage(ctx, stream)
 		if err != nil {
@@ -504,6 +590,12 @@ func waitForResponse(ctx context.Context, stream <-chan streamEvent, responseID 
 		}
 
 		if msg.isServerRequest() {
+			if serverRequestHandler != nil {
+				if err := serverRequestHandler(msg); err != nil {
+					return wireMessage{}, err
+				}
+				continue
+			}
 			return wireMessage{}, fmt.Errorf("unsupported app-server request %q during probe", msg.Method)
 		}
 
@@ -627,8 +719,23 @@ func (a *probeAccumulator) observe(msg wireMessage) error {
 			a.result.TurnID = params.Turn.ID
 		}
 		a.result.TurnStatus = normalizeTurnStatus(params.Turn.Status)
+		a.result.Interruptible = true
+		a.result.Steerable = true
 		if a.result.StartedAt.IsZero() {
 			a.result.StartedAt = time.Now().UTC()
+		}
+	case "thread/status/changed":
+		var params threadStatusChangedParams
+		if err := json.Unmarshal(msg.Params, &params); err != nil {
+			return err
+		}
+		if hasActiveFlag(params.Status.ActiveFlags, "waitingOnApproval") {
+			a.result.TurnStatus = executor.TurnStatusApprovalRequired
+			a.result.Interruptible = true
+			a.result.Steerable = false
+			if a.result.ApprovalState == executor.ApprovalStateNone {
+				a.result.ApprovalState = executor.ApprovalStateRequired
+			}
 		}
 	case "item/agentMessage/delta":
 		var params agentMessageDeltaParams
@@ -652,6 +759,8 @@ func (a *probeAccumulator) observe(msg wireMessage) error {
 		a.result.ThreadID = params.ThreadID
 		a.result.TurnID = params.Turn.ID
 		a.result.TurnStatus = normalizeTurnStatus(params.Turn.Status)
+		a.result.Interruptible = false
+		a.result.Steerable = false
 		a.result.CompletedAt = time.Now().UTC()
 		if params.Turn.Error != nil {
 			a.result.Error = &executor.Failure{
@@ -675,6 +784,108 @@ func (a *probeAccumulator) observe(msg wireMessage) error {
 	}
 
 	return nil
+}
+
+func (a *probeAccumulator) resumeExistingTurn(thread threadState, turnID string) {
+	if len(thread.Turns) == 0 {
+		return
+	}
+
+	for idx := len(thread.Turns) - 1; idx >= 0; idx-- {
+		turn := thread.Turns[idx]
+		if strings.TrimSpace(turnID) != "" && turn.ID != strings.TrimSpace(turnID) {
+			continue
+		}
+		a.result.TurnID = turn.ID
+		a.result.TurnStatus = normalizeTurnStatus(turn.Status)
+		break
+	}
+
+	if a.result.TurnID == "" && strings.TrimSpace(turnID) != "" {
+		a.result.TurnID = strings.TrimSpace(turnID)
+	}
+
+	if hasActiveFlag(thread.Status.ActiveFlags, "waitingOnApproval") {
+		a.result.ApprovalState = executor.ApprovalStateRequired
+		a.result.TurnStatus = executor.TurnStatusApprovalRequired
+		a.result.Interruptible = true
+		a.result.Steerable = false
+	}
+}
+
+func (a *probeAccumulator) handleServerRequest(msg wireMessage) error {
+	switch msg.Method {
+	case "item/commandExecution/requestApproval":
+		var params commandExecutionApprovalParams
+		if err := json.Unmarshal(msg.Params, &params); err != nil {
+			return err
+		}
+		a.result.ThreadID = firstNonEmpty(a.result.ThreadID, params.ThreadID)
+		a.result.TurnID = firstNonEmpty(a.result.TurnID, params.TurnID)
+		a.result.TurnStatus = executor.TurnStatusApprovalRequired
+		a.result.ApprovalState = executor.ApprovalStateRequired
+		a.result.Interruptible = true
+		a.result.Steerable = false
+		a.result.Approval = &executor.ApprovalRequest{
+			RequestID:  msg.responseID(),
+			ApprovalID: strings.TrimSpace(params.ApprovalID),
+			ItemID:     strings.TrimSpace(params.ItemID),
+			State:      executor.ApprovalStateRequired,
+			Kind:       executor.ApprovalKindCommandExecution,
+			Reason:     strings.TrimSpace(params.Reason),
+			Command:    strings.TrimSpace(params.Command),
+			CWD:        strings.TrimSpace(params.CWD),
+			RawParams:  strings.TrimSpace(string(msg.Params)),
+		}
+		return nil
+	case "item/fileChange/requestApproval":
+		var params fileChangeApprovalParams
+		if err := json.Unmarshal(msg.Params, &params); err != nil {
+			return err
+		}
+		a.result.ThreadID = firstNonEmpty(a.result.ThreadID, params.ThreadID)
+		a.result.TurnID = firstNonEmpty(a.result.TurnID, params.TurnID)
+		a.result.TurnStatus = executor.TurnStatusApprovalRequired
+		a.result.ApprovalState = executor.ApprovalStateRequired
+		a.result.Interruptible = true
+		a.result.Steerable = false
+		a.result.Approval = &executor.ApprovalRequest{
+			RequestID: msg.responseID(),
+			ItemID:    strings.TrimSpace(params.ItemID),
+			State:     executor.ApprovalStateRequired,
+			Kind:      executor.ApprovalKindFileChange,
+			Reason:    strings.TrimSpace(params.Reason),
+			GrantRoot: strings.TrimSpace(params.GrantRoot),
+			RawParams: strings.TrimSpace(string(msg.Params)),
+		}
+		return nil
+	case "item/permissions/requestApproval":
+		var params permissionsApprovalParams
+		if err := json.Unmarshal(msg.Params, &params); err != nil {
+			return err
+		}
+		a.result.ThreadID = firstNonEmpty(a.result.ThreadID, params.ThreadID)
+		a.result.TurnID = firstNonEmpty(a.result.TurnID, params.TurnID)
+		a.result.TurnStatus = executor.TurnStatusApprovalRequired
+		a.result.ApprovalState = executor.ApprovalStateRequired
+		a.result.Interruptible = true
+		a.result.Steerable = false
+		a.result.Approval = &executor.ApprovalRequest{
+			RequestID: msg.responseID(),
+			ItemID:    strings.TrimSpace(params.ItemID),
+			State:     executor.ApprovalStateRequired,
+			Kind:      executor.ApprovalKindPermissions,
+			Reason:    strings.TrimSpace(params.Reason),
+			RawParams: strings.TrimSpace(string(msg.Params)),
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported app-server request %q during executor turn", msg.Method)
+	}
+}
+
+func (a *probeAccumulator) approvalRequired() bool {
+	return a.result.TurnStatus == executor.TurnStatusApprovalRequired || a.result.ApprovalState == executor.ApprovalStateRequired
 }
 
 func (a *probeAccumulator) turnFinished() bool {
@@ -782,6 +993,24 @@ func mergeFailureDetail(detail string, err error) string {
 		pieces = append(pieces, err.Error())
 	}
 	return strings.Join(pieces, " | ")
+}
+
+func hasActiveFlag(flags []string, want string) bool {
+	for _, flag := range flags {
+		if strings.TrimSpace(flag) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func (c Client) clientName() string {

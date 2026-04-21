@@ -42,8 +42,95 @@ func OutputJSONSchema() map[string]any {
 			},
 			"questions": nullableArrayOfStrings(),
 			"paths":     nullableArrayOfStrings(),
+			"tool_calls": map[string]any{
+				"type": []string{"array", "null"},
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"tool": map[string]any{
+							"type": "string",
+						},
+						"arguments": map[string]any{
+							"type": []string{"object", "null"},
+						},
+					},
+					"required":             []string{"tool", "arguments"},
+					"additionalProperties": false,
+				},
+			},
+			"worker_actions": map[string]any{
+				"type": []string{"array", "null"},
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"action": map[string]any{
+							"type": "string",
+							"enum": []string{
+								string(WorkerActionCreate),
+								string(WorkerActionDispatch),
+								string(WorkerActionList),
+								string(WorkerActionRemove),
+								string(WorkerActionIntegrate),
+								string(WorkerActionApply),
+							},
+						},
+						"worker_id":  nullableString(),
+						"worker_ids": nullableArrayOfStrings(),
+						"worker_name": map[string]any{
+							"type": []string{"string", "null"},
+						},
+						"scope":           nullableString(),
+						"task_summary":    nullableString(),
+						"executor_prompt": nullableString(),
+						"artifact_path":   nullableString(),
+						"apply_mode": map[string]any{
+							"type": []string{"string", "null"},
+							"enum": []any{
+								string(WorkerApplyModeAbortIfConflicts),
+								string(WorkerApplyModeNonConflicting),
+								nil,
+							},
+						},
+					},
+					"required":             []string{"action", "worker_id", "worker_ids", "worker_name", "scope", "task_summary", "executor_prompt", "artifact_path", "apply_mode"},
+					"additionalProperties": false,
+				},
+			},
+			"worker_plan": map[string]any{
+				"type": []string{"object", "null"},
+				"properties": map[string]any{
+					"workers": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"name":            map[string]any{"type": "string"},
+								"scope":           map[string]any{"type": "string"},
+								"task_summary":    map[string]any{"type": "string"},
+								"executor_prompt": map[string]any{"type": "string"},
+							},
+							"required":             []string{"name", "scope", "task_summary", "executor_prompt"},
+							"additionalProperties": false,
+						},
+						"minItems": 1,
+					},
+					"integration_requested": map[string]any{
+						"type": "boolean",
+					},
+					"apply_mode": map[string]any{
+						"type": "string",
+						"enum": []string{
+							string(WorkerApplyModeAbortIfConflicts),
+							string(WorkerApplyModeNonConflicting),
+							string(WorkerApplyModeUnavailable),
+						},
+					},
+				},
+				"required":             []string{"workers", "integration_requested", "apply_mode"},
+				"additionalProperties": false,
+			},
 		},
-		"required":             []string{"focus", "questions", "paths"},
+		"required":             []string{"focus", "questions", "paths", "tool_calls", "worker_actions", "worker_plan"},
 		"additionalProperties": false,
 	}
 

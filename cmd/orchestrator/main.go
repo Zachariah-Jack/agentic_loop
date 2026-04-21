@@ -5,16 +5,16 @@ import (
 	"fmt"
 	"os"
 
+	"orchestrator/internal/buildinfo"
 	"orchestrator/internal/cli"
 )
 
-var version = "dev"
-
 func main() {
 	app := cli.NewApp(cli.Options{
+		Stdin:   os.Stdin,
 		Stdout:  os.Stdout,
 		Stderr:  os.Stderr,
-		Version: version,
+		Version: buildinfo.Current().Version,
 	})
 
 	if err := app.Execute(context.Background(), os.Args[1:]); err != nil {

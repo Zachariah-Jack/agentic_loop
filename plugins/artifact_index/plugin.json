@@ -1,0 +1,26 @@
+{
+  "name": "artifact_index",
+  "version": "1.0.0",
+  "enabled": true,
+  "tools": [
+    {
+      "name": "artifact_index.write",
+      "description": "Write a JSON index of .orchestrator/artifacts for the current run under .orchestrator/artifacts/reports/<run-id>/.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ],
+  "hooks": [
+    "run.end"
+  ],
+  "config_fields": [
+    {
+      "name": "max_entries",
+      "type": "integer",
+      "description": "Reserved for future artifact index size control."
+    }
+  ]
+}

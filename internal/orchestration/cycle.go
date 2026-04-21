@@ -8,12 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"orchestrator/internal/executor"
 	"orchestrator/internal/journal"
 	"orchestrator/internal/planner"
+	"orchestrator/internal/plugins"
 	"orchestrator/internal/state"
+	workerctl "orchestrator/internal/workers"
 )
 
 type Planner interface {
@@ -24,20 +27,35 @@ type Executor interface {
 	Execute(context.Context, executor.TurnRequest) (executor.TurnResult, error)
 }
 
+type HumanInput struct {
+	Source  string
+	Payload string
+}
+
+type HumanInteractor interface {
+	Ask(context.Context, state.Run, planner.AskHumanOutcome) (HumanInput, error)
+}
+
 type Cycle struct {
-	Store    *state.Store
-	Journal  *journal.Journal
-	Planner  Planner
-	Executor Executor
+	Store                      *state.Store
+	Journal                    *journal.Journal
+	Planner                    Planner
+	Executor                   Executor
+	HumanInteractor            HumanInteractor
+	DriftWatcher               DriftWatcher
+	DriftReviewOn              bool
+	WorkerPlanConcurrencyLimit int
+	Plugins                    *plugins.Manager
 }
 
 type Result struct {
-	Run                     state.Run
-	FirstPlannerResult      planner.Result
-	SecondPlannerTurn       *planner.Result
-	PostExecutorPlannerTurn *planner.Result
-	ExecutorResult          *executor.TurnResult
-	ExecutorDispatched      bool
+	Run                        state.Run
+	FirstPlannerResult         planner.Result
+	ReconsiderationPlannerTurn *planner.Result
+	SecondPlannerTurn          *planner.Result
+	PostExecutorPlannerTurn    *planner.Result
+	ExecutorResult             *executor.TurnResult
+	ExecutorDispatched         bool
 }
 
 const (
@@ -45,7 +63,7 @@ const (
 	maxCollectedDirEntries       = 20
 )
 
-func (c Cycle) RunOnce(ctx context.Context, run state.Run) (Result, error) {
+func (c Cycle) RunOnce(ctx context.Context, run state.Run) (result Result, err error) {
 	if c.Store == nil {
 		return Result{}, errors.New("store is required")
 	}
@@ -55,37 +73,74 @@ func (c Cycle) RunOnce(ctx context.Context, run state.Run) (Result, error) {
 	if c.Planner == nil {
 		return Result{}, errors.New("planner is required")
 	}
+	defer func() {
+		finalRun := result.Run
+		if finalRun.ID == "" {
+			finalRun = run
+		}
+		c.runPluginHooks(ctx, plugins.HookRunEnd, finalRun, preferredPlannerResult(result), result.ExecutorResult, StopReasonForBoundedCycle(result, err), err)
+	}()
+	c.runPluginHooks(ctx, plugins.HookRunStart, run, nil, nil, "", nil)
+	if hasActiveExecutorTurn(run) {
+		return c.continueExecutorTurn(ctx, run)
+	}
+	activeWorkerTurns, err := c.activeWorkerTurns(ctx, run.ID)
+	if err != nil {
+		return Result{}, err
+	}
+	if len(activeWorkerTurns) > 0 {
+		continuedRun, stopNow, err := c.continueWorkerPlan(ctx, run, activeWorkerTurns)
+		if err != nil {
+			return Result{Run: continuedRun}, err
+		}
+		run = continuedRun
+		if stopNow {
+			return Result{Run: run}, nil
+		}
+	}
 
 	recentEvents, err := c.Journal.ReadRecent(run.ID, 5)
 	if err != nil {
 		return Result{}, err
 	}
 
-	firstInput := BuildPlannerInput(run, recentEvents, nil, nil)
+	firstInput := BuildPlannerInput(run, recentEvents, nil, nil, nil, c.pluginToolDescriptors())
 	firstPlannerResult, err := c.Planner.Plan(ctx, firstInput, run.PreviousResponseID)
 	if err != nil {
+		stopReason := StopReasonForError(err)
+		artifactPath, artifactPreview := c.persistPlannerValidationArtifact(run, err)
+
+		failedRun, issueErr := c.persistRuntimeIssue(ctx, run, stopReason, err.Error())
+		if issueErr != nil {
+			return Result{Run: run}, errors.Join(err, issueErr)
+		}
+
 		_ = c.Journal.Append(journal.Event{
-			Type:     "planner.turn.failed",
-			RunID:    run.ID,
-			RepoPath: run.RepoPath,
-			Goal:     run.Goal,
-			Status:   string(run.Status),
-			Message:  err.Error(),
+			Type:            "planner.turn.failed",
+			RunID:           failedRun.ID,
+			RepoPath:        failedRun.RepoPath,
+			Goal:            failedRun.Goal,
+			Status:          string(failedRun.Status),
+			Message:         err.Error(),
+			StopReason:      stopReason,
+			ArtifactPath:    artifactPath,
+			ArtifactPreview: artifactPreview,
+			Checkpoint:      checkpointRef(&failedRun.LatestCheckpoint),
 		})
-		return Result{}, err
+		return Result{Run: failedRun}, err
 	}
 
 	firstPlannerCheckpoint := state.Checkpoint{
 		Sequence:     run.LatestCheckpoint.Sequence + 1,
 		Stage:        "planner",
-		Label:        "planner_turn_completed",
+		Label:        plannerCheckpointLabel(firstPlannerResult.Output, "planner_turn_completed"),
 		SafePause:    true,
 		PlannerTurn:  run.LatestCheckpoint.PlannerTurn + 1,
 		ExecutorTurn: run.LatestCheckpoint.ExecutorTurn,
 		CreatedAt:    time.Now().UTC(),
 	}
 
-	if err := c.Store.SavePlannerTurn(ctx, run.ID, firstPlannerResult.ResponseID, firstPlannerCheckpoint); err != nil {
+	if err := c.savePlannerTurn(ctx, run.ID, firstPlannerResult, firstPlannerCheckpoint); err != nil {
 		return Result{}, err
 	}
 
@@ -97,13 +152,20 @@ func (c Cycle) RunOnce(ctx context.Context, run state.Run) (Result, error) {
 		return Result{}, fmt.Errorf("updated run %s could not be reloaded", run.ID)
 	}
 
+	firstPlannerMessage := "planner response validated and persisted"
+	firstCheckpointMessage := "planner checkpoint persisted"
+	if ShouldMarkRunCompleted(firstPlannerResult.Output) {
+		firstPlannerMessage = "planner declared completion and run marked completed"
+		firstCheckpointMessage = "completion checkpoint persisted"
+	}
+
 	if err := c.Journal.Append(journal.Event{
 		Type:               "planner.turn.completed",
 		RunID:              updatedRun.ID,
 		RepoPath:           updatedRun.RepoPath,
 		Goal:               updatedRun.Goal,
 		Status:             string(updatedRun.Status),
-		Message:            "planner response validated and persisted",
+		Message:            firstPlannerMessage,
 		ResponseID:         firstPlannerResult.ResponseID,
 		PreviousResponseID: updatedRun.PreviousResponseID,
 		PlannerOutcome:     string(firstPlannerResult.Output.Outcome),
@@ -117,7 +179,7 @@ func (c Cycle) RunOnce(ctx context.Context, run state.Run) (Result, error) {
 		RunID:              updatedRun.ID,
 		RepoPath:           updatedRun.RepoPath,
 		Status:             string(updatedRun.Status),
-		Message:            "planner checkpoint persisted",
+		Message:            firstCheckpointMessage,
 		ResponseID:         firstPlannerResult.ResponseID,
 		PreviousResponseID: updatedRun.PreviousResponseID,
 		PlannerOutcome:     string(firstPlannerResult.Output.Outcome),
@@ -126,247 +188,57 @@ func (c Cycle) RunOnce(ctx context.Context, run state.Run) (Result, error) {
 		return Result{}, err
 	}
 
-	result := Result{
+	c.runPluginHooks(ctx, plugins.HookPlannerAfter, updatedRun, &firstPlannerResult, nil, "", nil)
+
+	result = Result{
 		Run:                updatedRun,
 		FirstPlannerResult: firstPlannerResult,
 	}
 
-	if ShouldCollectContext(firstPlannerResult.Output) {
-		collectedContext, err := BuildCollectedContextState(updatedRun.RepoPath, firstPlannerResult.Output)
-		if err != nil {
+	if ShouldMarkRunCompleted(firstPlannerResult.Output) {
+		if err := c.appendRunCompletedEvent(updatedRun, firstPlannerResult, &firstPlannerCheckpoint); err != nil {
 			return result, err
 		}
-		if err := c.Store.SaveCollectedContext(ctx, updatedRun.ID, collectedContext); err != nil {
-			return result, err
-		}
-
-		latestRun, found, err := c.Store.GetRun(ctx, updatedRun.ID)
-		if err != nil {
-			return result, err
-		}
-		if !found {
-			return result, fmt.Errorf("updated run %s could not be reloaded after context collection", updatedRun.ID)
-		}
-		result.Run = latestRun
-
-		for _, item := range collectedContext.Results {
-			if err := c.Journal.Append(journal.Event{
-				Type:                 "context.collection.recorded",
-				RunID:                latestRun.ID,
-				RepoPath:             latestRun.RepoPath,
-				Goal:                 latestRun.Goal,
-				Status:               string(latestRun.Status),
-				Message:              contextCollectionMessage(item),
-				ResponseID:           firstPlannerResult.ResponseID,
-				PreviousResponseID:   latestRun.PreviousResponseID,
-				PlannerOutcome:       string(firstPlannerResult.Output.Outcome),
-				ContextRequestedPath: item.RequestedPath,
-				ContextResolvedPath:  item.ResolvedPath,
-				ContextKind:          item.Kind,
-				ContextDetail:        item.Detail,
-				ContextPreview:       contextCollectionPreview(item),
-				Checkpoint:           checkpointRef(&latestRun.LatestCheckpoint),
-			}); err != nil {
-				return result, err
-			}
-		}
-
-		if err := c.Journal.Append(journal.Event{
-			Type:               "context.collection.completed",
-			RunID:              latestRun.ID,
-			RepoPath:           latestRun.RepoPath,
-			Goal:               latestRun.Goal,
-			Status:             string(latestRun.Status),
-			Message:            fmt.Sprintf("collected %d context result(s) from planner-requested paths", len(collectedContext.Results)),
-			ResponseID:         firstPlannerResult.ResponseID,
-			PreviousResponseID: latestRun.PreviousResponseID,
-			PlannerOutcome:     string(firstPlannerResult.Output.Outcome),
-			Checkpoint:         checkpointRef(&latestRun.LatestCheckpoint),
-		}); err != nil {
-			return result, err
-		}
-
-		postCollectionEvents, err := c.Journal.ReadRecent(latestRun.ID, 8)
-		if err != nil {
-			return result, err
-		}
-
-		postCollectionInput := BuildPlannerInput(latestRun, postCollectionEvents, nil, BuildCollectedContextInput(latestRun))
-		result, err = c.runSecondPlannerTurn(
-			ctx,
-			latestRun,
-			result,
-			postCollectionInput,
-			"planner_turn_post_collect_context",
-			"post-collect-context planner response validated and persisted",
-			"post-collect-context planner checkpoint persisted",
-			"post-collect-context planner turn failed",
-		)
-		return result, err
-	}
-
-	if !ShouldDispatchExecutor(firstPlannerResult.Output) {
 		return result, nil
 	}
-	if c.Executor == nil {
-		return result, errors.New("executor is required when planner outcome is execute")
-	}
 
-	prompt, err := RenderExecutorPrompt(updatedRun.Goal, firstPlannerResult.Output)
+	activeRun := updatedRun
+	activePlannerResult := firstPlannerResult
+
+	activeRun, activePlannerResult, result, err = c.maybeRunDriftReview(ctx, updatedRun, result, firstPlannerResult)
 	if err != nil {
 		return result, err
 	}
-
-	if err := c.Journal.Append(journal.Event{
-		Type:               "executor.turn.dispatched",
-		RunID:              updatedRun.ID,
-		RepoPath:           updatedRun.RepoPath,
-		Goal:               updatedRun.Goal,
-		Status:             string(updatedRun.Status),
-		Message:            "planner execute outcome dispatched to primary executor: " + ExecutorTask(firstPlannerResult.Output),
-		ResponseID:         firstPlannerResult.ResponseID,
-		PreviousResponseID: updatedRun.PreviousResponseID,
-		PlannerOutcome:     string(firstPlannerResult.Output.Outcome),
-	}); err != nil {
-		return result, err
+	if activeRun.ID != "" {
+		result.Run = activeRun
+	}
+	if activeRun.Status == state.StatusCompleted || ShouldMarkRunCompleted(activePlannerResult.Output) {
+		return result, nil
 	}
 
-	executorResult, execErr := c.Executor.Execute(ctx, executor.TurnRequest{
-		RunID:      updatedRun.ID,
-		RepoPath:   updatedRun.RepoPath,
-		Prompt:     prompt,
-		ThreadID:   updatedRun.ExecutorThreadID,
-		ThreadPath: updatedRun.ExecutorThreadPath,
-	})
-
-	executorErrorMessage := executorFailureMessage(executorResult)
-	if executorErrorMessage == "" && execErr != nil {
-		executorErrorMessage = execErr.Error()
+	if ShouldAskHuman(activePlannerResult.Output) {
+		return c.handleAskHuman(ctx, result, activeRun, activePlannerResult)
 	}
 
-	executorState := state.ExecutorState{
-		Transport:        string(executorResult.Transport),
-		ThreadID:         executorResult.ThreadID,
-		ThreadPath:       executorResult.ThreadPath,
-		TurnID:           executorResult.TurnID,
-		TurnStatus:       string(executorResult.TurnStatus),
-		LastSuccess:      executorSuccess(executorResult),
-		LastFailureStage: executorFailureStage(executorResult),
-		LastError:        executorErrorMessage,
-		LastMessage:      executorResult.FinalMessage,
+	if ShouldCollectContext(activePlannerResult.Output) {
+		return c.handleCollectContext(ctx, result, activeRun, activePlannerResult)
 	}
 
-	var executorCheckpoint *state.Checkpoint
-	if executorResult.CompletedAt.IsZero() {
-		if err := c.Store.SaveExecutorState(ctx, updatedRun.ID, executorState); err != nil {
-			return result, err
-		}
-	} else {
-		checkpoint := BuildExecutorCheckpoint(updatedRun.LatestCheckpoint, executorCheckpointLabel(executorResult.TurnStatus), executorResult.CompletedAt)
-		executorCheckpoint = &checkpoint
-		if err := c.Store.SaveExecutorTurn(ctx, updatedRun.ID, executorState, checkpoint); err != nil {
-			return result, err
-		}
+	if !ShouldDispatchExecutor(activePlannerResult.Output) {
+		return result, nil
 	}
 
-	latestRun, found, err := c.Store.GetRun(ctx, updatedRun.ID)
-	if err != nil {
-		return result, err
-	}
-	if !found {
-		return result, fmt.Errorf("updated run %s could not be reloaded after executor dispatch", updatedRun.ID)
-	}
-
-	eventType := "executor.turn.completed"
-	eventMessage := "executor turn completed"
-	eventAt := executorResult.CompletedAt
-	if execErr != nil {
-		eventType = "executor.turn.failed"
-		eventMessage = executorErrorMessage
-		if eventAt.IsZero() {
-			eventAt = time.Now().UTC()
-		}
-	}
-
-	if err := c.Journal.Append(journal.Event{
-		At:                    eventAt,
-		Type:                  eventType,
-		RunID:                 latestRun.ID,
-		RepoPath:              latestRun.RepoPath,
-		Goal:                  latestRun.Goal,
-		Status:                string(latestRun.Status),
-		Message:               eventMessage,
-		ResponseID:            firstPlannerResult.ResponseID,
-		PreviousResponseID:    latestRun.PreviousResponseID,
-		PlannerOutcome:        string(firstPlannerResult.Output.Outcome),
-		ExecutorTransport:     string(executorResult.Transport),
-		ExecutorThreadID:      executorResult.ThreadID,
-		ExecutorThreadPath:    executorResult.ThreadPath,
-		ExecutorTurnID:        executorResult.TurnID,
-		ExecutorTurnStatus:    string(executorResult.TurnStatus),
-		ExecutorFailureStage:  executorFailureStage(executorResult),
-		ExecutorOutputPreview: previewString(executorResult.FinalMessage, 240),
-		Checkpoint:            checkpointRef(executorCheckpoint),
-	}); err != nil {
-		return result, err
-	}
-
-	if executorCheckpoint != nil {
-		message := "executor checkpoint persisted"
-		if execErr != nil {
-			message = "executor failure checkpoint persisted"
-		}
-		if err := c.Journal.Append(journal.Event{
-			At:                    executorCheckpoint.CreatedAt,
-			Type:                  "checkpoint.persisted",
-			RunID:                 latestRun.ID,
-			RepoPath:              latestRun.RepoPath,
-			Status:                string(latestRun.Status),
-			Message:               message,
-			ResponseID:            firstPlannerResult.ResponseID,
-			PreviousResponseID:    latestRun.PreviousResponseID,
-			PlannerOutcome:        string(firstPlannerResult.Output.Outcome),
-			ExecutorTransport:     string(executorResult.Transport),
-			ExecutorThreadID:      executorResult.ThreadID,
-			ExecutorThreadPath:    executorResult.ThreadPath,
-			ExecutorTurnID:        executorResult.TurnID,
-			ExecutorTurnStatus:    string(executorResult.TurnStatus),
-			ExecutorFailureStage:  executorFailureStage(executorResult),
-			ExecutorOutputPreview: previewString(executorResult.FinalMessage, 240),
-			Checkpoint:            checkpointRef(executorCheckpoint),
-		}); err != nil {
-			return result, err
-		}
-	}
-
-	result.Run = latestRun
-	result.ExecutorDispatched = true
-	result.ExecutorResult = &executorResult
-
-	if executorCheckpoint == nil {
-		return result, execErr
-	}
-
-	postExecutorEvents, err := c.Journal.ReadRecent(latestRun.ID, 8)
-	if err != nil {
-		return result, err
-	}
-
-	postExecutorInput := BuildPlannerInput(latestRun, postExecutorEvents, BuildExecutorResultInput(latestRun), nil)
-	result, err = c.runSecondPlannerTurn(
-		ctx,
-		latestRun,
-		result,
-		postExecutorInput,
-		"planner_turn_post_executor",
-		"post-executor planner response validated and persisted",
-		"post-executor planner checkpoint persisted",
-		"post-executor planner turn failed",
-	)
-	return result, joinErrors(execErr, err)
+	return c.handleExecute(ctx, result, activeRun, activePlannerResult)
 }
 
-func BuildPlannerInput(run state.Run, events []journal.Event, executorResult *planner.ExecutorResultSummary, collectedContext *planner.CollectedContextSummary) planner.InputEnvelope {
+func BuildPlannerInput(
+	run state.Run,
+	events []journal.Event,
+	executorResult *planner.ExecutorResultSummary,
+	collectedContext *planner.CollectedContextSummary,
+	driftReview *planner.DriftReviewSummary,
+	pluginTools []planner.PluginToolDescriptor,
+) planner.InputEnvelope {
 	previews := make([]planner.EventPreview, 0, len(events))
 	for _, event := range events {
 		previews = append(previews, planner.EventPreview{
@@ -394,6 +266,8 @@ func BuildPlannerInput(run state.Run, events []journal.Event, executorResult *pl
 		RecentEvents:     previews,
 		ExecutorResult:   executorResult,
 		CollectedContext: collectedContext,
+		DriftReview:      driftReview,
+		PluginTools:      pluginTools,
 		RepoContracts: planner.RepoContractAvailability{
 			HasAgentsMD:         pathExists(filepath.Join(run.RepoPath, "AGENTS.md")),
 			AgentsMDPath:        "AGENTS.md",
@@ -407,7 +281,7 @@ func BuildPlannerInput(run state.Run, events []journal.Event, executorResult *pl
 			RoadmapPath:         ".orchestrator/roadmap.md",
 			DecisionsPath:       ".orchestrator/decisions.md",
 		},
-		RawHumanReplies: nil,
+		RawHumanReplies: buildRawHumanReplies(run),
 		Capabilities: planner.CapabilityMarkers{
 			Planner:  planner.CapabilityAvailable,
 			Executor: planner.CapabilityAvailable,
@@ -446,11 +320,202 @@ func BuildCollectedContextInput(run state.Run) *planner.CollectedContextSummary 
 		})
 	}
 
-	return &planner.CollectedContextSummary{
-		Focus:     strings.TrimSpace(run.CollectedContext.Focus),
-		Questions: append([]string(nil), run.CollectedContext.Questions...),
-		Results:   results,
+	toolResults := make([]planner.PluginToolResult, 0, len(run.CollectedContext.ToolResults))
+	for _, item := range run.CollectedContext.ToolResults {
+		toolResults = append(toolResults, planner.PluginToolResult{
+			Tool:            item.Tool,
+			Success:         item.Success,
+			Message:         item.Message,
+			Data:            item.Data,
+			ArtifactPath:    item.ArtifactPath,
+			ArtifactPreview: item.ArtifactPreview,
+		})
 	}
+
+	workerResults := make([]planner.WorkerActionResult, 0, len(run.CollectedContext.WorkerResults))
+	for _, item := range run.CollectedContext.WorkerResults {
+		workerResults = append(workerResults, planner.WorkerActionResult{
+			Action:          planner.WorkerActionKind(item.Action),
+			Success:         item.Success,
+			Message:         item.Message,
+			Worker:          mapWorkerResultSummaryToPlanner(item.Worker),
+			ListedWorkers:   mapWorkerResultSummariesToPlanner(item.ListedWorkers),
+			Removed:         item.Removed,
+			ArtifactPath:    item.ArtifactPath,
+			ArtifactPreview: item.ArtifactPreview,
+			Integration:     mapIntegrationSummaryToPlanner(item.Integration),
+			Apply:           mapIntegrationApplySummaryToPlanner(item.Apply),
+		})
+	}
+
+	return &planner.CollectedContextSummary{
+		Focus:         strings.TrimSpace(run.CollectedContext.Focus),
+		Questions:     append([]string(nil), run.CollectedContext.Questions...),
+		Results:       results,
+		ToolResults:   toolResults,
+		WorkerResults: workerResults,
+		WorkerPlan:    mapWorkerPlanResultToPlanner(run.CollectedContext.WorkerPlan),
+	}
+}
+
+func mapWorkerResultSummaryToPlanner(item *state.WorkerResultSummary) *planner.WorkerResultSummary {
+	if item == nil {
+		return nil
+	}
+
+	return &planner.WorkerResultSummary{
+		WorkerID:                   item.WorkerID,
+		WorkerName:                 item.WorkerName,
+		WorkerStatus:               item.WorkerStatus,
+		AssignedScope:              item.AssignedScope,
+		WorktreePath:               item.WorktreePath,
+		WorkerTaskSummary:          item.WorkerTaskSummary,
+		ExecutorPromptSummary:      item.ExecutorPromptSummary,
+		WorkerResultSummary:        item.WorkerResultSummary,
+		WorkerErrorSummary:         item.WorkerErrorSummary,
+		ExecutorThreadID:           item.ExecutorThreadID,
+		ExecutorTurnID:             item.ExecutorTurnID,
+		ExecutorTurnStatus:         item.ExecutorTurnStatus,
+		ExecutorApprovalState:      item.ExecutorApprovalState,
+		ExecutorApprovalKind:       item.ExecutorApprovalKind,
+		ExecutorApprovalPreview:    item.ExecutorApprovalPreview,
+		ExecutorInterruptible:      item.ExecutorInterruptible,
+		ExecutorSteerable:          item.ExecutorSteerable,
+		ExecutorFailureStage:       item.ExecutorFailureStage,
+		ExecutorLastControlAction:  item.ExecutorLastControlAction,
+		ExecutorLastControlPayload: item.ExecutorLastControlPayload,
+		StartedAt:                  item.StartedAt,
+		CompletedAt:                item.CompletedAt,
+	}
+}
+
+func mapWorkerResultSummariesToPlanner(items []state.WorkerResultSummary) []planner.WorkerResultSummary {
+	out := make([]planner.WorkerResultSummary, 0, len(items))
+	for _, item := range items {
+		itemCopy := item
+		out = append(out, *mapWorkerResultSummaryToPlanner(&itemCopy))
+	}
+	return out
+}
+
+func mapIntegrationSummaryToPlanner(item *state.IntegrationSummary) *planner.IntegrationSummary {
+	if item == nil {
+		return nil
+	}
+
+	workers := make([]planner.IntegrationWorkerSummary, 0, len(item.Workers))
+	for _, worker := range item.Workers {
+		workers = append(workers, planner.IntegrationWorkerSummary{
+			WorkerID:            worker.WorkerID,
+			WorkerName:          worker.WorkerName,
+			WorktreePath:        worker.WorktreePath,
+			WorkerResultSummary: worker.WorkerResultSummary,
+			FileList:            append([]string(nil), worker.FileList...),
+			DiffSummary:         append([]string(nil), worker.DiffSummary...),
+		})
+	}
+
+	conflicts := make([]planner.ConflictCandidate, 0, len(item.ConflictCandidates))
+	conflicts = mapConflictCandidatesToPlanner(item.ConflictCandidates)
+
+	return &planner.IntegrationSummary{
+		WorkerIDs:          append([]string(nil), item.WorkerIDs...),
+		Workers:            workers,
+		ConflictCandidates: conflicts,
+		IntegrationPreview: item.IntegrationPreview,
+	}
+}
+
+func mapIntegrationApplySummaryToPlanner(item *state.IntegrationApplySummary) *planner.IntegrationApplySummary {
+	if item == nil {
+		return nil
+	}
+
+	applied := make([]planner.IntegrationAppliedFile, 0, len(item.FilesApplied))
+	for _, file := range item.FilesApplied {
+		applied = append(applied, planner.IntegrationAppliedFile{
+			WorkerID:   file.WorkerID,
+			WorkerName: file.WorkerName,
+			Path:       file.Path,
+			ChangeKind: file.ChangeKind,
+		})
+	}
+
+	skipped := make([]planner.IntegrationSkippedFile, 0, len(item.FilesSkipped))
+	for _, file := range item.FilesSkipped {
+		skipped = append(skipped, planner.IntegrationSkippedFile{
+			WorkerID:   file.WorkerID,
+			WorkerName: file.WorkerName,
+			Path:       file.Path,
+			ChangeKind: file.ChangeKind,
+			Reason:     file.Reason,
+		})
+	}
+
+	return &planner.IntegrationApplySummary{
+		Status:             item.Status,
+		SourceArtifactPath: item.SourceArtifactPath,
+		ApplyMode:          item.ApplyMode,
+		FilesApplied:       applied,
+		FilesSkipped:       skipped,
+		ConflictCandidates: mapConflictCandidatesToPlanner(item.ConflictCandidates),
+		BeforeSummary:      item.BeforeSummary,
+		AfterSummary:       item.AfterSummary,
+	}
+}
+
+func mapWorkerPlanResultToPlanner(item *state.WorkerPlanResult) *planner.WorkerPlanResult {
+	if item == nil {
+		return nil
+	}
+
+	return &planner.WorkerPlanResult{
+		Status:                  item.Status,
+		WorkerIDs:               append([]string(nil), item.WorkerIDs...),
+		Workers:                 mapWorkerResultSummariesToPlanner(item.Workers),
+		ConcurrencyLimit:        item.ConcurrencyLimit,
+		IntegrationRequested:    item.IntegrationRequested,
+		IntegrationArtifactPath: item.IntegrationArtifactPath,
+		IntegrationPreview:      item.IntegrationPreview,
+		ApplyMode:               item.ApplyMode,
+		ApplyArtifactPath:       item.ApplyArtifactPath,
+		Apply:                   mapIntegrationApplySummaryToPlanner(item.Apply),
+		Message:                 item.Message,
+	}
+}
+
+func mapConflictCandidatesToPlanner(items []state.ConflictCandidate) []planner.ConflictCandidate {
+	conflicts := make([]planner.ConflictCandidate, 0, len(items))
+	for _, candidate := range items {
+		conflicts = append(conflicts, planner.ConflictCandidate{
+			Path:        candidate.Path,
+			Reason:      candidate.Reason,
+			WorkerIDs:   append([]string(nil), candidate.WorkerIDs...),
+			WorkerNames: append([]string(nil), candidate.WorkerNames...),
+		})
+	}
+	return conflicts
+}
+
+func buildRawHumanReplies(run state.Run) []planner.RawHumanReply {
+	if len(run.HumanReplies) == 0 {
+		return nil
+	}
+
+	replies := make([]planner.RawHumanReply, 0, len(run.HumanReplies))
+	for _, reply := range run.HumanReplies {
+		replies = append(replies, planner.RawHumanReply{
+			ID:         reply.ID,
+			Source:     reply.Source,
+			ReceivedAt: reply.ReceivedAt,
+			Payload:    reply.Payload,
+		})
+	}
+	return replies
+}
+
+func ShouldAskHuman(output planner.OutputEnvelope) bool {
+	return output.Outcome == planner.OutcomeAskHuman && output.AskHuman != nil
 }
 
 func ShouldCollectContext(output planner.OutputEnvelope) bool {
@@ -493,6 +558,11 @@ func RenderExecutorPrompt(goal string, output planner.OutputEnvelope) (string, e
 
 	lines = append(lines,
 		"",
+		"Artifact placement:",
+		"- Do not write repo-analysis files, orchestration summaries, or run reports into the repo root by default.",
+		"- Prefer .orchestrator/artifacts/reports/ for orchestration-only reports and .orchestrator/artifacts/executor/ for large executor-only summaries.",
+		"- Only write an orchestration-only file outside .orchestrator/artifacts/ when the planner explicitly requested that path and the write scope clearly allows it.",
+		"",
 		"Perform only this bounded task.",
 		"Do not choose a new task.",
 		"Do not decide whether the overall run is complete.",
@@ -526,11 +596,57 @@ func ExecutorTask(output planner.OutputEnvelope) string {
 	return strings.TrimSpace(output.Execute.Task)
 }
 
+func ShouldMarkRunCompleted(output planner.OutputEnvelope) bool {
+	return output.Outcome == planner.OutcomeComplete && output.Complete != nil
+}
+
+func plannerCheckpointLabel(output planner.OutputEnvelope, fallback string) string {
+	if ShouldMarkRunCompleted(output) {
+		return "planner_declared_complete"
+	}
+	return fallback
+}
+
+func plannerDeclaredCompletionMessage(output planner.OutputEnvelope) string {
+	if output.Complete == nil {
+		return "planner declared run complete"
+	}
+
+	summary := previewString(output.Complete.Summary, 240)
+	if summary == "" {
+		return "planner declared run complete"
+	}
+	return "planner declared run complete: " + summary
+}
+
+func (c Cycle) savePlannerTurn(ctx context.Context, runID string, plannerTurn planner.Result, checkpoint state.Checkpoint) error {
+	if ShouldMarkRunCompleted(plannerTurn.Output) {
+		return c.Store.SavePlannerCompletion(ctx, runID, plannerTurn.ResponseID, checkpoint)
+	}
+	return c.Store.SavePlannerTurn(ctx, runID, plannerTurn.ResponseID, checkpoint)
+}
+
+func (c Cycle) appendRunCompletedEvent(run state.Run, plannerTurn planner.Result, checkpoint *state.Checkpoint) error {
+	return c.Journal.Append(journal.Event{
+		Type:               "run.completed",
+		RunID:              run.ID,
+		RepoPath:           run.RepoPath,
+		Goal:               run.Goal,
+		Status:             string(run.Status),
+		Message:            plannerDeclaredCompletionMessage(plannerTurn.Output),
+		ResponseID:         plannerTurn.ResponseID,
+		PreviousResponseID: run.PreviousResponseID,
+		PlannerOutcome:     string(plannerTurn.Output.Outcome),
+		Checkpoint:         checkpointRef(checkpoint),
+	})
+}
+
 func (c Cycle) runSecondPlannerTurn(
 	ctx context.Context,
 	currentRun state.Run,
 	result Result,
 	input planner.InputEnvelope,
+	triggeringOutcome string,
 	checkpointLabel string,
 	completedMessage string,
 	checkpointMessage string,
@@ -538,20 +654,38 @@ func (c Cycle) runSecondPlannerTurn(
 ) (Result, error) {
 	secondPlannerTurn, err := c.Planner.Plan(ctx, input, currentRun.PreviousResponseID)
 	if err != nil {
+		stopReason := StopReasonForError(err)
+		artifactPath, artifactPreview := c.persistPlannerValidationArtifact(currentRun, err)
+
+		failedRun, issueErr := c.persistRuntimeIssue(ctx, currentRun, stopReason, err.Error())
+		if issueErr != nil {
+			return result, errors.Join(err, issueErr)
+		}
 		failureEvent := journal.Event{
 			Type:               "planner.turn.failed",
-			RunID:              currentRun.ID,
-			RepoPath:           currentRun.RepoPath,
-			Goal:               currentRun.Goal,
-			Status:             string(currentRun.Status),
+			RunID:              failedRun.ID,
+			RepoPath:           failedRun.RepoPath,
+			Goal:               failedRun.Goal,
+			Status:             string(failedRun.Status),
 			Message:            failurePrefix + ": " + err.Error(),
-			PreviousResponseID: currentRun.PreviousResponseID,
-			PlannerOutcome:     string(result.FirstPlannerResult.Output.Outcome),
-			Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+			StopReason:         stopReason,
+			PreviousResponseID: failedRun.PreviousResponseID,
+			PlannerOutcome:     triggeringOutcome,
+			ArtifactPath:       artifactPath,
+			ArtifactPreview:    artifactPreview,
+			Checkpoint:         checkpointRef(&failedRun.LatestCheckpoint),
 		}
-		populateExecutorEventFields(&failureEvent, currentRun)
+		populateExecutorEventFields(&failureEvent, failedRun)
 		_ = c.Journal.Append(failureEvent)
+		result.Run = failedRun
 		return result, err
+	}
+
+	originCheckpointLabel := checkpointLabel
+	if ShouldMarkRunCompleted(secondPlannerTurn.Output) {
+		checkpointLabel = plannerCheckpointLabel(secondPlannerTurn.Output, checkpointLabel)
+		completedMessage = "planner declared completion and run marked completed"
+		checkpointMessage = "completion checkpoint persisted"
 	}
 
 	checkpoint := state.Checkpoint{
@@ -564,7 +698,7 @@ func (c Cycle) runSecondPlannerTurn(
 		CreatedAt:    time.Now().UTC(),
 	}
 
-	if err := c.Store.SavePlannerTurn(ctx, currentRun.ID, secondPlannerTurn.ResponseID, checkpoint); err != nil {
+	if err := c.savePlannerTurn(ctx, currentRun.ID, secondPlannerTurn, checkpoint); err != nil {
 		return result, err
 	}
 
@@ -609,12 +743,1351 @@ func (c Cycle) runSecondPlannerTurn(
 		return result, err
 	}
 
+	c.runPluginHooks(ctx, plugins.HookPlannerAfter, finalRun, &secondPlannerTurn, nil, "", nil)
+
+	if ShouldMarkRunCompleted(secondPlannerTurn.Output) {
+		if err := c.appendRunCompletedEvent(finalRun, secondPlannerTurn, &checkpoint); err != nil {
+			return result, err
+		}
+	}
+
 	result.Run = finalRun
-	result.SecondPlannerTurn = &secondPlannerTurn
-	if checkpointLabel == "planner_turn_post_executor" {
+	if originCheckpointLabel == "planner_turn_post_executor" {
 		result.PostExecutorPlannerTurn = &secondPlannerTurn
 	}
+	if originCheckpointLabel == "planner_turn_post_drift_review" {
+		result.ReconsiderationPlannerTurn = &secondPlannerTurn
+		return result, nil
+	}
+	result.SecondPlannerTurn = &secondPlannerTurn
 	return result, nil
+}
+
+func (c Cycle) maybeRunDriftReview(
+	ctx context.Context,
+	currentRun state.Run,
+	result Result,
+	firstPlannerTurn planner.Result,
+) (state.Run, planner.Result, Result, error) {
+	if !c.DriftReviewOn || c.DriftWatcher == nil {
+		return currentRun, firstPlannerTurn, result, nil
+	}
+	if !ShouldDispatchExecutor(firstPlannerTurn.Output) && !ShouldCollectContext(firstPlannerTurn.Output) {
+		return currentRun, firstPlannerTurn, result, nil
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "review.drift.started",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            "drift watcher started",
+		ResponseID:         firstPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(firstPlannerTurn.Output.Outcome),
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return result.Run, firstPlannerTurn, result, err
+	}
+
+	recentEvents, err := c.Journal.ReadRecent(currentRun.ID, 8)
+	if err != nil {
+		return result.Run, firstPlannerTurn, result, err
+	}
+
+	reviewResult, err := c.DriftWatcher.Review(ctx, DriftReviewRequest{
+		Run:           currentRun,
+		PlannerResult: firstPlannerTurn,
+		RecentEvents:  recentEvents,
+	})
+	if err != nil {
+		if appendErr := c.Journal.Append(journal.Event{
+			Type:               "review.drift.failed",
+			RunID:              currentRun.ID,
+			RepoPath:           currentRun.RepoPath,
+			Goal:               currentRun.Goal,
+			Status:             string(currentRun.Status),
+			Message:            "drift watcher failed; continuing with the original planner outcome: " + err.Error(),
+			ResponseID:         firstPlannerTurn.ResponseID,
+			PreviousResponseID: currentRun.PreviousResponseID,
+			PlannerOutcome:     string(firstPlannerTurn.Output.Outcome),
+			Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+		}); appendErr != nil {
+			return result.Run, firstPlannerTurn, result, appendErr
+		}
+		return currentRun, firstPlannerTurn, result, nil
+	}
+
+	artifactPath, artifactPreview := persistDriftReviewArtifact(currentRun, firstPlannerTurn, reviewResult)
+	if artifactPath == "" && artifactPreview != "" && strings.HasPrefix(artifactPreview, "artifact_write_failed:") {
+		if appendErr := c.Journal.Append(journal.Event{
+			Type:               "review.drift.failed",
+			RunID:              currentRun.ID,
+			RepoPath:           currentRun.RepoPath,
+			Goal:               currentRun.Goal,
+			Status:             string(currentRun.Status),
+			Message:            "drift watcher artifact persistence failed; continuing with the original planner outcome",
+			ResponseID:         firstPlannerTurn.ResponseID,
+			PreviousResponseID: currentRun.PreviousResponseID,
+			PlannerOutcome:     string(firstPlannerTurn.Output.Outcome),
+			ArtifactPreview:    artifactPreview,
+			Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+		}); appendErr != nil {
+			return result.Run, firstPlannerTurn, result, appendErr
+		}
+		return currentRun, firstPlannerTurn, result, nil
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "review.drift.completed",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            driftReviewMessage(reviewResult.Summary),
+		ResponseID:         firstPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(firstPlannerTurn.Output.Outcome),
+		ArtifactPath:       artifactPath,
+		ArtifactPreview:    artifactPreview,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return result.Run, firstPlannerTurn, result, err
+	}
+
+	postReviewEvents, err := c.Journal.ReadRecent(currentRun.ID, 8)
+	if err != nil {
+		return result.Run, firstPlannerTurn, result, err
+	}
+
+	reconsiderationInput := BuildPlannerInput(currentRun, postReviewEvents, nil, nil, &reviewResult.Summary, c.pluginToolDescriptors())
+	result, err = c.runSecondPlannerTurn(
+		ctx,
+		currentRun,
+		result,
+		reconsiderationInput,
+		string(firstPlannerTurn.Output.Outcome),
+		"planner_turn_post_drift_review",
+		"planner reconsideration response validated and persisted",
+		"planner reconsideration checkpoint persisted",
+		"planner reconsideration turn failed",
+	)
+	if err != nil {
+		return result.Run, firstPlannerTurn, result, err
+	}
+	if result.ReconsiderationPlannerTurn == nil || result.Run.ID == "" {
+		return currentRun, firstPlannerTurn, result, nil
+	}
+
+	return result.Run, *result.ReconsiderationPlannerTurn, result, nil
+}
+
+func (c Cycle) handleAskHuman(
+	ctx context.Context,
+	result Result,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+) (Result, error) {
+	if c.HumanInteractor == nil {
+		err := errors.New("human interactor is required when planner outcome is ask_human")
+		failedRun, issueErr := c.persistRuntimeIssue(ctx, currentRun, StopReasonForError(err), err.Error())
+		if issueErr != nil {
+			return result, errors.Join(err, issueErr)
+		}
+		result.Run = failedRun
+		return result, err
+	}
+
+	askHuman := currentPlannerTurn.Output.AskHuman
+	if err := c.Journal.Append(journal.Event{
+		Type:               "human.question.presented",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            "planner question presented to human input bridge",
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		HumanQuestion:      askHuman.Question,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return result, err
+	}
+
+	humanInput, err := c.HumanInteractor.Ask(ctx, currentRun, *askHuman)
+	if err != nil {
+		failedRun, issueErr := c.persistRuntimeIssue(ctx, currentRun, StopReasonForError(err), err.Error())
+		if issueErr != nil {
+			return result, errors.Join(err, issueErr)
+		}
+		_ = c.Journal.Append(journal.Event{
+			Type:               "human.reply.failed",
+			RunID:              failedRun.ID,
+			RepoPath:           failedRun.RepoPath,
+			Goal:               failedRun.Goal,
+			Status:             string(failedRun.Status),
+			Message:            err.Error(),
+			StopReason:         StopReasonForError(err),
+			ResponseID:         currentPlannerTurn.ResponseID,
+			PreviousResponseID: failedRun.PreviousResponseID,
+			PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+			HumanQuestion:      askHuman.Question,
+			Checkpoint:         checkpointRef(&failedRun.LatestCheckpoint),
+		})
+		result.Run = failedRun
+		return result, err
+	}
+
+	replySource := strings.TrimSpace(humanInput.Source)
+	if replySource == "" {
+		replySource = "terminal"
+	}
+
+	recordedReply, err := c.Store.RecordHumanReply(ctx, currentRun.ID, replySource, humanInput.Payload, time.Now().UTC())
+	if err != nil {
+		return result, err
+	}
+
+	latestRun, found, err := c.Store.GetRun(ctx, currentRun.ID)
+	if err != nil {
+		return result, err
+	}
+	if !found {
+		return result, fmt.Errorf("updated run %s could not be reloaded after human reply", currentRun.ID)
+	}
+	result.Run = latestRun
+	humanReplyArtifactPath, humanReplyArtifactPreview := persistHumanReplyArtifact(latestRun, recordedReply)
+	humanReplyPayload := recordedReply.Payload
+	if humanReplyArtifactPath != "" {
+		humanReplyPayload = ""
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "human.reply.recorded",
+		RunID:              latestRun.ID,
+		RepoPath:           latestRun.RepoPath,
+		Goal:               latestRun.Goal,
+		Status:             string(latestRun.Status),
+		Message:            "raw human reply recorded",
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: latestRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		HumanQuestion:      askHuman.Question,
+		HumanReplyID:       recordedReply.ID,
+		HumanReplySource:   recordedReply.Source,
+		HumanReplyPayload:  humanReplyPayload,
+		ArtifactPath:       humanReplyArtifactPath,
+		ArtifactPreview:    humanReplyArtifactPreview,
+		Checkpoint:         checkpointRef(&latestRun.LatestCheckpoint),
+	}); err != nil {
+		return result, err
+	}
+
+	postHumanEvents, err := c.Journal.ReadRecent(latestRun.ID, 8)
+	if err != nil {
+		return result, err
+	}
+
+	postHumanInput := BuildPlannerInput(latestRun, postHumanEvents, nil, nil, nil, c.pluginToolDescriptors())
+	return c.runSecondPlannerTurn(
+		ctx,
+		latestRun,
+		result,
+		postHumanInput,
+		string(currentPlannerTurn.Output.Outcome),
+		"planner_turn_post_human_reply",
+		"post-human-reply planner response validated and persisted",
+		"post-human-reply planner checkpoint persisted",
+		"post-human-reply planner turn failed",
+	)
+}
+
+func (c Cycle) handleCollectContext(
+	ctx context.Context,
+	result Result,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+) (Result, error) {
+	collectedContext, err := BuildCollectedContextState(currentRun.RepoPath, currentPlannerTurn.Output)
+	if err != nil {
+		return result, err
+	}
+	if len(currentPlannerTurn.Output.CollectContext.ToolCalls) > 0 {
+		toolResults, err := c.executePluginToolCalls(ctx, currentRun, currentPlannerTurn, currentRun.LatestCheckpoint, currentPlannerTurn.Output.CollectContext.ToolCalls)
+		if err != nil {
+			return result, err
+		}
+		collectedContext.ToolResults = toolResults
+	}
+	if len(currentPlannerTurn.Output.CollectContext.WorkerActions) > 0 {
+		workerResults, err := c.executeWorkerActions(ctx, currentRun, currentPlannerTurn, currentPlannerTurn.Output.CollectContext.WorkerActions)
+		if err != nil {
+			return result, err
+		}
+		collectedContext.WorkerResults = workerResults
+	}
+	if currentPlannerTurn.Output.CollectContext.WorkerPlan != nil {
+		planResult, planWorkerResults, err := c.executeWorkerPlan(ctx, currentRun, currentPlannerTurn, *currentPlannerTurn.Output.CollectContext.WorkerPlan)
+		if err != nil {
+			return result, err
+		}
+		collectedContext.WorkerResults = append(collectedContext.WorkerResults, planWorkerResults...)
+		collectedContext.WorkerPlan = planResult
+	}
+	if err := c.Store.SaveCollectedContext(ctx, currentRun.ID, collectedContext); err != nil {
+		return result, err
+	}
+
+	latestRun, found, err := c.Store.GetRun(ctx, currentRun.ID)
+	if err != nil {
+		return result, err
+	}
+	if !found {
+		return result, fmt.Errorf("updated run %s could not be reloaded after context collection", currentRun.ID)
+	}
+	result.Run = latestRun
+
+	for _, item := range collectedContext.Results {
+		contextArtifactPath, contextArtifactPreview := persistCollectedContextArtifact(latestRun, item)
+		if err := c.Journal.Append(journal.Event{
+			Type:                 "context.collection.recorded",
+			RunID:                latestRun.ID,
+			RepoPath:             latestRun.RepoPath,
+			Goal:                 latestRun.Goal,
+			Status:               string(latestRun.Status),
+			Message:              contextCollectionMessage(item),
+			ResponseID:           currentPlannerTurn.ResponseID,
+			PreviousResponseID:   latestRun.PreviousResponseID,
+			PlannerOutcome:       string(currentPlannerTurn.Output.Outcome),
+			ContextRequestedPath: item.RequestedPath,
+			ContextResolvedPath:  item.ResolvedPath,
+			ContextKind:          item.Kind,
+			ContextDetail:        item.Detail,
+			ContextPreview:       contextCollectionPreview(item),
+			ArtifactPath:         contextArtifactPath,
+			ArtifactPreview:      contextArtifactPreview,
+			Checkpoint:           checkpointRef(&latestRun.LatestCheckpoint),
+		}); err != nil {
+			return result, err
+		}
+		if item.Detail == "read_failed" || item.Detail == "stat_failed" {
+			if err := c.Journal.Append(journal.Event{
+				Type:                 "context.collection.read_failed",
+				RunID:                latestRun.ID,
+				RepoPath:             latestRun.RepoPath,
+				Goal:                 latestRun.Goal,
+				Status:               string(latestRun.Status),
+				Message:              contextCollectionMessage(item),
+				ResponseID:           currentPlannerTurn.ResponseID,
+				PreviousResponseID:   latestRun.PreviousResponseID,
+				PlannerOutcome:       string(currentPlannerTurn.Output.Outcome),
+				ContextRequestedPath: item.RequestedPath,
+				ContextResolvedPath:  item.ResolvedPath,
+				ContextKind:          item.Kind,
+				ContextDetail:        item.Detail,
+				ContextPreview:       contextCollectionPreview(item),
+				ArtifactPath:         contextArtifactPath,
+				ArtifactPreview:      contextArtifactPreview,
+				Checkpoint:           checkpointRef(&latestRun.LatestCheckpoint),
+			}); err != nil {
+				return result, err
+			}
+		}
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "context.collection.completed",
+		RunID:              latestRun.ID,
+		RepoPath:           latestRun.RepoPath,
+		Goal:               latestRun.Goal,
+		Status:             string(latestRun.Status),
+		Message:            fmt.Sprintf("collected %d path result(s), %d plugin tool result(s), %d worker action result(s), and worker plan present=%t", len(collectedContext.Results), len(collectedContext.ToolResults), len(collectedContext.WorkerResults), collectedContext.WorkerPlan != nil),
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: latestRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		Checkpoint:         checkpointRef(&latestRun.LatestCheckpoint),
+	}); err != nil {
+		return result, err
+	}
+
+	postCollectionEvents, err := c.Journal.ReadRecent(latestRun.ID, 8)
+	if err != nil {
+		return result, err
+	}
+
+	postCollectionInput := BuildPlannerInput(latestRun, postCollectionEvents, nil, BuildCollectedContextInput(latestRun), nil, c.pluginToolDescriptors())
+	result, err = c.runSecondPlannerTurn(
+		ctx,
+		latestRun,
+		result,
+		postCollectionInput,
+		string(currentPlannerTurn.Output.Outcome),
+		"planner_turn_post_collect_context",
+		"post-collect-context planner response validated and persisted",
+		"post-collect-context planner checkpoint persisted",
+		"post-collect-context planner turn failed",
+	)
+	if err != nil {
+		return result, err
+	}
+
+	if workerPlanStopReason(collectedContext.WorkerPlan) != "" && result.Run.ID != "" {
+		if err := c.Store.SaveLatestStopReason(ctx, result.Run.ID, workerPlanStopReason(collectedContext.WorkerPlan)); err != nil {
+			return result, err
+		}
+		result.Run.LatestStopReason = workerPlanStopReason(collectedContext.WorkerPlan)
+	}
+	return result, nil
+}
+
+func (c Cycle) handleExecute(
+	ctx context.Context,
+	result Result,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+) (Result, error) {
+	if c.Executor == nil {
+		err := errors.New("executor is required when planner outcome is execute")
+		failedRun, issueErr := c.persistRuntimeIssue(ctx, currentRun, StopReasonTransportProcessError, err.Error())
+		if issueErr != nil {
+			return result, errors.Join(err, issueErr)
+		}
+		result.Run = failedRun
+		return result, err
+	}
+
+	prompt, err := RenderExecutorPrompt(currentRun.Goal, currentPlannerTurn.Output)
+	if err != nil {
+		failedRun, issueErr := c.persistRuntimeIssue(ctx, currentRun, StopReasonTransportProcessError, err.Error())
+		if issueErr != nil {
+			return result, errors.Join(err, issueErr)
+		}
+		result.Run = failedRun
+		return result, err
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "executor.turn.dispatched",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            "planner execute outcome dispatched to primary executor: " + ExecutorTask(currentPlannerTurn.Output),
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+	}); err != nil {
+		return result, err
+	}
+
+	executorResult, execErr := c.Executor.Execute(ctx, executor.TurnRequest{
+		RunID:      currentRun.ID,
+		RepoPath:   currentRun.RepoPath,
+		Prompt:     prompt,
+		ThreadID:   currentRun.ExecutorThreadID,
+		ThreadPath: currentRun.ExecutorThreadPath,
+	})
+
+	executorErrorMessage := executorFailureMessage(executorResult)
+	if executorErrorMessage == "" && execErr != nil {
+		executorErrorMessage = execErr.Error()
+	}
+	approvalRequired := executorResult.TurnStatus == executor.TurnStatusApprovalRequired || executorResult.ApprovalState == executor.ApprovalStateRequired
+	executorFailed := execErr != nil || executorResult.TurnStatus != executor.TurnStatusCompleted || executorResult.CompletedAt.IsZero()
+	if approvalRequired {
+		executorFailed = false
+	}
+	if executorFailed && executorErrorMessage == "" {
+		executorErrorMessage = executorFailureFallbackMessage(executorResult)
+	}
+
+	executorState := state.ExecutorState{
+		Transport:        string(executorResult.Transport),
+		ThreadID:         executorResult.ThreadID,
+		ThreadPath:       executorResult.ThreadPath,
+		TurnID:           executorResult.TurnID,
+		TurnStatus:       string(executorResult.TurnStatus),
+		LastSuccess:      executorSuccess(executorResult),
+		LastFailureStage: executorFailureStage(executorResult),
+		LastError:        executorErrorMessage,
+		LastMessage:      executorResult.FinalMessage,
+		Approval:         executorApprovalState(executorResult),
+	}
+
+	var executorCheckpoint *state.Checkpoint
+	if approvalRequired || executorFailed {
+		if err := c.Store.SaveExecutorState(ctx, currentRun.ID, executorState); err != nil {
+			return result, err
+		}
+	} else {
+		checkpoint := BuildExecutorCheckpoint(currentRun.LatestCheckpoint, executorCheckpointLabel(executorResult.TurnStatus), executorResult.CompletedAt)
+		executorCheckpoint = &checkpoint
+		if err := c.Store.SaveExecutorTurn(ctx, currentRun.ID, executorState, checkpoint); err != nil {
+			return result, err
+		}
+	}
+
+	executorFailureErr := execErr
+	if executorFailed && executorFailureErr == nil {
+		executorFailureErr = errors.New(executorErrorMessage)
+	}
+
+	if executorFailed {
+		if _, issueErr := c.persistRuntimeIssue(ctx, currentRun, StopReasonExecutorFailed, executorErrorMessage); issueErr != nil {
+			return result, errors.Join(executorFailureErr, issueErr)
+		}
+	}
+
+	latestRun, found, err := c.Store.GetRun(ctx, currentRun.ID)
+	if err != nil {
+		return result, err
+	}
+	if !found {
+		return result, fmt.Errorf("updated run %s could not be reloaded after executor dispatch", currentRun.ID)
+	}
+	executorArtifactPath, executorArtifactPreview := persistExecutorOutputArtifact(latestRun, executorResult)
+
+	eventType := "executor.turn.completed"
+	eventMessage := "executor turn completed"
+	eventAt := executorResult.CompletedAt
+	stopReason := ""
+	if approvalRequired {
+		eventType = "executor.turn.paused"
+		eventMessage = executorApprovalMessage(executorResult)
+		stopReason = StopReasonExecutorApprovalReq
+		if eventAt.IsZero() {
+			eventAt = time.Now().UTC()
+		}
+	} else if executorFailed {
+		eventType = "executor.turn.failed"
+		eventMessage = executorErrorMessage
+		stopReason = StopReasonExecutorFailed
+		if eventAt.IsZero() {
+			eventAt = time.Now().UTC()
+		}
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		At:                    eventAt,
+		Type:                  eventType,
+		RunID:                 latestRun.ID,
+		RepoPath:              latestRun.RepoPath,
+		Goal:                  latestRun.Goal,
+		Status:                string(latestRun.Status),
+		Message:               eventMessage,
+		ResponseID:            currentPlannerTurn.ResponseID,
+		PreviousResponseID:    latestRun.PreviousResponseID,
+		PlannerOutcome:        string(currentPlannerTurn.Output.Outcome),
+		StopReason:            stopReason,
+		ExecutorTransport:     string(executorResult.Transport),
+		ExecutorThreadID:      executorResult.ThreadID,
+		ExecutorThreadPath:    executorResult.ThreadPath,
+		ExecutorTurnID:        executorResult.TurnID,
+		ExecutorTurnStatus:    string(executorResult.TurnStatus),
+		ExecutorApprovalState: string(executorResult.ApprovalState),
+		ExecutorApprovalKind:  executorApprovalKind(executorResult),
+		ExecutorFailureStage:  executorFailureStage(executorResult),
+		ExecutorOutputPreview: previewString(executorResult.FinalMessage, 240),
+		ArtifactPath:          executorArtifactPath,
+		ArtifactPreview:       executorArtifactPreview,
+		Checkpoint:            checkpointRef(executorCheckpoint),
+	}); err != nil {
+		return result, err
+	}
+
+	if executorCheckpoint != nil {
+		if err := c.Journal.Append(journal.Event{
+			At:                    executorCheckpoint.CreatedAt,
+			Type:                  "checkpoint.persisted",
+			RunID:                 latestRun.ID,
+			RepoPath:              latestRun.RepoPath,
+			Status:                string(latestRun.Status),
+			Message:               "executor checkpoint persisted",
+			ResponseID:            currentPlannerTurn.ResponseID,
+			PreviousResponseID:    latestRun.PreviousResponseID,
+			PlannerOutcome:        string(currentPlannerTurn.Output.Outcome),
+			ExecutorTransport:     string(executorResult.Transport),
+			ExecutorThreadID:      executorResult.ThreadID,
+			ExecutorThreadPath:    executorResult.ThreadPath,
+			ExecutorTurnID:        executorResult.TurnID,
+			ExecutorTurnStatus:    string(executorResult.TurnStatus),
+			ExecutorFailureStage:  executorFailureStage(executorResult),
+			ExecutorOutputPreview: previewString(executorResult.FinalMessage, 240),
+			Checkpoint:            checkpointRef(executorCheckpoint),
+		}); err != nil {
+			return result, err
+		}
+	}
+
+	result.Run = latestRun
+	result.ExecutorDispatched = true
+	result.ExecutorResult = &executorResult
+	c.runPluginHooks(ctx, plugins.HookExecutorAfter, latestRun, &currentPlannerTurn, &executorResult, stopReason, executorFailureErr)
+
+	if approvalRequired {
+		if err := c.Store.SaveLatestStopReason(ctx, latestRun.ID, StopReasonExecutorApprovalReq); err != nil {
+			return result, err
+		}
+		latestRun.LatestStopReason = StopReasonExecutorApprovalReq
+		result.Run = latestRun
+
+		approvalEvent := journal.Event{
+			Type:                  "executor.approval.required",
+			RunID:                 latestRun.ID,
+			RepoPath:              latestRun.RepoPath,
+			Goal:                  latestRun.Goal,
+			Status:                string(latestRun.Status),
+			Message:               executorApprovalMessage(executorResult),
+			ResponseID:            currentPlannerTurn.ResponseID,
+			PreviousResponseID:    latestRun.PreviousResponseID,
+			PlannerOutcome:        string(currentPlannerTurn.Output.Outcome),
+			StopReason:            StopReasonExecutorApprovalReq,
+			ExecutorTransport:     string(executorResult.Transport),
+			ExecutorThreadID:      executorResult.ThreadID,
+			ExecutorThreadPath:    executorResult.ThreadPath,
+			ExecutorTurnID:        executorResult.TurnID,
+			ExecutorTurnStatus:    string(executorResult.TurnStatus),
+			ExecutorApprovalState: string(executorResult.ApprovalState),
+			ExecutorApprovalKind:  executorApprovalKind(executorResult),
+			ExecutorOutputPreview: previewString(executorResult.FinalMessage, 240),
+			Checkpoint:            checkpointRef(&latestRun.LatestCheckpoint),
+		}
+		if err := c.Journal.Append(approvalEvent); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+
+	reportArtifactPath, reportArtifactPreview := relocateKnownReportArtifact(latestRun, currentPlannerTurn.Output)
+	if reportArtifactPath != "" {
+		reportEvent := journal.Event{
+			Type:               "report.artifact.recorded",
+			RunID:              latestRun.ID,
+			RepoPath:           latestRun.RepoPath,
+			Goal:               latestRun.Goal,
+			Status:             string(latestRun.Status),
+			Message:            "orchestration report moved under .orchestrator/artifacts/reports",
+			ResponseID:         currentPlannerTurn.ResponseID,
+			PreviousResponseID: latestRun.PreviousResponseID,
+			PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+			ArtifactPath:       reportArtifactPath,
+			ArtifactPreview:    reportArtifactPreview,
+			Checkpoint:         checkpointRef(executorCheckpoint),
+		}
+		populateExecutorEventFields(&reportEvent, latestRun)
+		if err := c.Journal.Append(reportEvent); err != nil {
+			return result, err
+		}
+	}
+
+	if executorFailed {
+		return result, executorFailureErr
+	}
+
+	postExecutorEvents, err := c.Journal.ReadRecent(latestRun.ID, 8)
+	if err != nil {
+		return result, err
+	}
+
+	postExecutorInput := BuildPlannerInput(latestRun, postExecutorEvents, BuildExecutorResultInput(latestRun), nil, nil, c.pluginToolDescriptors())
+	result, err = c.runSecondPlannerTurn(
+		ctx,
+		latestRun,
+		result,
+		postExecutorInput,
+		string(currentPlannerTurn.Output.Outcome),
+		"planner_turn_post_executor",
+		"post-executor planner response validated and persisted",
+		"post-executor planner checkpoint persisted",
+		"post-executor planner turn failed",
+	)
+	return result, joinErrors(execErr, err)
+}
+
+func (c Cycle) continueExecutorTurn(ctx context.Context, currentRun state.Run) (Result, error) {
+	result := Result{Run: currentRun}
+
+	if c.Executor == nil {
+		err := errors.New("executor is required when continuing an active executor turn")
+		failedRun, issueErr := c.persistRuntimeIssue(ctx, currentRun, StopReasonTransportProcessError, err.Error())
+		if issueErr != nil {
+			return result, errors.Join(err, issueErr)
+		}
+		result.Run = failedRun
+		return result, err
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "executor.turn.resumed",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            "continuing persisted active executor turn",
+		PreviousResponseID: currentRun.PreviousResponseID,
+		ExecutorTransport:  currentRun.ExecutorTransport,
+		ExecutorThreadID:   currentRun.ExecutorThreadID,
+		ExecutorThreadPath: currentRun.ExecutorThreadPath,
+		ExecutorTurnID:     currentRun.ExecutorTurnID,
+		ExecutorTurnStatus: currentRun.ExecutorTurnStatus,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return result, err
+	}
+
+	executorResult, execErr := c.Executor.Execute(ctx, executor.TurnRequest{
+		RunID:      currentRun.ID,
+		RepoPath:   currentRun.RepoPath,
+		ThreadID:   currentRun.ExecutorThreadID,
+		ThreadPath: currentRun.ExecutorThreadPath,
+		TurnID:     currentRun.ExecutorTurnID,
+		Continue:   true,
+	})
+
+	executorErrorMessage := executorFailureMessage(executorResult)
+	if executorErrorMessage == "" && execErr != nil {
+		executorErrorMessage = execErr.Error()
+	}
+	approvalRequired := executorResult.TurnStatus == executor.TurnStatusApprovalRequired || executorResult.ApprovalState == executor.ApprovalStateRequired
+	executorFailed := execErr != nil || executorResult.TurnStatus != executor.TurnStatusCompleted || executorResult.CompletedAt.IsZero()
+	if approvalRequired {
+		executorFailed = false
+	}
+	if executorFailed && executorErrorMessage == "" {
+		executorErrorMessage = executorFailureFallbackMessage(executorResult)
+	}
+
+	executorState := state.ExecutorState{
+		Transport:        string(executorResult.Transport),
+		ThreadID:         executorResult.ThreadID,
+		ThreadPath:       executorResult.ThreadPath,
+		TurnID:           executorResult.TurnID,
+		TurnStatus:       string(executorResult.TurnStatus),
+		LastSuccess:      executorSuccess(executorResult),
+		LastFailureStage: executorFailureStage(executorResult),
+		LastError:        executorErrorMessage,
+		LastMessage:      executorResult.FinalMessage,
+		Approval:         executorApprovalState(executorResult),
+	}
+
+	var executorCheckpoint *state.Checkpoint
+	if approvalRequired || executorFailed {
+		if err := c.Store.SaveExecutorState(ctx, currentRun.ID, executorState); err != nil {
+			return result, err
+		}
+	} else {
+		checkpoint := BuildExecutorCheckpoint(currentRun.LatestCheckpoint, executorCheckpointLabel(executorResult.TurnStatus), executorResult.CompletedAt)
+		executorCheckpoint = &checkpoint
+		if err := c.Store.SaveExecutorTurn(ctx, currentRun.ID, executorState, checkpoint); err != nil {
+			return result, err
+		}
+	}
+
+	executorFailureErr := execErr
+	if executorFailed && executorFailureErr == nil {
+		executorFailureErr = errors.New(executorErrorMessage)
+	}
+	if executorFailed {
+		if _, issueErr := c.persistRuntimeIssue(ctx, currentRun, StopReasonExecutorFailed, executorErrorMessage); issueErr != nil {
+			return result, errors.Join(executorFailureErr, issueErr)
+		}
+	}
+
+	latestRun, found, err := c.Store.GetRun(ctx, currentRun.ID)
+	if err != nil {
+		return result, err
+	}
+	if !found {
+		return result, fmt.Errorf("updated run %s could not be reloaded after executor continuation", currentRun.ID)
+	}
+
+	eventType := "executor.turn.completed"
+	eventMessage := "executor turn completed"
+	eventAt := executorResult.CompletedAt
+	stopReason := ""
+	if approvalRequired {
+		eventType = "executor.turn.paused"
+		eventMessage = executorApprovalMessage(executorResult)
+		stopReason = StopReasonExecutorApprovalReq
+		if eventAt.IsZero() {
+			eventAt = time.Now().UTC()
+		}
+	} else if executorFailed {
+		eventType = "executor.turn.failed"
+		eventMessage = executorErrorMessage
+		stopReason = StopReasonExecutorFailed
+		if eventAt.IsZero() {
+			eventAt = time.Now().UTC()
+		}
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		At:                    eventAt,
+		Type:                  eventType,
+		RunID:                 latestRun.ID,
+		RepoPath:              latestRun.RepoPath,
+		Goal:                  latestRun.Goal,
+		Status:                string(latestRun.Status),
+		Message:               eventMessage,
+		PreviousResponseID:    latestRun.PreviousResponseID,
+		StopReason:            stopReason,
+		ExecutorTransport:     string(executorResult.Transport),
+		ExecutorThreadID:      executorResult.ThreadID,
+		ExecutorThreadPath:    executorResult.ThreadPath,
+		ExecutorTurnID:        executorResult.TurnID,
+		ExecutorTurnStatus:    string(executorResult.TurnStatus),
+		ExecutorApprovalState: string(executorResult.ApprovalState),
+		ExecutorApprovalKind:  executorApprovalKind(executorResult),
+		ExecutorFailureStage:  executorFailureStage(executorResult),
+		ExecutorOutputPreview: previewString(executorResult.FinalMessage, 240),
+		Checkpoint:            checkpointRef(executorCheckpoint),
+	}); err != nil {
+		return result, err
+	}
+
+	if executorCheckpoint != nil {
+		if err := c.Journal.Append(journal.Event{
+			At:                    executorCheckpoint.CreatedAt,
+			Type:                  "checkpoint.persisted",
+			RunID:                 latestRun.ID,
+			RepoPath:              latestRun.RepoPath,
+			Status:                string(latestRun.Status),
+			Message:               "executor checkpoint persisted",
+			PreviousResponseID:    latestRun.PreviousResponseID,
+			ExecutorTransport:     string(executorResult.Transport),
+			ExecutorThreadID:      executorResult.ThreadID,
+			ExecutorThreadPath:    executorResult.ThreadPath,
+			ExecutorTurnID:        executorResult.TurnID,
+			ExecutorTurnStatus:    string(executorResult.TurnStatus),
+			ExecutorApprovalState: string(executorResult.ApprovalState),
+			ExecutorApprovalKind:  executorApprovalKind(executorResult),
+			ExecutorFailureStage:  executorFailureStage(executorResult),
+			ExecutorOutputPreview: previewString(executorResult.FinalMessage, 240),
+			Checkpoint:            checkpointRef(executorCheckpoint),
+		}); err != nil {
+			return result, err
+		}
+	}
+
+	result.Run = latestRun
+	result.ExecutorDispatched = true
+	result.ExecutorResult = &executorResult
+	c.runPluginHooks(ctx, plugins.HookExecutorAfter, latestRun, nil, &executorResult, stopReason, executorFailureErr)
+
+	if approvalRequired {
+		if err := c.Store.SaveLatestStopReason(ctx, latestRun.ID, StopReasonExecutorApprovalReq); err != nil {
+			return result, err
+		}
+		latestRun.LatestStopReason = StopReasonExecutorApprovalReq
+		result.Run = latestRun
+		if err := c.Journal.Append(journal.Event{
+			Type:                  "executor.approval.required",
+			RunID:                 latestRun.ID,
+			RepoPath:              latestRun.RepoPath,
+			Goal:                  latestRun.Goal,
+			Status:                string(latestRun.Status),
+			Message:               executorApprovalMessage(executorResult),
+			PreviousResponseID:    latestRun.PreviousResponseID,
+			StopReason:            StopReasonExecutorApprovalReq,
+			ExecutorTransport:     string(executorResult.Transport),
+			ExecutorThreadID:      executorResult.ThreadID,
+			ExecutorThreadPath:    executorResult.ThreadPath,
+			ExecutorTurnID:        executorResult.TurnID,
+			ExecutorTurnStatus:    string(executorResult.TurnStatus),
+			ExecutorApprovalState: string(executorResult.ApprovalState),
+			ExecutorApprovalKind:  executorApprovalKind(executorResult),
+			ExecutorOutputPreview: previewString(executorResult.FinalMessage, 240),
+			Checkpoint:            checkpointRef(&latestRun.LatestCheckpoint),
+		}); err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+
+	if executorFailed {
+		return result, executorFailureErr
+	}
+
+	postExecutorEvents, err := c.Journal.ReadRecent(latestRun.ID, 8)
+	if err != nil {
+		return result, err
+	}
+
+	postExecutorInput := BuildPlannerInput(latestRun, postExecutorEvents, BuildExecutorResultInput(latestRun), nil, nil, c.pluginToolDescriptors())
+	result, err = c.runSecondPlannerTurn(
+		ctx,
+		latestRun,
+		result,
+		postExecutorInput,
+		"",
+		"planner_turn_post_executor",
+		"post-executor planner response validated and persisted",
+		"post-executor planner checkpoint persisted",
+		"post-executor planner turn failed",
+	)
+	return result, joinErrors(execErr, err)
+}
+
+func (c Cycle) activeWorkerTurns(ctx context.Context, runID string) ([]state.Worker, error) {
+	if strings.TrimSpace(runID) == "" {
+		return nil, nil
+	}
+
+	workers, err := c.Store.ListWorkers(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+
+	active := make([]state.Worker, 0, len(workers))
+	for _, worker := range workers {
+		if hasContinuableWorkerTurn(worker) {
+			active = append(active, worker)
+		}
+	}
+	return active, nil
+}
+
+func hasContinuableWorkerTurn(worker state.Worker) bool {
+	if strings.TrimSpace(worker.WorktreePath) == "" ||
+		strings.TrimSpace(worker.ExecutorThreadID) == "" ||
+		strings.TrimSpace(worker.ExecutorTurnID) == "" {
+		return false
+	}
+
+	switch worker.WorkerStatus {
+	case state.WorkerStatusExecutorActive, state.WorkerStatusApprovalRequired:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c Cycle) continueWorkerPlan(ctx context.Context, currentRun state.Run, workers []state.Worker) (state.Run, bool, error) {
+	if len(workers) == 0 {
+		return currentRun, false, nil
+	}
+	if c.Executor == nil {
+		err := errors.New("executor is required when continuing active worker executor turns")
+		failedRun, issueErr := c.persistRuntimeIssue(ctx, currentRun, StopReasonTransportProcessError, err.Error())
+		if issueErr != nil {
+			return currentRun, true, errors.Join(err, issueErr)
+		}
+		return failedRun, true, err
+	}
+
+	concurrencyLimit := c.workerPlanConcurrencyLimit()
+	if err := c.Journal.Append(journal.Event{
+		Type:               "worker.plan.dispatch.started",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            fmt.Sprintf("continuing %d active worker executor turn(s) concurrently with limit=%d", len(workers), concurrencyLimit),
+		PreviousResponseID: currentRun.PreviousResponseID,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return currentRun, true, err
+	}
+
+	if err := c.executeConcurrentWorkerContinuations(ctx, currentRun, workers, concurrencyLimit); err != nil {
+		return currentRun, true, err
+	}
+
+	updatedRun, err := c.syncRunWorkerPlanState(ctx, currentRun.ID)
+	if err != nil {
+		return currentRun, true, err
+	}
+
+	updatedWorkers, err := c.Store.ListWorkers(ctx, currentRun.ID)
+	if err != nil {
+		return updatedRun, true, err
+	}
+	approvalCount := workerStatusCount(updatedWorkers, state.WorkerStatusApprovalRequired)
+	if approvalCount > 0 {
+		if err := c.Store.SaveLatestStopReason(ctx, updatedRun.ID, StopReasonExecutorApprovalReq); err != nil {
+			return updatedRun, true, err
+		}
+		reloadedRun, found, err := c.Store.GetRun(ctx, updatedRun.ID)
+		if err != nil {
+			return updatedRun, true, err
+		}
+		if found {
+			updatedRun = reloadedRun
+		}
+		if err := c.Journal.Append(journal.Event{
+			Type:               "worker.plan.waiting_on_approval",
+			RunID:              updatedRun.ID,
+			RepoPath:           updatedRun.RepoPath,
+			Goal:               updatedRun.Goal,
+			Status:             string(updatedRun.Status),
+			Message:            fmt.Sprintf("worker plan is waiting on approval for %d worker executor turn(s)", approvalCount),
+			PreviousResponseID: updatedRun.PreviousResponseID,
+			StopReason:         StopReasonExecutorApprovalReq,
+			Checkpoint:         checkpointRef(&updatedRun.LatestCheckpoint),
+		}); err != nil {
+			return updatedRun, true, err
+		}
+		return updatedRun, true, nil
+	}
+
+	if strings.TrimSpace(updatedRun.LatestStopReason) == StopReasonExecutorApprovalReq && executorApprovalStateValueFromRun(updatedRun) == "" {
+		if err := c.Store.ClearLatestStopReason(ctx, updatedRun.ID); err != nil {
+			return updatedRun, true, err
+		}
+		reloadedRun, found, err := c.Store.GetRun(ctx, updatedRun.ID)
+		if err != nil {
+			return updatedRun, true, err
+		}
+		if found {
+			updatedRun = reloadedRun
+		}
+	}
+
+	return updatedRun, false, nil
+}
+
+func (c Cycle) executeConcurrentWorkerContinuations(
+	ctx context.Context,
+	currentRun state.Run,
+	workers []state.Worker,
+	concurrencyLimit int,
+) error {
+	type continuationOutcome struct {
+		err error
+	}
+
+	if len(workers) == 0 {
+		return nil
+	}
+
+	sem := make(chan struct{}, concurrencyLimit)
+	outcomes := make(chan continuationOutcome, len(workers))
+	var wg sync.WaitGroup
+
+	for _, worker := range workers {
+		worker := worker
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() {
+				<-sem
+			}()
+
+			outcomes <- continuationOutcome{
+				err: c.continueWorkerTurn(ctx, currentRun, worker),
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(outcomes)
+
+	var joinedErr error
+	for outcome := range outcomes {
+		if outcome.err != nil {
+			joinedErr = errors.Join(joinedErr, outcome.err)
+		}
+	}
+	return joinedErr
+}
+
+func (c Cycle) continueWorkerTurn(ctx context.Context, currentRun state.Run, worker state.Worker) error {
+	if !hasContinuableWorkerTurn(worker) {
+		return nil
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "worker.executor.started",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            "continuing persisted worker executor turn",
+		PreviousResponseID: currentRun.PreviousResponseID,
+		WorkerID:           worker.ID,
+		WorkerName:         worker.WorkerName,
+		WorkerStatus:       string(worker.WorkerStatus),
+		WorkerScope:        worker.AssignedScope,
+		WorkerPath:         worker.WorktreePath,
+		ExecutorThreadID:   worker.ExecutorThreadID,
+		ExecutorTurnID:     worker.ExecutorTurnID,
+		ExecutorTurnStatus: worker.ExecutorTurnStatus,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return err
+	}
+
+	executorResult, execErr := c.Executor.Execute(ctx, executor.TurnRequest{
+		RunID:    currentRun.ID,
+		RepoPath: worker.WorktreePath,
+		ThreadID: worker.ExecutorThreadID,
+		TurnID:   worker.ExecutorTurnID,
+		Continue: true,
+	})
+
+	worker.ExecutorThreadID = strings.TrimSpace(executorResult.ThreadID)
+	worker.ExecutorTurnID = strings.TrimSpace(executorResult.TurnID)
+	worker.ExecutorTurnStatus = string(executorResult.TurnStatus)
+	worker.ExecutorApprovalState = string(executorResult.ApprovalState)
+	worker.ExecutorApprovalKind = executorApprovalKind(executorResult)
+	worker.ExecutorApprovalPreview = workerApprovalPreview(executorResult)
+	worker.ExecutorInterruptible = executorResult.Interruptible
+	worker.ExecutorSteerable = executorResult.Steerable
+	worker.ExecutorFailureStage = executorFailureStage(executorResult)
+	worker.ExecutorApproval = executorApprovalState(executorResult)
+
+	resultMessage := previewString(executorResult.FinalMessage, 240)
+	if resultMessage == "" && executorResult.Error != nil {
+		resultMessage = previewString(executorFailureMessage(executorResult), 240)
+	}
+	if resultMessage == "" && execErr != nil {
+		resultMessage = previewString(execErr.Error(), 240)
+	}
+
+	eventType := "worker.executor.completed"
+	switch {
+	case executorResult.TurnStatus == executor.TurnStatusApprovalRequired || executorResult.ApprovalState == executor.ApprovalStateRequired:
+		worker.WorkerStatus = state.WorkerStatusApprovalRequired
+		worker.WorkerResultSummary = executorApprovalMessage(executorResult)
+		worker.WorkerErrorSummary = ""
+		worker.CompletedAt = time.Time{}
+		eventType = "worker.executor.approval_required"
+	case execErr != nil || executorResult.TurnStatus == executor.TurnStatusFailed || executorResult.TurnStatus == executor.TurnStatusInterrupted || executorResult.CompletedAt.IsZero():
+		worker.WorkerStatus = state.WorkerStatusFailed
+		if resultMessage == "" {
+			resultMessage = previewString(executorFailureFallbackMessage(executorResult), 240)
+		}
+		worker.WorkerResultSummary = resultMessage
+		worker.WorkerErrorSummary = resultMessage
+		worker.CompletedAt = time.Now().UTC()
+		eventType = "worker.executor.failed"
+	default:
+		worker.WorkerStatus = state.WorkerStatusCompleted
+		if resultMessage == "" {
+			resultMessage = "worker executor turn completed"
+		}
+		worker.WorkerResultSummary = resultMessage
+		worker.WorkerErrorSummary = ""
+		if executorResult.CompletedAt.IsZero() {
+			worker.CompletedAt = time.Now().UTC()
+		} else {
+			worker.CompletedAt = executorResult.CompletedAt.UTC()
+		}
+	}
+
+	if strings.TrimSpace(worker.ExecutorTurnStatus) == "" {
+		switch worker.WorkerStatus {
+		case state.WorkerStatusCompleted:
+			worker.ExecutorTurnStatus = string(executor.TurnStatusCompleted)
+		case state.WorkerStatusApprovalRequired:
+			worker.ExecutorTurnStatus = string(executor.TurnStatusApprovalRequired)
+		default:
+			worker.ExecutorTurnStatus = string(executor.TurnStatusFailed)
+		}
+	}
+	worker.UpdatedAt = time.Now().UTC()
+
+	if err := c.Store.SaveWorker(ctx, worker); err != nil {
+		return err
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:                  eventType,
+		RunID:                 currentRun.ID,
+		RepoPath:              currentRun.RepoPath,
+		Goal:                  currentRun.Goal,
+		Status:                string(currentRun.Status),
+		Message:               fallbackString(strings.TrimSpace(worker.WorkerResultSummary), "worker executor continuation settled"),
+		PreviousResponseID:    currentRun.PreviousResponseID,
+		WorkerID:              worker.ID,
+		WorkerName:            worker.WorkerName,
+		WorkerStatus:          string(worker.WorkerStatus),
+		WorkerScope:           worker.AssignedScope,
+		WorkerPath:            worker.WorktreePath,
+		ExecutorTransport:     string(executorResult.Transport),
+		ExecutorThreadID:      worker.ExecutorThreadID,
+		ExecutorTurnID:        worker.ExecutorTurnID,
+		ExecutorTurnStatus:    worker.ExecutorTurnStatus,
+		ExecutorApprovalState: worker.ExecutorApprovalState,
+		ExecutorApprovalKind:  worker.ExecutorApprovalKind,
+		ExecutorFailureStage:  worker.ExecutorFailureStage,
+		ExecutorControlAction: strings.TrimSpace(worker.ExecutorLastControlAction),
+		ExecutorOutputPreview: previewString(executorResult.FinalMessage, 240),
+		Checkpoint:            checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return err
+	}
+
+	if worker.WorkerStatus == state.WorkerStatusApprovalRequired {
+		if err := c.Journal.Append(journal.Event{
+			Type:                  "worker.approval.required",
+			RunID:                 currentRun.ID,
+			RepoPath:              currentRun.RepoPath,
+			Goal:                  currentRun.Goal,
+			Status:                string(currentRun.Status),
+			Message:               fallbackString(strings.TrimSpace(worker.ExecutorApprovalPreview), executorApprovalMessage(executorResult)),
+			PreviousResponseID:    currentRun.PreviousResponseID,
+			WorkerID:              worker.ID,
+			WorkerName:            worker.WorkerName,
+			WorkerStatus:          string(worker.WorkerStatus),
+			WorkerScope:           worker.AssignedScope,
+			WorkerPath:            worker.WorktreePath,
+			ExecutorThreadID:      worker.ExecutorThreadID,
+			ExecutorTurnID:        worker.ExecutorTurnID,
+			ExecutorTurnStatus:    worker.ExecutorTurnStatus,
+			ExecutorApprovalState: worker.ExecutorApprovalState,
+			ExecutorApprovalKind:  worker.ExecutorApprovalKind,
+			StopReason:            StopReasonExecutorApprovalReq,
+			Checkpoint:            checkpointRef(&currentRun.LatestCheckpoint),
+		}); err != nil {
+			return err
+		}
+	}
+
+	return c.Journal.Append(journal.Event{
+		Type:               "worker.result.recorded",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            fallbackString(strings.TrimSpace(worker.WorkerResultSummary), "worker result recorded"),
+		PreviousResponseID: currentRun.PreviousResponseID,
+		WorkerID:           worker.ID,
+		WorkerName:         worker.WorkerName,
+		WorkerStatus:       string(worker.WorkerStatus),
+		WorkerScope:        worker.AssignedScope,
+		WorkerPath:         worker.WorktreePath,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	})
+}
+
+func (c Cycle) syncRunWorkerPlanState(ctx context.Context, runID string) (state.Run, error) {
+	run, found, err := c.Store.GetRun(ctx, runID)
+	if err != nil {
+		return state.Run{}, err
+	}
+	if !found {
+		return state.Run{}, fmt.Errorf("run %s not found", runID)
+	}
+	if run.CollectedContext == nil || run.CollectedContext.WorkerPlan == nil {
+		return run, nil
+	}
+
+	workers, err := c.Store.ListWorkers(ctx, runID)
+	if err != nil {
+		return state.Run{}, err
+	}
+	summaries := make([]state.WorkerResultSummary, 0, len(workers))
+	workerIDs := make([]string, 0, len(workers))
+	for _, worker := range workers {
+		summaries = append(summaries, summarizeWorker(worker))
+		workerIDs = append(workerIDs, worker.ID)
+	}
+
+	collectedContext := *run.CollectedContext
+	workerPlan := *collectedContext.WorkerPlan
+	workerPlan.Workers = summaries
+	workerPlan.WorkerIDs = workerIDs
+	workerPlan.Status = workerPlanStatusFromWorkers(summaries)
+	workerPlan.Message = workerPlanMessageFromWorkers(summaries, workerPlan.ConcurrencyLimit)
+	collectedContext.WorkerPlan = &workerPlan
+	if err := c.Store.SaveCollectedContext(ctx, runID, &collectedContext); err != nil {
+		return state.Run{}, err
+	}
+
+	updatedRun, found, err := c.Store.GetRun(ctx, runID)
+	if err != nil {
+		return state.Run{}, err
+	}
+	if !found {
+		return state.Run{}, fmt.Errorf("updated run %s not found after worker plan sync", runID)
+	}
+	return updatedRun, nil
+}
+
+func workerPlanStatusFromWorkers(workers []state.WorkerResultSummary) string {
+	if len(workers) == 0 {
+		return ""
+	}
+	approvalCount := 0
+	activeCount := 0
+	failedCount := 0
+	for _, worker := range workers {
+		switch strings.TrimSpace(worker.WorkerStatus) {
+		case string(state.WorkerStatusApprovalRequired):
+			approvalCount++
+		case string(state.WorkerStatusExecutorActive), string(state.WorkerStatusAssigned), string(state.WorkerStatusPending), string(state.WorkerStatusCreating):
+			activeCount++
+		case string(state.WorkerStatusFailed):
+			failedCount++
+		}
+	}
+	switch {
+	case approvalCount > 0:
+		return "approval_required"
+	case activeCount > 0:
+		return "in_progress"
+	case failedCount > 0:
+		return "failed"
+	default:
+		return "completed"
+	}
+}
+
+func workerPlanMessageFromWorkers(workers []state.WorkerResultSummary, concurrencyLimit int) string {
+	if len(workers) == 0 {
+		return ""
+	}
+	completedCount := 0
+	failedCount := 0
+	approvalCount := 0
+	activeCount := 0
+	for _, worker := range workers {
+		switch strings.TrimSpace(worker.WorkerStatus) {
+		case string(state.WorkerStatusCompleted):
+			completedCount++
+		case string(state.WorkerStatusFailed):
+			failedCount++
+		case string(state.WorkerStatusApprovalRequired):
+			approvalCount++
+		case string(state.WorkerStatusExecutorActive), string(state.WorkerStatusAssigned), string(state.WorkerStatusPending), string(state.WorkerStatusCreating):
+			activeCount++
+		}
+	}
+	return fmt.Sprintf("worker plan settled with completed=%d failed=%d approval_required=%d active=%d (limit=%d)", completedCount, failedCount, approvalCount, activeCount, concurrencyLimit)
+}
+
+func workerStatusCount(workers []state.Worker, status state.WorkerStatus) int {
+	count := 0
+	for _, worker := range workers {
+		if worker.WorkerStatus == status {
+			count++
+		}
+	}
+	return count
+}
+
+func executorApprovalStateValueFromRun(run state.Run) string {
+	if run.ExecutorApproval == nil {
+		return ""
+	}
+	return strings.TrimSpace(run.ExecutorApproval.State)
+}
+
+func driftReviewMessage(summary planner.DriftReviewSummary) string {
+	if summary.Aligned {
+		return "drift watcher found no roadmap-alignment concerns"
+	}
+	if len(summary.Concerns) > 0 {
+		return "drift watcher recorded concerns: " + previewString(strings.Join(summary.Concerns, "; "), 240)
+	}
+	if len(summary.MissingContext) > 0 {
+		return "drift watcher recorded missing context: " + previewString(strings.Join(summary.MissingContext, "; "), 240)
+	}
+	return "drift watcher completed"
 }
 
 func BuildCollectedContextState(repoPath string, output planner.OutputEnvelope) (*state.CollectedContextState, error) {
@@ -623,9 +2096,12 @@ func BuildCollectedContextState(repoPath string, output planner.OutputEnvelope) 
 	}
 
 	collected := &state.CollectedContextState{
-		Focus:     strings.TrimSpace(output.CollectContext.Focus),
-		Questions: nonEmpty(output.CollectContext.Questions),
-		Results:   make([]state.CollectedContextResult, 0, len(nonEmpty(output.CollectContext.Paths))),
+		Focus:         strings.TrimSpace(output.CollectContext.Focus),
+		Questions:     nonEmpty(output.CollectContext.Questions),
+		Results:       make([]state.CollectedContextResult, 0, len(nonEmpty(output.CollectContext.Paths))),
+		ToolResults:   nil,
+		WorkerResults: nil,
+		WorkerPlan:    nil,
 	}
 
 	for _, requestedPath := range nonEmpty(output.CollectContext.Paths) {
@@ -633,6 +2109,1415 @@ func BuildCollectedContextState(repoPath string, output planner.OutputEnvelope) 
 	}
 
 	return collected, nil
+}
+
+func (c Cycle) executeWorkerActions(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	actions []planner.WorkerAction,
+) ([]state.WorkerActionResult, error) {
+	results := make([]state.WorkerActionResult, 0, len(actions))
+	for _, action := range actions {
+		actionResult, err := c.executeWorkerAction(ctx, currentRun, currentPlannerTurn, action)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, actionResult)
+	}
+	return results, nil
+}
+
+func (c Cycle) executeWorkerPlan(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	plan planner.WorkerPlan,
+) (*state.WorkerPlanResult, []state.WorkerActionResult, error) {
+	concurrencyLimit := c.workerPlanConcurrencyLimit()
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "worker.plan.received",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            fmt.Sprintf("planner submitted worker plan with %d worker(s)", len(plan.Workers)),
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return nil, nil, err
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "worker.plan.started",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            fmt.Sprintf("executing planner-owned worker plan concurrently in isolated workspaces (limit=%d)", concurrencyLimit),
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return nil, nil, err
+	}
+
+	actionResults := make([]state.WorkerActionResult, 0, len(plan.Workers)*2+2)
+	createdWorkerIDs := make([]string, 0, len(plan.Workers))
+	queuedDispatches := make([]planner.WorkerAction, 0, len(plan.Workers))
+	workerFailures := 0
+	workerApprovals := 0
+
+	for _, requestedWorker := range plan.Workers {
+		createResult, err := c.executeWorkerCreate(ctx, currentRun, currentPlannerTurn, planner.WorkerAction{
+			Action:     planner.WorkerActionCreate,
+			WorkerName: requestedWorker.Name,
+			Scope:      requestedWorker.Scope,
+		})
+		if err != nil {
+			if appendErr := c.appendWorkerPlanFailureEvent(currentRun, currentPlannerTurn, err.Error()); appendErr != nil {
+				return nil, nil, appendErr
+			}
+			return nil, nil, err
+		}
+		actionResults = append(actionResults, createResult)
+
+		var workerID string
+		if createResult.Worker != nil {
+			workerID = strings.TrimSpace(createResult.Worker.WorkerID)
+		}
+		if !createResult.Success || workerID == "" {
+			workerFailures++
+			continue
+		}
+		createdWorkerIDs = append(createdWorkerIDs, workerID)
+
+		queueResult, err := c.queueWorkerPlanDispatch(ctx, currentRun, currentPlannerTurn, planner.WorkerAction{
+			Action:         planner.WorkerActionDispatch,
+			WorkerID:       workerID,
+			TaskSummary:    requestedWorker.TaskSummary,
+			ExecutorPrompt: requestedWorker.ExecutorPrompt,
+		})
+		if err != nil {
+			if appendErr := c.appendWorkerPlanFailureEvent(currentRun, currentPlannerTurn, err.Error()); appendErr != nil {
+				return nil, nil, appendErr
+			}
+			return nil, nil, err
+		}
+		actionResults = append(actionResults, queueResult)
+		if !queueResult.Success {
+			workerFailures++
+			continue
+		}
+		queuedDispatches = append(queuedDispatches, planner.WorkerAction{
+			Action:         planner.WorkerActionDispatch,
+			WorkerID:       workerID,
+			TaskSummary:    requestedWorker.TaskSummary,
+			ExecutorPrompt: requestedWorker.ExecutorPrompt,
+		})
+	}
+
+	planResult := &state.WorkerPlanResult{
+		Status:               "completed",
+		WorkerIDs:            append([]string(nil), createdWorkerIDs...),
+		ConcurrencyLimit:     concurrencyLimit,
+		IntegrationRequested: plan.IntegrationRequested,
+		ApplyMode:            strings.TrimSpace(plan.ApplyMode),
+	}
+
+	if planResult.ApplyMode == "" {
+		planResult.ApplyMode = string(planner.WorkerApplyModeUnavailable)
+	}
+
+	if len(queuedDispatches) > 0 {
+		if err := c.Journal.Append(journal.Event{
+			Type:               "worker.plan.dispatch.started",
+			RunID:              currentRun.ID,
+			RepoPath:           currentRun.RepoPath,
+			Goal:               currentRun.Goal,
+			Status:             string(currentRun.Status),
+			Message:            fmt.Sprintf("dispatching %d worker executor turn(s) concurrently with limit=%d", len(queuedDispatches), concurrencyLimit),
+			ResponseID:         currentPlannerTurn.ResponseID,
+			PreviousResponseID: currentRun.PreviousResponseID,
+			PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+			Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+		}); err != nil {
+			return nil, nil, err
+		}
+
+		dispatchResults, err := c.executeConcurrentWorkerPlanDispatches(ctx, currentRun, currentPlannerTurn, queuedDispatches, concurrencyLimit)
+		if err != nil {
+			if appendErr := c.appendWorkerPlanFailureEvent(currentRun, currentPlannerTurn, err.Error()); appendErr != nil {
+				return nil, nil, appendErr
+			}
+			return nil, nil, err
+		}
+		actionResults = append(actionResults, dispatchResults...)
+
+		completedDispatches := 0
+		for _, dispatchResult := range dispatchResults {
+			if dispatchResult.Worker == nil {
+				if !dispatchResult.Success {
+					workerFailures++
+				}
+				continue
+			}
+			switch strings.TrimSpace(dispatchResult.Worker.WorkerStatus) {
+			case string(state.WorkerStatusCompleted):
+				completedDispatches++
+			case string(state.WorkerStatusApprovalRequired):
+				workerApprovals++
+			default:
+				if !dispatchResult.Success {
+					workerFailures++
+				}
+			}
+		}
+
+		if err := c.Journal.Append(journal.Event{
+			Type:               "worker.plan.dispatch.completed",
+			RunID:              currentRun.ID,
+			RepoPath:           currentRun.RepoPath,
+			Goal:               currentRun.Goal,
+			Status:             string(currentRun.Status),
+			Message:            fmt.Sprintf("worker executor dispatch settled: completed=%d failed=%d approval_required=%d", completedDispatches, workerFailures, workerApprovals),
+			ResponseID:         currentPlannerTurn.ResponseID,
+			PreviousResponseID: currentRun.PreviousResponseID,
+			PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+			Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+		}); err != nil {
+			return nil, nil, err
+		}
+
+		if workerApprovals > 0 {
+			if err := c.Journal.Append(journal.Event{
+				Type:               "worker.plan.waiting_on_approval",
+				RunID:              currentRun.ID,
+				RepoPath:           currentRun.RepoPath,
+				Goal:               currentRun.Goal,
+				Status:             string(currentRun.Status),
+				Message:            fmt.Sprintf("worker plan is waiting on approval for %d worker executor turn(s)", workerApprovals),
+				ResponseID:         currentPlannerTurn.ResponseID,
+				PreviousResponseID: currentRun.PreviousResponseID,
+				PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+				StopReason:         StopReasonExecutorApprovalReq,
+				Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+			}); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+
+	if len(createdWorkerIDs) > 0 {
+		workers := make([]state.WorkerResultSummary, 0, len(createdWorkerIDs))
+		for _, workerID := range createdWorkerIDs {
+			worker, found, err := c.Store.GetWorker(ctx, workerID)
+			if err != nil {
+				if appendErr := c.appendWorkerPlanFailureEvent(currentRun, currentPlannerTurn, err.Error()); appendErr != nil {
+					return nil, nil, appendErr
+				}
+				return nil, nil, err
+			}
+			if !found {
+				continue
+			}
+			workers = append(workers, summarizeWorker(worker))
+		}
+		planResult.Workers = workers
+	}
+
+	var integrationResult state.WorkerActionResult
+	if plan.IntegrationRequested && len(createdWorkerIDs) > 0 {
+		result, err := c.executeWorkerIntegrate(ctx, currentRun, currentPlannerTurn, planner.WorkerAction{
+			Action:    planner.WorkerActionIntegrate,
+			WorkerIDs: append([]string(nil), createdWorkerIDs...),
+		})
+		if err != nil {
+			if appendErr := c.appendWorkerPlanFailureEvent(currentRun, currentPlannerTurn, err.Error()); appendErr != nil {
+				return nil, nil, appendErr
+			}
+			return nil, nil, err
+		}
+		integrationResult = result
+		actionResults = append(actionResults, integrationResult)
+		if integrationResult.Integration != nil {
+			planResult.IntegrationArtifactPath = strings.TrimSpace(integrationResult.ArtifactPath)
+			planResult.IntegrationPreview = strings.TrimSpace(integrationResult.Integration.IntegrationPreview)
+		}
+		if !integrationResult.Success {
+			workerFailures++
+		}
+	}
+
+	if planResult.ApplyMode != string(planner.WorkerApplyModeUnavailable) {
+		if strings.TrimSpace(planResult.IntegrationArtifactPath) != "" && allWorkerPlanWorkersCompleted(planResult.Workers) {
+			applyResult, err := c.executeWorkerApply(ctx, currentRun, currentPlannerTurn, planner.WorkerAction{
+				Action:       planner.WorkerActionApply,
+				ArtifactPath: planResult.IntegrationArtifactPath,
+				ApplyMode:    planResult.ApplyMode,
+			})
+			if err != nil {
+				if appendErr := c.appendWorkerPlanFailureEvent(currentRun, currentPlannerTurn, err.Error()); appendErr != nil {
+					return nil, nil, appendErr
+				}
+				return nil, nil, err
+			}
+			actionResults = append(actionResults, applyResult)
+			planResult.ApplyArtifactPath = strings.TrimSpace(applyResult.ArtifactPath)
+			planResult.Apply = applyResult.Apply
+			if !applyResult.Success {
+				workerFailures++
+			}
+		} else {
+			workerFailures++
+			planResult.Message = "worker plan apply requested but skipped because integration output was unavailable or one or more worker turns did not complete successfully"
+		}
+	}
+
+	switch {
+	case workerApprovals > 0:
+		planResult.Status = "approval_required"
+		if strings.TrimSpace(planResult.Message) == "" {
+			planResult.Message = fmt.Sprintf("worker plan is waiting on approval for %d isolated worker(s)", workerApprovals)
+		}
+	case workerFailures > 0:
+		planResult.Status = "failed"
+		if strings.TrimSpace(planResult.Message) == "" {
+			planResult.Message = fmt.Sprintf("worker plan recorded %d mechanical failure(s) or skipped apply step(s)", workerFailures)
+		}
+		if err := c.Journal.Append(journal.Event{
+			Type:               "worker.plan.failed",
+			RunID:              currentRun.ID,
+			RepoPath:           currentRun.RepoPath,
+			Goal:               currentRun.Goal,
+			Status:             string(currentRun.Status),
+			Message:            planResult.Message,
+			ResponseID:         currentPlannerTurn.ResponseID,
+			PreviousResponseID: currentRun.PreviousResponseID,
+			PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+			ArtifactPath:       firstNonEmpty(planResult.ApplyArtifactPath, planResult.IntegrationArtifactPath, applyArtifactPath(planResult.Apply)),
+			Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+		}); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if strings.TrimSpace(planResult.Message) == "" {
+		planResult.Message = fmt.Sprintf("worker plan completed across %d isolated worker(s) with concurrency limit=%d", len(planResult.Workers), concurrencyLimit)
+	}
+
+	if planResult.Status == "completed" {
+		if err := c.Journal.Append(journal.Event{
+			Type:               "worker.plan.completed",
+			RunID:              currentRun.ID,
+			RepoPath:           currentRun.RepoPath,
+			Goal:               currentRun.Goal,
+			Status:             string(currentRun.Status),
+			Message:            planResult.Message,
+			ResponseID:         currentPlannerTurn.ResponseID,
+			PreviousResponseID: currentRun.PreviousResponseID,
+			PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+			ArtifactPath:       firstNonEmpty(planResult.ApplyArtifactPath, planResult.IntegrationArtifactPath, applyArtifactPath(planResult.Apply)),
+			Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+		}); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "worker.plan.finished",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            planResult.Message,
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		ArtifactPath:       firstNonEmpty(planResult.ApplyArtifactPath, planResult.IntegrationArtifactPath, applyArtifactPath(planResult.Apply)),
+		StopReason:         workerPlanStopReason(planResult),
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return nil, nil, err
+	}
+
+	return planResult, actionResults, nil
+}
+
+func (c Cycle) executeConcurrentWorkerPlanDispatches(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	actions []planner.WorkerAction,
+	concurrencyLimit int,
+) ([]state.WorkerActionResult, error) {
+	type dispatchOutcome struct {
+		index  int
+		result state.WorkerActionResult
+		err    error
+	}
+
+	results := make([]state.WorkerActionResult, len(actions))
+	if len(actions) == 0 {
+		return results, nil
+	}
+
+	sem := make(chan struct{}, concurrencyLimit)
+	outcomes := make(chan dispatchOutcome, len(actions))
+	var wg sync.WaitGroup
+
+	for index, action := range actions {
+		wg.Add(1)
+		go func(index int, action planner.WorkerAction) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() {
+				<-sem
+			}()
+
+			result, err := c.executeWorkerPlanDispatch(ctx, currentRun, currentPlannerTurn, action)
+			outcomes <- dispatchOutcome{
+				index:  index,
+				result: result,
+				err:    err,
+			}
+		}(index, action)
+	}
+
+	wg.Wait()
+	close(outcomes)
+
+	var joinedErr error
+	for outcome := range outcomes {
+		results[outcome.index] = outcome.result
+		if outcome.err != nil {
+			joinedErr = errors.Join(joinedErr, outcome.err)
+		}
+	}
+
+	return results, joinedErr
+}
+
+func workerPlanStopReason(planResult *state.WorkerPlanResult) string {
+	if planResult == nil {
+		return ""
+	}
+	if strings.TrimSpace(planResult.Status) == "approval_required" {
+		return StopReasonExecutorApprovalReq
+	}
+	return ""
+}
+
+func (c Cycle) workerPlanConcurrencyLimit() int {
+	if c.WorkerPlanConcurrencyLimit > 0 {
+		return c.WorkerPlanConcurrencyLimit
+	}
+	return 2
+}
+
+func (c Cycle) executeWorkerAction(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	action planner.WorkerAction,
+) (state.WorkerActionResult, error) {
+	switch action.Action {
+	case planner.WorkerActionCreate:
+		return c.executeWorkerCreate(ctx, currentRun, currentPlannerTurn, action)
+	case planner.WorkerActionDispatch:
+		return c.executeWorkerDispatch(ctx, currentRun, currentPlannerTurn, action)
+	case planner.WorkerActionList:
+		return c.executeWorkerList(ctx, currentRun, currentPlannerTurn, action)
+	case planner.WorkerActionRemove:
+		return c.executeWorkerRemove(ctx, currentRun, currentPlannerTurn, action)
+	case planner.WorkerActionIntegrate:
+		return c.executeWorkerIntegrate(ctx, currentRun, currentPlannerTurn, action)
+	case planner.WorkerActionApply:
+		return c.executeWorkerApply(ctx, currentRun, currentPlannerTurn, action)
+	default:
+		return state.WorkerActionResult{
+			Action:  string(action.Action),
+			Success: false,
+			Message: "unknown worker action",
+		}, nil
+	}
+}
+
+func (c Cycle) executeWorkerCreate(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	action planner.WorkerAction,
+) (state.WorkerActionResult, error) {
+	manager := workerctl.NewManager(currentRun.RepoPath, state.ResolveLayout(currentRun.RepoPath).WorkersDir)
+	plannedPath, err := manager.PlannedPath(action.WorkerName)
+	if err != nil {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, nil, err.Error(), false)
+	}
+
+	if existingWorker, found, err := c.Store.GetWorkerByPath(ctx, plannedPath); err != nil {
+		return state.WorkerActionResult{}, err
+	} else if found {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, &existingWorker, "worker already exists for planned isolated path", false)
+	}
+
+	worker, err := c.Store.CreateWorker(ctx, state.CreateWorkerParams{
+		RunID:         currentRun.ID,
+		WorkerName:    strings.TrimSpace(action.WorkerName),
+		WorkerStatus:  state.WorkerStatusCreating,
+		AssignedScope: strings.TrimSpace(action.Scope),
+		WorktreePath:  plannedPath,
+		CreatedAt:     time.Now().UTC(),
+	})
+	if err != nil {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, &state.Worker{
+			RunID:         currentRun.ID,
+			WorkerName:    strings.TrimSpace(action.WorkerName),
+			WorkerStatus:  state.WorkerStatusCreating,
+			AssignedScope: strings.TrimSpace(action.Scope),
+			WorktreePath:  plannedPath,
+		}, err.Error(), false)
+	}
+
+	if _, err := manager.Create(ctx, worker.WorkerName); err != nil {
+		_ = c.Store.DeleteWorker(ctx, worker.ID)
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, &worker, err.Error(), false)
+	}
+
+	worker.WorkerStatus = state.WorkerStatusIdle
+	worker.UpdatedAt = time.Now().UTC()
+	worker.WorkerResultSummary = "isolated worker created"
+	if err := c.Store.SaveWorker(ctx, worker); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	reloaded, found, err := c.Store.GetWorker(ctx, worker.ID)
+	if err != nil {
+		return state.WorkerActionResult{}, err
+	}
+	if !found {
+		return state.WorkerActionResult{}, fmt.Errorf("worker %s could not be reloaded after creation", worker.ID)
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "worker.result.recorded",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            "planner worker create completed: " + reloaded.WorkerName,
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		WorkerID:           reloaded.ID,
+		WorkerName:         reloaded.WorkerName,
+		WorkerStatus:       string(reloaded.WorkerStatus),
+		WorkerScope:        reloaded.AssignedScope,
+		WorkerPath:         reloaded.WorktreePath,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	return state.WorkerActionResult{
+		Action:  string(action.Action),
+		Success: true,
+		Message: "worker created",
+		Worker:  func() *state.WorkerResultSummary { summary := summarizeWorker(reloaded); return &summary }(),
+	}, nil
+}
+
+func (c Cycle) executeWorkerDispatch(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	action planner.WorkerAction,
+) (state.WorkerActionResult, error) {
+	worker, found, err := c.resolveWorkerForAction(ctx, currentRun.ID, action)
+	if err != nil {
+		return state.WorkerActionResult{}, err
+	}
+	if !found {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, nil, "worker not found for dispatch", false)
+	}
+	if err := c.validateWorkerDispatchTarget(currentRun, worker); err != nil {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, &worker, err.Error(), false)
+	}
+	if err := c.prepareWorkerDispatchState(ctx, currentRun, currentPlannerTurn, &worker, action, state.WorkerStatusAssigned, "planner assigned worker task"); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+	return c.runWorkerExecutorTurn(ctx, currentRun, currentPlannerTurn, action, worker)
+}
+
+func (c Cycle) queueWorkerPlanDispatch(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	action planner.WorkerAction,
+) (state.WorkerActionResult, error) {
+	worker, found, err := c.resolveWorkerForAction(ctx, currentRun.ID, action)
+	if err != nil {
+		return state.WorkerActionResult{}, err
+	}
+	if !found {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, nil, "worker not found for plan dispatch", false)
+	}
+	if err := c.validateWorkerDispatchTarget(currentRun, worker); err != nil {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, &worker, err.Error(), false)
+	}
+	if err := c.prepareWorkerDispatchState(ctx, currentRun, currentPlannerTurn, &worker, action, state.WorkerStatusPending, "planner queued worker task"); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	workerSummary := summarizeWorker(worker)
+	return state.WorkerActionResult{
+		Action:  string(action.Action),
+		Success: true,
+		Message: "worker queued for executor dispatch",
+		Worker:  &workerSummary,
+	}, nil
+}
+
+func (c Cycle) executeWorkerPlanDispatch(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	action planner.WorkerAction,
+) (state.WorkerActionResult, error) {
+	worker, found, err := c.resolveWorkerForAction(ctx, currentRun.ID, action)
+	if err != nil {
+		return state.WorkerActionResult{}, err
+	}
+	if !found {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, nil, "worker not found for plan dispatch", false)
+	}
+	if err := c.validateWorkerDispatchTarget(currentRun, worker); err != nil {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, &worker, err.Error(), false)
+	}
+	return c.runWorkerExecutorTurn(ctx, currentRun, currentPlannerTurn, action, worker)
+}
+
+func (c Cycle) validateWorkerDispatchTarget(currentRun state.Run, worker state.Worker) error {
+	if state.IsWorkerActive(worker.WorkerStatus) && worker.WorkerStatus != state.WorkerStatusPending {
+		return errors.New("worker already has active work")
+	}
+	if workerUsesMainTree(currentRun.RepoPath, worker.WorktreePath) {
+		return errors.New("worker path may not reuse the main repo working tree")
+	}
+	if _, err := os.Stat(worker.WorktreePath); err != nil {
+		return fmt.Errorf("worker worktree path is unavailable: %w", err)
+	}
+	return nil
+}
+
+func (c Cycle) prepareWorkerDispatchState(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	worker *state.Worker,
+	action planner.WorkerAction,
+	status state.WorkerStatus,
+	messagePrefix string,
+) error {
+	now := time.Now().UTC()
+	worker.WorkerStatus = status
+	worker.WorkerTaskSummary = previewString(action.TaskSummary, 240)
+	worker.WorkerExecutorPromptSummary = previewString(action.ExecutorPrompt, 240)
+	worker.WorkerResultSummary = ""
+	worker.WorkerErrorSummary = ""
+	worker.ExecutorTurnStatus = ""
+	worker.ExecutorApprovalState = ""
+	worker.ExecutorApprovalKind = ""
+	worker.ExecutorApprovalPreview = ""
+	worker.ExecutorInterruptible = false
+	worker.ExecutorSteerable = false
+	worker.ExecutorFailureStage = ""
+	worker.ExecutorLastControlAction = ""
+	worker.ExecutorApproval = nil
+	worker.ExecutorLastControl = nil
+	worker.AssignedAt = now
+	worker.StartedAt = time.Time{}
+	worker.CompletedAt = time.Time{}
+	worker.UpdatedAt = now
+	if err := c.Store.SaveWorker(ctx, *worker); err != nil {
+		return err
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "worker.task.assigned",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            messagePrefix + ": " + previewString(action.TaskSummary, 160),
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		WorkerID:           worker.ID,
+		WorkerName:         worker.WorkerName,
+		WorkerStatus:       string(worker.WorkerStatus),
+		WorkerScope:        worker.AssignedScope,
+		WorkerPath:         worker.WorktreePath,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c Cycle) runWorkerExecutorTurn(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	action planner.WorkerAction,
+	worker state.Worker,
+) (state.WorkerActionResult, error) {
+	if c.Executor == nil {
+		now := time.Now().UTC()
+		worker.WorkerStatus = state.WorkerStatusFailed
+		worker.WorkerResultSummary = "executor unavailable"
+		worker.WorkerErrorSummary = "executor unavailable"
+		worker.ExecutorFailureStage = "start"
+		worker.CompletedAt = now
+		worker.UpdatedAt = now
+		if err := c.Store.SaveWorker(ctx, worker); err != nil {
+			return state.WorkerActionResult{}, err
+		}
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, &worker, "executor is required when planner dispatches worker work", false)
+	}
+
+	startedAt := time.Now().UTC()
+	worker.WorkerStatus = state.WorkerStatusExecutorActive
+	worker.StartedAt = startedAt
+	worker.CompletedAt = time.Time{}
+	worker.ExecutorTurnStatus = string(executor.TurnStatusInProgress)
+	worker.ExecutorApprovalState = ""
+	worker.ExecutorApprovalKind = ""
+	worker.ExecutorFailureStage = ""
+	worker.WorkerResultSummary = ""
+	worker.WorkerErrorSummary = ""
+	worker.UpdatedAt = startedAt
+	if err := c.Store.SaveWorker(ctx, worker); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	startMessage := "planner dispatched one executor turn to worker: " + previewString(action.TaskSummary, 160)
+	for _, eventType := range []string{"worker.executor.started", "worker.executor.dispatched"} {
+		if err := c.Journal.Append(journal.Event{
+			Type:               eventType,
+			RunID:              currentRun.ID,
+			RepoPath:           currentRun.RepoPath,
+			Goal:               currentRun.Goal,
+			Status:             string(currentRun.Status),
+			Message:            startMessage,
+			ResponseID:         currentPlannerTurn.ResponseID,
+			PreviousResponseID: currentRun.PreviousResponseID,
+			PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+			WorkerID:           worker.ID,
+			WorkerName:         worker.WorkerName,
+			WorkerStatus:       string(worker.WorkerStatus),
+			WorkerScope:        worker.AssignedScope,
+			WorkerPath:         worker.WorktreePath,
+			Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+		}); err != nil {
+			return state.WorkerActionResult{}, err
+		}
+	}
+
+	executorResult, execErr := c.Executor.Execute(ctx, executor.TurnRequest{
+		RunID:    currentRun.ID,
+		RepoPath: worker.WorktreePath,
+		Prompt:   strings.TrimSpace(action.ExecutorPrompt),
+		ThreadID: worker.ExecutorThreadID,
+	})
+
+	worker.ExecutorThreadID = strings.TrimSpace(executorResult.ThreadID)
+	worker.ExecutorTurnID = strings.TrimSpace(executorResult.TurnID)
+	worker.ExecutorTurnStatus = string(executorResult.TurnStatus)
+	worker.ExecutorApprovalState = string(executorResult.ApprovalState)
+	worker.ExecutorApprovalKind = executorApprovalKind(executorResult)
+	worker.ExecutorApprovalPreview = workerApprovalPreview(executorResult)
+	worker.ExecutorInterruptible = executorResult.Interruptible
+	worker.ExecutorSteerable = executorResult.Steerable
+	worker.ExecutorFailureStage = executorFailureStage(executorResult)
+	worker.ExecutorApproval = executorApprovalState(executorResult)
+
+	resultMessage := previewString(executorResult.FinalMessage, 240)
+	if resultMessage == "" && executorResult.Error != nil {
+		resultMessage = previewString(executorFailureMessage(executorResult), 240)
+	}
+	if resultMessage == "" && execErr != nil {
+		resultMessage = previewString(execErr.Error(), 240)
+	}
+
+	eventType := "worker.executor.completed"
+	success := true
+	switch {
+	case executorResult.TurnStatus == executor.TurnStatusApprovalRequired || executorResult.ApprovalState == executor.ApprovalStateRequired:
+		worker.WorkerStatus = state.WorkerStatusApprovalRequired
+		worker.WorkerResultSummary = executorApprovalMessage(executorResult)
+		worker.WorkerErrorSummary = ""
+		worker.CompletedAt = time.Time{}
+		success = false
+		eventType = "worker.executor.approval_required"
+	case execErr != nil || executorResult.TurnStatus == executor.TurnStatusFailed || executorResult.TurnStatus == executor.TurnStatusInterrupted || executorResult.CompletedAt.IsZero():
+		worker.WorkerStatus = state.WorkerStatusFailed
+		if resultMessage == "" {
+			resultMessage = previewString(executorFailureFallbackMessage(executorResult), 240)
+		}
+		worker.WorkerResultSummary = resultMessage
+		worker.WorkerErrorSummary = resultMessage
+		worker.CompletedAt = time.Now().UTC()
+		success = false
+		eventType = "worker.executor.failed"
+	default:
+		worker.WorkerStatus = state.WorkerStatusCompleted
+		if resultMessage == "" {
+			resultMessage = "worker executor turn completed"
+		}
+		worker.WorkerResultSummary = resultMessage
+		worker.WorkerErrorSummary = ""
+		if executorResult.CompletedAt.IsZero() {
+			worker.CompletedAt = time.Now().UTC()
+		} else {
+			worker.CompletedAt = executorResult.CompletedAt.UTC()
+		}
+	}
+	if strings.TrimSpace(worker.ExecutorTurnStatus) == "" {
+		switch worker.WorkerStatus {
+		case state.WorkerStatusCompleted:
+			worker.ExecutorTurnStatus = string(executor.TurnStatusCompleted)
+		case state.WorkerStatusApprovalRequired:
+			worker.ExecutorTurnStatus = string(executor.TurnStatusApprovalRequired)
+		default:
+			worker.ExecutorTurnStatus = string(executor.TurnStatusFailed)
+		}
+	}
+	worker.UpdatedAt = time.Now().UTC()
+
+	if err := c.Store.SaveWorker(ctx, worker); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:                  eventType,
+		RunID:                 currentRun.ID,
+		RepoPath:              currentRun.RepoPath,
+		Goal:                  currentRun.Goal,
+		Status:                string(currentRun.Status),
+		Message:               fallbackString(strings.TrimSpace(worker.WorkerResultSummary), "worker executor dispatch finished"),
+		ResponseID:            currentPlannerTurn.ResponseID,
+		PreviousResponseID:    currentRun.PreviousResponseID,
+		PlannerOutcome:        string(currentPlannerTurn.Output.Outcome),
+		WorkerID:              worker.ID,
+		WorkerName:            worker.WorkerName,
+		WorkerStatus:          string(worker.WorkerStatus),
+		WorkerScope:           worker.AssignedScope,
+		WorkerPath:            worker.WorktreePath,
+		ExecutorTransport:     string(executorResult.Transport),
+		ExecutorThreadID:      executorResult.ThreadID,
+		ExecutorTurnID:        executorResult.TurnID,
+		ExecutorTurnStatus:    string(executorResult.TurnStatus),
+		ExecutorApprovalState: string(executorResult.ApprovalState),
+		ExecutorApprovalKind:  executorApprovalKind(executorResult),
+		ExecutorFailureStage:  executorFailureStage(executorResult),
+		ExecutorOutputPreview: previewString(executorResult.FinalMessage, 240),
+		Checkpoint:            checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	if worker.WorkerStatus == state.WorkerStatusApprovalRequired {
+		if err := c.Journal.Append(journal.Event{
+			Type:                  "worker.approval.required",
+			RunID:                 currentRun.ID,
+			RepoPath:              currentRun.RepoPath,
+			Goal:                  currentRun.Goal,
+			Status:                string(currentRun.Status),
+			Message:               fallbackString(strings.TrimSpace(worker.ExecutorApprovalPreview), executorApprovalMessage(executorResult)),
+			ResponseID:            currentPlannerTurn.ResponseID,
+			PreviousResponseID:    currentRun.PreviousResponseID,
+			PlannerOutcome:        string(currentPlannerTurn.Output.Outcome),
+			WorkerID:              worker.ID,
+			WorkerName:            worker.WorkerName,
+			WorkerStatus:          string(worker.WorkerStatus),
+			WorkerScope:           worker.AssignedScope,
+			WorkerPath:            worker.WorktreePath,
+			ExecutorThreadID:      worker.ExecutorThreadID,
+			ExecutorTurnID:        worker.ExecutorTurnID,
+			ExecutorTurnStatus:    worker.ExecutorTurnStatus,
+			ExecutorApprovalState: worker.ExecutorApprovalState,
+			ExecutorApprovalKind:  worker.ExecutorApprovalKind,
+			StopReason:            StopReasonExecutorApprovalReq,
+			Checkpoint:            checkpointRef(&currentRun.LatestCheckpoint),
+		}); err != nil {
+			return state.WorkerActionResult{}, err
+		}
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "worker.result.recorded",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            fallbackString(strings.TrimSpace(worker.WorkerResultSummary), "worker result recorded"),
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		WorkerID:           worker.ID,
+		WorkerName:         worker.WorkerName,
+		WorkerStatus:       string(worker.WorkerStatus),
+		WorkerScope:        worker.AssignedScope,
+		WorkerPath:         worker.WorktreePath,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	workerSummary := summarizeWorker(worker)
+	return state.WorkerActionResult{
+		Action:  string(action.Action),
+		Success: success,
+		Message: worker.WorkerResultSummary,
+		Worker:  &workerSummary,
+	}, nil
+}
+
+func (c Cycle) executeWorkerList(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	action planner.WorkerAction,
+) (state.WorkerActionResult, error) {
+	workers, err := c.Store.ListWorkers(ctx, currentRun.ID)
+	if err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	listed := make([]state.WorkerResultSummary, 0, len(workers))
+	for _, worker := range workers {
+		listed = append(listed, summarizeWorker(worker))
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "worker.result.recorded",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            fmt.Sprintf("listed %d worker(s) for planner inspection", len(listed)),
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	return state.WorkerActionResult{
+		Action:        string(action.Action),
+		Success:       true,
+		Message:       fmt.Sprintf("listed %d worker(s)", len(listed)),
+		ListedWorkers: listed,
+	}, nil
+}
+
+func (c Cycle) executeWorkerRemove(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	action planner.WorkerAction,
+) (state.WorkerActionResult, error) {
+	worker, found, err := c.resolveWorkerForAction(ctx, currentRun.ID, action)
+	if err != nil {
+		return state.WorkerActionResult{}, err
+	}
+	if !found {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, nil, "worker not found for remove", false)
+	}
+	if state.IsWorkerActive(worker.WorkerStatus) {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, &worker, "active workers cannot be removed until they are idle or completed", false)
+	}
+
+	manager := workerctl.NewManager(currentRun.RepoPath, state.ResolveLayout(currentRun.RepoPath).WorkersDir)
+	if err := manager.Remove(ctx, worker.WorktreePath); err != nil {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, &worker, err.Error(), false)
+	}
+	if err := c.Store.DeleteWorker(ctx, worker.ID); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "worker.result.recorded",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            "removed worker from isolated workspace registry: " + worker.WorkerName,
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		WorkerID:           worker.ID,
+		WorkerName:         worker.WorkerName,
+		WorkerStatus:       string(worker.WorkerStatus),
+		WorkerScope:        worker.AssignedScope,
+		WorkerPath:         worker.WorktreePath,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	workerSummary := summarizeWorker(worker)
+	return state.WorkerActionResult{
+		Action:  string(action.Action),
+		Success: true,
+		Message: "worker removed",
+		Worker:  &workerSummary,
+		Removed: true,
+	}, nil
+}
+
+func (c Cycle) executeWorkerIntegrate(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	action planner.WorkerAction,
+) (state.WorkerActionResult, error) {
+	integrationSummary, artifactPath, artifactPreview, err := c.buildIntegrationArtifactForWorkerIDs(ctx, currentRun, currentPlannerTurn, action.WorkerIDs)
+	if err != nil {
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, nil, err.Error(), false)
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "integration.completed",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            integrationSummary.IntegrationPreview,
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		ArtifactPath:       artifactPath,
+		ArtifactPreview:    artifactPreview,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "worker.result.recorded",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            integrationSummary.IntegrationPreview,
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		ArtifactPath:       artifactPath,
+		ArtifactPreview:    artifactPreview,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	return state.WorkerActionResult{
+		Action:          string(action.Action),
+		Success:         true,
+		Message:         integrationSummary.IntegrationPreview,
+		ArtifactPath:    artifactPath,
+		ArtifactPreview: artifactPreview,
+		Integration:     &integrationSummary,
+	}, nil
+}
+
+func (c Cycle) executeWorkerApply(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	action planner.WorkerAction,
+) (state.WorkerActionResult, error) {
+	if err := c.Journal.Append(journal.Event{
+		Type:               "integration.apply.started",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            "applying worker integration output using " + strings.TrimSpace(action.ApplyMode),
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	sourceArtifactPath := filepath.ToSlash(strings.TrimSpace(action.ArtifactPath))
+	var integrationSummary state.IntegrationSummary
+
+	switch {
+	case sourceArtifactPath != "":
+		loadedSummary, resolvedArtifactPath, err := workerctl.LoadIntegrationArtifact(currentRun.RepoPath, sourceArtifactPath)
+		if err != nil {
+			if appendErr := c.appendIntegrationApplyFailureEvent(currentRun, currentPlannerTurn, err.Error(), "", ""); appendErr != nil {
+				return state.WorkerActionResult{}, appendErr
+			}
+			return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, nil, err.Error(), false)
+		}
+		integrationSummary = loadedSummary
+		sourceArtifactPath = resolvedArtifactPath
+	case len(nonEmpty(action.WorkerIDs)) > 0:
+		loadedSummary, artifactPath, artifactPreview, err := c.buildIntegrationArtifactForWorkerIDs(ctx, currentRun, currentPlannerTurn, action.WorkerIDs)
+		if err != nil {
+			if appendErr := c.appendIntegrationApplyFailureEvent(currentRun, currentPlannerTurn, err.Error(), "", ""); appendErr != nil {
+				return state.WorkerActionResult{}, appendErr
+			}
+			return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, nil, err.Error(), false)
+		}
+		if err := c.Journal.Append(journal.Event{
+			Type:               "integration.completed",
+			RunID:              currentRun.ID,
+			RepoPath:           currentRun.RepoPath,
+			Goal:               currentRun.Goal,
+			Status:             string(currentRun.Status),
+			Message:            loadedSummary.IntegrationPreview,
+			ResponseID:         currentPlannerTurn.ResponseID,
+			PreviousResponseID: currentRun.PreviousResponseID,
+			PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+			ArtifactPath:       artifactPath,
+			ArtifactPreview:    artifactPreview,
+			Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+		}); err != nil {
+			return state.WorkerActionResult{}, err
+		}
+		integrationSummary = loadedSummary
+		sourceArtifactPath = artifactPath
+	default:
+		message := "integration apply requires an integration artifact path or worker ids"
+		if appendErr := c.appendIntegrationApplyFailureEvent(currentRun, currentPlannerTurn, message, "", ""); appendErr != nil {
+			return state.WorkerActionResult{}, appendErr
+		}
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, nil, message, false)
+	}
+
+	applySummary, err := workerctl.ApplyIntegration(currentRun.RepoPath, integrationSummary, sourceArtifactPath, action.ApplyMode)
+	if err != nil {
+		if appendErr := c.appendIntegrationApplyFailureEvent(currentRun, currentPlannerTurn, err.Error(), sourceArtifactPath, ""); appendErr != nil {
+			return state.WorkerActionResult{}, appendErr
+		}
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, nil, err.Error(), false)
+	}
+
+	artifactPath, artifactPreview := persistIntegrationApplyArtifact(currentRun, applySummary)
+	if strings.TrimSpace(artifactPath) == "" {
+		message := fallbackString(strings.TrimSpace(artifactPreview), "integration apply artifact write failed")
+		if appendErr := c.appendIntegrationApplyFailureEvent(currentRun, currentPlannerTurn, message, sourceArtifactPath, ""); appendErr != nil {
+			return state.WorkerActionResult{}, appendErr
+		}
+		return c.recordWorkerActionFailure(currentRun, currentPlannerTurn, action, nil, message, false)
+	}
+
+	eventType := "integration.apply.completed"
+	if strings.TrimSpace(applySummary.Status) != "completed" {
+		eventType = "integration.apply.failed"
+	}
+	message := fallbackString(strings.TrimSpace(applySummary.AfterSummary), "integration apply result recorded")
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               eventType,
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            message,
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		ArtifactPath:       artifactPath,
+		ArtifactPreview:    artifactPreview,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "worker.result.recorded",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            message,
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		ArtifactPath:       artifactPath,
+		ArtifactPreview:    artifactPreview,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return state.WorkerActionResult{}, err
+	}
+
+	return state.WorkerActionResult{
+		Action:          string(action.Action),
+		Success:         strings.TrimSpace(applySummary.Status) == "completed",
+		Message:         message,
+		ArtifactPath:    artifactPath,
+		ArtifactPreview: artifactPreview,
+		Apply:           &applySummary,
+	}, nil
+}
+
+func (c Cycle) buildIntegrationArtifactForWorkerIDs(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	workerIDs []string,
+) (state.IntegrationSummary, string, string, error) {
+	if err := c.Journal.Append(journal.Event{
+		Type:               "integration.started",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            fmt.Sprintf("building integration preview from %d worker(s)", len(workerIDs)),
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return state.IntegrationSummary{}, "", "", err
+	}
+
+	selectedWorkers := make([]state.Worker, 0, len(workerIDs))
+	for _, workerID := range nonEmpty(workerIDs) {
+		worker, found, err := c.Store.GetWorker(ctx, workerID)
+		if err != nil {
+			return state.IntegrationSummary{}, "", "", err
+		}
+		if !found {
+			message := "worker not found for integration: " + workerID
+			if appendErr := c.appendIntegrationFailureEvent(currentRun, currentPlannerTurn, message); appendErr != nil {
+				return state.IntegrationSummary{}, "", "", appendErr
+			}
+			return state.IntegrationSummary{}, "", "", errors.New(message)
+		}
+		selectedWorkers = append(selectedWorkers, worker)
+	}
+
+	integrationSummary, err := workerctl.BuildIntegrationSummary(currentRun.RepoPath, selectedWorkers)
+	if err != nil {
+		if appendErr := c.appendIntegrationFailureEvent(currentRun, currentPlannerTurn, err.Error()); appendErr != nil {
+			return state.IntegrationSummary{}, "", "", appendErr
+		}
+		return state.IntegrationSummary{}, "", "", err
+	}
+
+	artifactPath, artifactPreview := persistIntegrationArtifact(currentRun, integrationSummary)
+	if strings.TrimSpace(artifactPath) == "" {
+		message := fallbackString(strings.TrimSpace(artifactPreview), "integration artifact write failed")
+		if appendErr := c.appendIntegrationFailureEvent(currentRun, currentPlannerTurn, message); appendErr != nil {
+			return state.IntegrationSummary{}, "", "", appendErr
+		}
+		return state.IntegrationSummary{}, "", "", errors.New(message)
+	}
+
+	return integrationSummary, artifactPath, artifactPreview, nil
+}
+
+func (c Cycle) appendIntegrationFailureEvent(currentRun state.Run, currentPlannerTurn planner.Result, message string) error {
+	return c.Journal.Append(journal.Event{
+		Type:               "integration.failed",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            strings.TrimSpace(message),
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	})
+}
+
+func (c Cycle) appendIntegrationApplyFailureEvent(currentRun state.Run, currentPlannerTurn planner.Result, message string, sourceArtifactPath string, applyArtifactPath string) error {
+	return c.Journal.Append(journal.Event{
+		Type:               "integration.apply.failed",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            strings.TrimSpace(message),
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		ArtifactPath:       fallbackString(strings.TrimSpace(applyArtifactPath), strings.TrimSpace(sourceArtifactPath)),
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	})
+}
+
+func (c Cycle) appendWorkerPlanFailureEvent(currentRun state.Run, currentPlannerTurn planner.Result, message string) error {
+	return c.Journal.Append(journal.Event{
+		Type:               "worker.plan.failed",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            strings.TrimSpace(message),
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	})
+}
+
+func (c Cycle) resolveWorkerForAction(ctx context.Context, runID string, action planner.WorkerAction) (state.Worker, bool, error) {
+	if strings.TrimSpace(action.WorkerID) != "" {
+		return c.Store.GetWorker(ctx, action.WorkerID)
+	}
+
+	workers, err := c.Store.ListWorkers(ctx, runID)
+	if err != nil {
+		return state.Worker{}, false, err
+	}
+	for _, worker := range workers {
+		if strings.TrimSpace(worker.WorkerName) == strings.TrimSpace(action.WorkerName) {
+			return worker, true, nil
+		}
+	}
+	return state.Worker{}, false, nil
+}
+
+func summarizeWorker(worker state.Worker) state.WorkerResultSummary {
+	return state.WorkerResultSummary{
+		WorkerID:                   worker.ID,
+		WorkerName:                 worker.WorkerName,
+		WorkerStatus:               string(worker.WorkerStatus),
+		AssignedScope:              worker.AssignedScope,
+		WorktreePath:               worker.WorktreePath,
+		WorkerTaskSummary:          strings.TrimSpace(worker.WorkerTaskSummary),
+		ExecutorPromptSummary:      strings.TrimSpace(worker.WorkerExecutorPromptSummary),
+		WorkerResultSummary:        strings.TrimSpace(worker.WorkerResultSummary),
+		WorkerErrorSummary:         strings.TrimSpace(worker.WorkerErrorSummary),
+		ExecutorThreadID:           strings.TrimSpace(worker.ExecutorThreadID),
+		ExecutorTurnID:             strings.TrimSpace(worker.ExecutorTurnID),
+		ExecutorTurnStatus:         strings.TrimSpace(worker.ExecutorTurnStatus),
+		ExecutorApprovalState:      strings.TrimSpace(worker.ExecutorApprovalState),
+		ExecutorApprovalKind:       strings.TrimSpace(worker.ExecutorApprovalKind),
+		ExecutorApprovalPreview:    strings.TrimSpace(worker.ExecutorApprovalPreview),
+		ExecutorInterruptible:      workerTurnInterruptible(worker),
+		ExecutorSteerable:          workerTurnSteerable(worker),
+		ExecutorFailureStage:       strings.TrimSpace(worker.ExecutorFailureStage),
+		ExecutorLastControlAction:  strings.TrimSpace(worker.ExecutorLastControlAction),
+		ExecutorLastControlPayload: workerLastControlPayload(worker),
+		StartedAt:                  worker.StartedAt,
+		CompletedAt:                worker.CompletedAt,
+	}
+}
+
+func (c Cycle) recordWorkerActionFailure(
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	action planner.WorkerAction,
+	worker *state.Worker,
+	message string,
+	removed bool,
+) (state.WorkerActionResult, error) {
+	if c.Journal != nil {
+		event := journal.Event{
+			Type:               "worker.result.recorded",
+			RunID:              currentRun.ID,
+			RepoPath:           currentRun.RepoPath,
+			Goal:               currentRun.Goal,
+			Status:             string(currentRun.Status),
+			Message:            strings.TrimSpace(message),
+			ResponseID:         currentPlannerTurn.ResponseID,
+			PreviousResponseID: currentRun.PreviousResponseID,
+			PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+			Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+		}
+		if worker != nil {
+			event.WorkerID = worker.ID
+			event.WorkerName = worker.WorkerName
+			event.WorkerStatus = string(worker.WorkerStatus)
+			event.WorkerScope = worker.AssignedScope
+			event.WorkerPath = worker.WorktreePath
+		}
+		if err := c.Journal.Append(event); err != nil {
+			return state.WorkerActionResult{}, err
+		}
+	}
+
+	var summary *state.WorkerResultSummary
+	if worker != nil {
+		workerCopy := summarizeWorker(*worker)
+		summary = &workerCopy
+	}
+
+	return state.WorkerActionResult{
+		Action:  string(action.Action),
+		Success: false,
+		Message: strings.TrimSpace(message),
+		Worker:  summary,
+		Removed: removed,
+	}, nil
+}
+
+func workerUsesMainTree(repoRoot string, workerPath string) bool {
+	repoRoot = filepath.Clean(strings.TrimSpace(repoRoot))
+	workerPath = filepath.Clean(strings.TrimSpace(workerPath))
+	if repoRoot == "" || workerPath == "" {
+		return false
+	}
+	if repoRoot == workerPath {
+		return true
+	}
+	relative, err := filepath.Rel(repoRoot, workerPath)
+	if err != nil {
+		return false
+	}
+	return relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+}
+
+func fallbackString(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func applyArtifactPath(apply *state.IntegrationApplySummary) string {
+	if apply == nil {
+		return ""
+	}
+	return strings.TrimSpace(apply.SourceArtifactPath)
+}
+
+func allWorkerPlanWorkersCompleted(workers []state.WorkerResultSummary) bool {
+	if len(workers) == 0 {
+		return false
+	}
+	for _, worker := range workers {
+		if strings.TrimSpace(worker.WorkerStatus) != string(state.WorkerStatusCompleted) {
+			return false
+		}
+	}
+	return true
 }
 
 func inspectCollectedContextPath(repoPath string, requestedPath string) state.CollectedContextResult {
@@ -788,6 +3673,58 @@ func contextCollectionPreview(item state.CollectedContextResult) string {
 	}
 }
 
+func (c Cycle) persistRuntimeIssue(ctx context.Context, run state.Run, reason string, message string) (state.Run, error) {
+	if strings.TrimSpace(reason) == "" {
+		reason = StopReasonTransportProcessError
+	}
+	if err := c.Store.SaveRuntimeIssue(ctx, run.ID, reason, message); err != nil {
+		return state.Run{}, err
+	}
+
+	updatedRun, found, err := c.Store.GetRun(ctx, run.ID)
+	if err != nil {
+		return state.Run{}, err
+	}
+	if !found {
+		return state.Run{}, fmt.Errorf("updated run %s could not be reloaded after runtime issue persistence", run.ID)
+	}
+
+	c.runPluginHooks(ctx, plugins.HookFaultRecorded, updatedRun, nil, nil, reason, errors.New(strings.TrimSpace(message)))
+
+	return updatedRun, nil
+}
+
+func (c Cycle) persistPlannerValidationArtifact(run state.Run, err error) (string, string) {
+	if !planner.IsValidationError(err) {
+		return "", ""
+	}
+
+	rawResponse, rawOutput, responseID, ok := planner.ValidationErrorData(err)
+	if !ok {
+		return "", ""
+	}
+
+	content := strings.TrimSpace(rawOutput)
+	if content == "" {
+		content = strings.TrimSpace(rawResponse)
+	}
+	if content == "" {
+		return "", ""
+	}
+
+	fileName := fmt.Sprintf("planner_validation_%s.txt", time.Now().UTC().Format("20060102T150405.000000000Z"))
+	if strings.TrimSpace(responseID) != "" {
+		fileName = fmt.Sprintf("planner_validation_%s_%s.txt", responseID, time.Now().UTC().Format("20060102T150405.000000000Z"))
+	}
+
+	relativePath, writeErr := writeRunArtifact(run, "planner", fileName, []byte(content))
+	if writeErr != nil {
+		return "", previewString("artifact_write_failed: "+writeErr.Error(), 240)
+	}
+
+	return relativePath, previewString(content, 240)
+}
+
 func populateExecutorEventFields(event *journal.Event, run state.Run) {
 	if event == nil {
 		return
@@ -798,33 +3735,177 @@ func populateExecutorEventFields(event *journal.Event, run state.Run) {
 	event.ExecutorThreadPath = run.ExecutorThreadPath
 	event.ExecutorTurnID = run.ExecutorTurnID
 	event.ExecutorTurnStatus = run.ExecutorTurnStatus
+	if run.ExecutorApproval != nil {
+		event.ExecutorApprovalState = strings.TrimSpace(run.ExecutorApproval.State)
+		event.ExecutorApprovalKind = strings.TrimSpace(run.ExecutorApproval.Kind)
+	}
+	if run.ExecutorLastControl != nil {
+		event.ExecutorControlAction = strings.TrimSpace(run.ExecutorLastControl.Action)
+	}
 	event.ExecutorFailureStage = run.ExecutorLastFailureStage
 	event.ExecutorOutputPreview = previewString(run.ExecutorLastMessage, 240)
 }
 
+func hasActiveExecutorTurn(run state.Run) bool {
+	if strings.TrimSpace(run.ExecutorThreadID) == "" || strings.TrimSpace(run.ExecutorTurnID) == "" {
+		return false
+	}
+
+	switch strings.TrimSpace(run.ExecutorTurnStatus) {
+	case string(executor.TurnStatusInProgress), string(executor.TurnStatusApprovalRequired):
+		return true
+	default:
+		return false
+	}
+}
+
+func executorApprovalState(result executor.TurnResult) *state.ExecutorApproval {
+	if result.Approval == nil && result.ApprovalState == executor.ApprovalStateNone {
+		return nil
+	}
+
+	approval := &state.ExecutorApproval{
+		State: string(result.ApprovalState),
+	}
+	if result.Approval == nil {
+		return approval
+	}
+
+	approval.Kind = string(result.Approval.Kind)
+	approval.RequestID = result.Approval.RequestID
+	approval.ApprovalID = result.Approval.ApprovalID
+	approval.ItemID = result.Approval.ItemID
+	approval.Reason = result.Approval.Reason
+	approval.Command = result.Approval.Command
+	approval.CWD = result.Approval.CWD
+	approval.GrantRoot = result.Approval.GrantRoot
+	approval.RawParams = result.Approval.RawParams
+	return approval
+}
+
+func executorApprovalKind(result executor.TurnResult) string {
+	if result.Approval == nil {
+		return ""
+	}
+	return string(result.Approval.Kind)
+}
+
+func executorApprovalMessage(result executor.TurnResult) string {
+	if result.Approval == nil {
+		return "executor turn requires approval before it can continue"
+	}
+
+	switch result.Approval.Kind {
+	case executor.ApprovalKindCommandExecution:
+		if strings.TrimSpace(result.Approval.Command) != "" {
+			return "executor approval required for command: " + previewString(result.Approval.Command, 160)
+		}
+	case executor.ApprovalKindFileChange:
+		if strings.TrimSpace(result.Approval.GrantRoot) != "" {
+			return "executor approval required for file changes under: " + strings.TrimSpace(result.Approval.GrantRoot)
+		}
+	case executor.ApprovalKindPermissions:
+		if strings.TrimSpace(result.Approval.Reason) != "" {
+			return "executor approval required for permissions: " + previewString(result.Approval.Reason, 160)
+		}
+	}
+
+	if strings.TrimSpace(result.Approval.Reason) != "" {
+		return "executor approval required: " + previewString(result.Approval.Reason, 160)
+	}
+	return "executor turn requires approval before it can continue"
+}
+
+func workerApprovalPreview(result executor.TurnResult) string {
+	if result.Approval == nil && result.ApprovalState != executor.ApprovalStateRequired {
+		return ""
+	}
+	return previewString(executorApprovalMessage(result), 240)
+}
+
+func workerApprovalRequired(worker state.Worker) bool {
+	return strings.TrimSpace(worker.ExecutorApprovalState) == string(executor.ApprovalStateRequired) ||
+		worker.WorkerStatus == state.WorkerStatusApprovalRequired
+}
+
+func workerTurnInterruptible(worker state.Worker) bool {
+	if strings.TrimSpace(worker.ExecutorTurnID) == "" {
+		return false
+	}
+	if worker.ExecutorInterruptible {
+		return true
+	}
+	switch strings.TrimSpace(worker.ExecutorTurnStatus) {
+	case string(executor.TurnStatusInProgress), string(executor.TurnStatusApprovalRequired):
+		return true
+	default:
+		return false
+	}
+}
+
+func workerTurnSteerable(worker state.Worker) bool {
+	if strings.TrimSpace(worker.ExecutorTurnID) == "" {
+		return false
+	}
+	if workerApprovalRequired(worker) {
+		return false
+	}
+	if worker.ExecutorSteerable {
+		return true
+	}
+	return strings.TrimSpace(worker.ExecutorTurnStatus) == string(executor.TurnStatusInProgress)
+}
+
+func workerLastControlPayload(worker state.Worker) string {
+	if worker.ExecutorLastControl == nil {
+		return ""
+	}
+	return strings.TrimSpace(worker.ExecutorLastControl.Payload)
+}
+
 func summarizeEvent(event journal.Event) string {
 	message := strings.TrimSpace(event.Message)
+	humanQuestion := strings.TrimSpace(event.HumanQuestion)
+	humanReplyPreview := previewString(event.HumanReplyPayload, 240)
 	outputPreview := strings.TrimSpace(event.ExecutorOutputPreview)
 	contextPreview := strings.TrimSpace(event.ContextPreview)
+	artifactPath := strings.TrimSpace(event.ArtifactPath)
 
+	var summary string
 	switch {
+	case message != "" && humanReplyPreview != "":
+		summary = message + " | human reply: " + humanReplyPreview
+	case message != "" && humanQuestion != "":
+		summary = message + " | question: " + humanQuestion
 	case message != "" && outputPreview != "":
-		return message + " | executor output: " + outputPreview
+		summary = message + " | executor output: " + outputPreview
 	case message != "" && contextPreview != "":
-		return message + " | context: " + contextPreview
+		summary = message + " | context: " + contextPreview
 	case message != "":
-		return message
+		summary = message
+	case humanReplyPreview != "":
+		summary = "human reply: " + humanReplyPreview
+	case humanQuestion != "":
+		summary = "human question: " + humanQuestion
 	case outputPreview != "":
-		return "executor output: " + outputPreview
+		summary = "executor output: " + outputPreview
 	case contextPreview != "":
-		return "context: " + contextPreview
+		summary = "context: " + contextPreview
 	case strings.TrimSpace(event.ContextRequestedPath) != "":
-		return event.Type + " (" + strings.TrimSpace(event.ContextRequestedPath) + ")"
+		summary = event.Type + " (" + strings.TrimSpace(event.ContextRequestedPath) + ")"
 	case strings.TrimSpace(event.PlannerOutcome) != "":
-		return event.Type + " (" + strings.TrimSpace(event.PlannerOutcome) + ")"
+		summary = event.Type + " (" + strings.TrimSpace(event.PlannerOutcome) + ")"
 	default:
-		return event.Type
+		summary = event.Type
 	}
+
+	if artifactPath == "" {
+		return summary
+	}
+	if summary == "" {
+		return "artifact: " + artifactPath
+	}
+	return summary + " | artifact: " + artifactPath
 }
 
 func checkpointRef(checkpoint *state.Checkpoint) *journal.CheckpointRef {
@@ -862,6 +3943,17 @@ func executorFailureStage(result executor.TurnResult) string {
 		return ""
 	}
 	return strings.TrimSpace(result.Error.Stage)
+}
+
+func executorFailureFallbackMessage(result executor.TurnResult) string {
+	switch result.TurnStatus {
+	case executor.TurnStatusInterrupted:
+		return "executor turn ended with interrupted status"
+	case executor.TurnStatusFailed:
+		return "executor turn ended with failed status"
+	default:
+		return "executor turn did not complete successfully"
+	}
 }
 
 func executorSuccess(result executor.TurnResult) *bool {

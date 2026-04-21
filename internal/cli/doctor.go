@@ -5,23 +5,33 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
+	"orchestrator/internal/buildinfo"
 	"orchestrator/internal/config"
+	"orchestrator/internal/executor/appserver"
+	"orchestrator/internal/journal"
+	ntfybridge "orchestrator/internal/ntfy"
+	"orchestrator/internal/plugins"
 	"orchestrator/internal/state"
+	workerctl "orchestrator/internal/workers"
 )
 
 func newDoctorCommand() Command {
 	return Command{
 		Name:    "doctor",
-		Summary: "Check repo markers and local persistence scaffold.",
+		Summary: "Check runtime, repo contract, planner, executor, ntfy, and persistence.",
 		Description: stringsJoin(
 			"Usage:",
 			"  orchestrator doctor",
 			"",
-			"Checks repo markers plus the local persistence scaffold.",
-			"It verifies runtime directories, the SQLite metadata store, and the JSONL journal without adding planner or executor behavior.",
+			"Prints grouped mechanical health checks for the installed runtime, target repo,",
+			"planner prerequisites, executor readiness, ntfy bridge, and persistence.",
+			"It does not run live planner or executor work.",
 		),
 		Run: runDoctor,
 	}
@@ -39,25 +49,91 @@ func runDoctor(ctx context.Context, inv Invocation) error {
 	}
 
 	type check struct {
-		label  string
-		ok     bool
-		detail string
+		section string
+		label   string
+		level   string
+		detail  string
 	}
 
-	required := []string{
-		".git",
-		"AGENTS.md",
-		filepath.Join("docs", "ORCHESTRATOR_CLI_UPDATED_SPEC.md"),
-	}
+	required := append([]repoContractEntry{
+		{label: "repo marker .git", path: filepath.Join(inv.RepoRoot, ".git"), isDir: true},
+	}, targetRepoContractEntries(inv.RepoRoot)...)
 
-	checks := make([]check, 0, len(required)+8)
-	for _, rel := range required {
-		path := filepath.Join(inv.RepoRoot, rel)
-		_, statErr := os.Stat(path)
+	build := buildinfo.Current()
+	checks := make([]check, 0, len(required)+18)
+	if executablePath, err := os.Executable(); err != nil {
 		checks = append(checks, check{
-			label:  rel,
-			ok:     statErr == nil,
-			detail: path,
+			section: "runtime",
+			label:   "binary path",
+			level:   "WARN",
+			detail:  err.Error(),
+		})
+	} else {
+		checks = append(checks, check{
+			section: "runtime",
+			label:   "binary path",
+			level:   "OK",
+			detail:  executablePath,
+		})
+		checks = append(checks, check{
+			section: "runtime",
+			label:   "runtime mode",
+			level:   "OK",
+			detail:  runtimeMode(executablePath, inv.RepoRoot),
+		})
+	}
+	checks = append(checks, check{
+		section: "runtime",
+		label:   "binary version",
+		level:   "OK",
+		detail:  firstNonEmpty(strings.TrimSpace(inv.Version), build.Version),
+	})
+	checks = append(checks, check{
+		section: "runtime",
+		label:   "binary revision",
+		level:   "OK",
+		detail:  build.Revision,
+	})
+	checks = append(checks, check{
+		section: "runtime",
+		label:   "binary build time",
+		level:   "OK",
+		detail:  build.BuildTime,
+	})
+
+	for _, requiredPath := range required {
+		info, statErr := os.Stat(requiredPath.path)
+		level := "OK"
+		if statErr != nil || (requiredPath.isDir && statErr == nil && !info.IsDir()) || (!requiredPath.isDir && statErr == nil && info.IsDir()) {
+			level = "FAIL"
+		}
+		checks = append(checks, check{
+			section: "repo_contract",
+			label:   requiredPath.label,
+			level:   level,
+			detail:  requiredPath.path,
+		})
+	}
+
+	checks = append(checks, check{
+		section: "planner",
+		label:   "planner transport",
+		level:   "OK",
+		detail:  "responses_api",
+	})
+	if plannerAPIKey() == "" {
+		checks = append(checks, check{
+			section: "planner",
+			label:   "planner API key",
+			level:   "FAIL",
+			detail:  "OPENAI_API_KEY missing",
+		})
+	} else {
+		checks = append(checks, check{
+			section: "planner",
+			label:   "planner API key",
+			level:   "OK",
+			detail:  "present",
 		})
 	}
 
@@ -66,73 +142,241 @@ func runDoctor(ctx context.Context, inv Invocation) error {
 		cfgState = "loadable"
 	} else if !errors.Is(err, os.ErrNotExist) {
 		checks = append(checks, check{
-			label:  "config",
-			ok:     false,
-			detail: err.Error(),
+			section: "config",
+			label:   "config",
+			level:   "FAIL",
+			detail:  err.Error(),
 		})
 	}
+
 	checks = append(checks, check{
-		label:  "config path",
-		ok:     true,
-		detail: fmt.Sprintf("%s (%s)", inv.ConfigPath, cfgState),
+		section: "config",
+		label:   "config path",
+		level:   "OK",
+		detail:  fmt.Sprintf("%s (%s)", inv.ConfigPath, cfgState),
 	})
 
-	for _, target := range []struct {
-		label string
-		path  string
-	}{
-		{label: "state dir", path: inv.Layout.StateDir},
-		{label: "logs dir", path: inv.Layout.LogsDir},
-		{label: "state db", path: inv.Layout.DBPath},
-		{label: "event journal", path: inv.Layout.JournalPath},
-	} {
-		_, statErr := os.Stat(target.path)
+	_, pluginSummary := plugins.Load(inv.RepoRoot)
+	pluginLevel := "OK"
+	if len(pluginSummary.Failures) > 0 {
+		pluginLevel = "WARN"
+	}
+	checks = append(checks, check{
+		section: "plugins",
+		label:   "plugin directory",
+		level:   pluginLevel,
+		detail:  fmt.Sprintf("%s (found=%d loaded=%d failures=%d)", pluginSummary.Directory, pluginSummary.Found, pluginSummary.Loaded, len(pluginSummary.Failures)),
+	})
+	for _, failure := range pluginSummary.Failures {
 		checks = append(checks, check{
-			label:  target.label,
-			ok:     statErr == nil,
-			detail: target.path,
+			section: "plugins",
+			label:   "plugin load failure",
+			level:   "WARN",
+			detail:  fmt.Sprintf("%s: %s", valueOrUnavailable(strings.TrimSpace(failure.Path)), failure.Message),
 		})
 	}
 
-	if pathExists(inv.Layout.DBPath) {
-		store, err := state.Open(inv.Layout.DBPath)
+	if err := ensureTargetRepoContractDirs(inv.Layout); err != nil {
+		checks = append(checks, check{
+			section: "persistence",
+			label:   "runtime directories",
+			level:   "FAIL",
+			detail:  err.Error(),
+		})
+	} else {
+		checks = append(checks, check{
+			section: "persistence",
+			label:   "runtime directories",
+			level:   "OK",
+			detail:  inv.Layout.RootDir,
+		})
+	}
+
+	if err := checkSQLiteSurface(ctx, inv.Layout); err != nil {
+		checks = append(checks, check{
+			section: "persistence",
+			label:   "sqlite state path",
+			level:   "FAIL",
+			detail:  err.Error(),
+		})
+	} else {
+		checks = append(checks, check{
+			section: "persistence",
+			label:   "sqlite state path",
+			level:   "OK",
+			detail:  inv.Layout.DBPath + " (read/write ready)",
+		})
+	}
+
+	if err := checkJournalSurface(inv.Layout); err != nil {
+		checks = append(checks, check{
+			section: "persistence",
+			label:   "journal path",
+			level:   "FAIL",
+			detail:  err.Error(),
+		})
+	} else {
+		checks = append(checks, check{
+			section: "persistence",
+			label:   "journal path",
+			level:   "OK",
+			detail:  inv.Layout.JournalPath + " (read/write ready)",
+		})
+	}
+
+	launchPlan, err := appserver.ResolveLaunchPlan()
+	if err != nil {
+		checks = append(checks, check{
+			section: "executor",
+			label:   "codex app-server",
+			level:   "FAIL",
+			detail:  err.Error(),
+		})
+	} else {
+		checks = append(checks, check{
+			section: "executor",
+			label:   "codex app-server",
+			level:   "OK",
+			detail:  launchPlan.Command,
+		})
+	}
+
+	workerSupport := workerctl.DetectSupport(ctx, inv.RepoRoot)
+	workerLevel := "OK"
+	if !workerSupport.Available {
+		workerLevel = "FAIL"
+	}
+	checks = append(checks, check{
+		section: "workers",
+		label:   "workers directory",
+		level:   "OK",
+		detail:  inv.Layout.WorkersDir,
+	})
+	checks = append(checks, check{
+		section: "workers",
+		label:   "git worktree support",
+		level:   workerLevel,
+		detail:  workerSupport.Detail,
+	})
+
+	if !ntfyConfigured(inv.Config) {
+		checks = append(checks, check{
+			section: "ntfy",
+			label:   "ntfy config",
+			level:   "INFO",
+			detail:  "not configured (terminal fallback available)",
+		})
+	} else {
+		client, err := ntfybridge.NewClient(inv.Config.NTFY)
 		if err != nil {
 			checks = append(checks, check{
-				label:  "sqlite open",
-				ok:     false,
-				detail: err.Error(),
+				section: "ntfy",
+				label:   "ntfy config",
+				level:   "FAIL",
+				detail:  err.Error(),
 			})
 		} else {
-			defer store.Close()
-			if err := store.EnsureSchema(ctx); err != nil {
+			checks = append(checks, check{
+				section: "ntfy",
+				label:   "ntfy config",
+				level:   "OK",
+				detail:  fmt.Sprintf("%s topic=%s", client.ServerURL(), client.Topic()),
+			})
+
+			healthCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			health, err := client.HealthCheck(healthCtx)
+			if err != nil {
 				checks = append(checks, check{
-					label:  "sqlite schema",
-					ok:     false,
-					detail: err.Error(),
+					section: "ntfy",
+					label:   "ntfy readiness",
+					level:   "WARN",
+					detail:  err.Error(),
 				})
 			} else {
 				checks = append(checks, check{
-					label:  "sqlite schema",
-					ok:     true,
-					detail: "runs and checkpoints ready",
+					section: "ntfy",
+					label:   "ntfy readiness",
+					level:   "OK",
+					detail:  fmt.Sprintf("/v1/health healthy=%t", health.Healthy),
 				})
 			}
 		}
 	}
 
 	hasFailure := false
-	for _, item := range checks {
-		state := "OK"
-		if !item.ok {
-			state = "FAIL"
-			hasFailure = true
+	sections := []string{"runtime", "repo_contract", "config", "plugins", "planner", "executor", "workers", "ntfy", "persistence"}
+	for _, section := range sections {
+		fmt.Fprintf(inv.Stdout, "%s:\n", section)
+		for _, item := range checks {
+			if item.section != section {
+				continue
+			}
+			if item.level == "FAIL" {
+				hasFailure = true
+			}
+			fmt.Fprintf(inv.Stdout, "  [%s] %s: %s\n", item.level, item.label, item.detail)
 		}
-		fmt.Fprintf(inv.Stdout, "[%s] %s: %s\n", state, item.label, item.detail)
 	}
 
 	if hasFailure {
-		return errors.New("doctor found bootstrap issues")
+		return errors.New("doctor found runtime issues")
 	}
 
 	return nil
+}
+
+func checkSQLiteSurface(ctx context.Context, layout state.Layout) error {
+	store, err := state.Open(layout.DBPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	return store.EnsureSchema(ctx)
+}
+
+func checkJournalSurface(layout state.Layout) error {
+	journalWriter, err := journal.Open(layout.JournalPath)
+	if err != nil {
+		return err
+	}
+
+	file, err := os.Open(layout.JournalPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	_, err = io.ReadAll(io.LimitReader(file, 1))
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+
+	_ = journalWriter
+	return nil
+}
+
+func runtimeMode(executablePath string, repoRoot string) string {
+	executablePath = filepath.Clean(strings.TrimSpace(executablePath))
+	repoRoot = filepath.Clean(strings.TrimSpace(repoRoot))
+	if executablePath == "" || repoRoot == "" {
+		return "unknown"
+	}
+
+	executableLower := strings.ToLower(executablePath)
+	repoLower := strings.ToLower(repoRoot)
+	if executableLower == repoLower || strings.HasPrefix(executableLower, repoLower+string(os.PathSeparator)) {
+		return "repo_checkout"
+	}
+	return "external_runtime"
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }

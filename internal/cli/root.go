@@ -17,12 +17,14 @@ import (
 )
 
 type Options struct {
+	Stdin   io.Reader
 	Stdout  io.Writer
 	Stderr  io.Writer
 	Version string
 }
 
 type App struct {
+	stdin    io.Reader
 	stdout   io.Writer
 	stderr   io.Writer
 	version  string
@@ -37,6 +39,7 @@ type Command struct {
 }
 
 type Invocation struct {
+	Stdin      io.Reader
 	Stdout     io.Writer
 	Stderr     io.Writer
 	Args       []string
@@ -50,20 +53,26 @@ type Invocation struct {
 
 func NewApp(opts Options) *App {
 	app := &App{
+		stdin:   opts.Stdin,
 		stdout:  opts.Stdout,
 		stderr:  opts.Stderr,
 		version: opts.Version,
 	}
 
 	app.commands = map[string]Command{
+		"auto":           newAutoCommand(),
+		"continue":       newContinueCommand(),
 		"doctor":         newDoctorCommand(),
+		"executor":       newExecutorCommand(),
 		"executor-probe": newExecutorProbeCommand(),
+		"history":        newHistoryCommand(),
 		"init":           newInitCommand(),
 		"resume":         newResumeCommand(),
 		"run":            newRunCommand(),
 		"setup":          newSetupCommand(),
 		"status":         newStatusCommand(),
 		"version":        newVersionCommand(),
+		"workers":        newWorkersCommand(),
 	}
 
 	return app
@@ -116,6 +125,7 @@ func (a *App) Execute(ctx context.Context, args []string) error {
 	layout := state.ResolveLayout(repoRoot)
 	logger := logging.New(a.stderr, cfg.LogLevel)
 	inv := Invocation{
+		Stdin:      a.stdin,
 		Stdout:     a.stdout,
 		Stderr:     a.stderr,
 		Args:       remainder[1:],
@@ -163,10 +173,13 @@ func parseGlobalFlags(args []string) (globalFlags, []string, error) {
 func (a *App) printRootHelp() {
 	fmt.Fprintln(a.stdout, "orchestrator is an inert CLI shell for a planner-led orchestrator.")
 	fmt.Fprintln(a.stdout, "")
-	fmt.Fprintln(a.stdout, "The CLI manages local setup, persistence, visibility, and runtime wiring. It does not own planner decisions, executor work, or stop conditions.")
+	fmt.Fprintln(a.stdout, "The CLI manages local setup, target-repo scaffolding, persistence, visibility, and runtime wiring. It does not own planner decisions, executor work, or stop conditions.")
 	fmt.Fprintln(a.stdout, "")
 	fmt.Fprintln(a.stdout, "Usage:")
 	fmt.Fprintln(a.stdout, "  orchestrator [--config PATH] <command> [args]")
+	fmt.Fprintln(a.stdout, "")
+	fmt.Fprintln(a.stdout, "Typical flow:")
+	fmt.Fprintln(a.stdout, "  setup -> init -> run/auto start -> resume/continue/auto continue -> status/history/doctor")
 	fmt.Fprintln(a.stdout, "")
 	fmt.Fprintln(a.stdout, "Commands:")
 

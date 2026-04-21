@@ -21,10 +21,27 @@ type Event struct {
 	RepoPath              string         `json:"repo_path,omitempty"`
 	Goal                  string         `json:"goal,omitempty"`
 	Status                string         `json:"status,omitempty"`
+	CycleNumber           int            `json:"cycle_number,omitempty"`
+	StopReason            string         `json:"stop_reason,omitempty"`
 	Message               string         `json:"message,omitempty"`
 	ResponseID            string         `json:"response_id,omitempty"`
 	PreviousResponseID    string         `json:"previous_response_id,omitempty"`
 	PlannerOutcome        string         `json:"planner_outcome,omitempty"`
+	PluginName            string         `json:"plugin_name,omitempty"`
+	PluginTool            string         `json:"plugin_tool,omitempty"`
+	PluginHook            string         `json:"plugin_hook,omitempty"`
+	WorkerID              string         `json:"worker_id,omitempty"`
+	WorkerName            string         `json:"worker_name,omitempty"`
+	WorkerStatus          string         `json:"worker_status,omitempty"`
+	WorkerScope           string         `json:"worker_scope,omitempty"`
+	WorkerPath            string         `json:"worker_path,omitempty"`
+	NTFYServerURL         string         `json:"ntfy_server_url,omitempty"`
+	NTFYTopic             string         `json:"ntfy_topic,omitempty"`
+	NTFYMessageID         string         `json:"ntfy_message_id,omitempty"`
+	HumanQuestion         string         `json:"human_question,omitempty"`
+	HumanReplyID          string         `json:"human_reply_id,omitempty"`
+	HumanReplySource      string         `json:"human_reply_source,omitempty"`
+	HumanReplyPayload     string         `json:"human_reply_payload,omitempty"`
 	ContextRequestedPath  string         `json:"context_requested_path,omitempty"`
 	ContextResolvedPath   string         `json:"context_resolved_path,omitempty"`
 	ContextKind           string         `json:"context_kind,omitempty"`
@@ -35,8 +52,13 @@ type Event struct {
 	ExecutorThreadPath    string         `json:"executor_thread_path,omitempty"`
 	ExecutorTurnID        string         `json:"executor_turn_id,omitempty"`
 	ExecutorTurnStatus    string         `json:"executor_turn_status,omitempty"`
+	ExecutorApprovalState string         `json:"executor_approval_state,omitempty"`
+	ExecutorApprovalKind  string         `json:"executor_approval_kind,omitempty"`
+	ExecutorControlAction string         `json:"executor_control_action,omitempty"`
 	ExecutorFailureStage  string         `json:"executor_failure_stage,omitempty"`
 	ExecutorOutputPreview string         `json:"executor_output_preview,omitempty"`
+	ArtifactPath          string         `json:"artifact_path,omitempty"`
+	ArtifactPreview       string         `json:"artifact_preview,omitempty"`
 	Checkpoint            *CheckpointRef `json:"checkpoint,omitempty"`
 }
 

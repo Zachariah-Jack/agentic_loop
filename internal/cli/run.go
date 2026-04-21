@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"orchestrator/internal/executor"
 	"orchestrator/internal/executor/appserver"
@@ -17,15 +18,15 @@ import (
 func newRunCommand() Command {
 	return Command{
 		Name:    "run",
-		Summary: "Create a run and perform one bounded planner-led cycle.",
+		Summary: "Create a new run and execute one bounded cycle.",
 		Description: stringsJoin(
 			"Usage:",
 			"  orchestrator run --goal TEXT",
 			"",
-			"Creates a durable run, builds a planner.v1 input packet from persisted state,",
-			"calls the OpenAI Responses API for one planner turn, persists the result,",
-			"performs one bounded follow-up turn when the first planner outcome is",
-			"collect_context or execute, and then stops.",
+			"Requires the target repo contract scaffold created by `orchestrator init`.",
+			"",
+			"Creates a durable run, executes one bounded planner-led cycle, persists",
+			"all results durably, and stops with a mechanical stop_reason.",
 		),
 		Run: runRun,
 	}
@@ -45,6 +46,9 @@ func runRun(ctx context.Context, inv Invocation) error {
 
 	if strings.TrimSpace(*goal) == "" {
 		return errors.New("run requires --goal")
+	}
+	if contract := inspectTargetRepoContract(inv.RepoRoot); !contract.Ready {
+		return writeMissingRepoContractReport(inv.Stdout, "run", inv.RepoRoot, strings.TrimSpace(*goal), contract)
 	}
 
 	store, journalWriter, err := ensureRuntime(ctx, inv.Layout)
@@ -127,17 +131,22 @@ func plannerAPIKey() string {
 
 type lazyExecutorClient struct {
 	version string
+	mu      sync.Mutex
 	client  *appserver.Client
 }
 
 func (l *lazyExecutorClient) Execute(ctx context.Context, req executor.TurnRequest) (executor.TurnResult, error) {
+	l.mu.Lock()
 	if l.client == nil {
 		client, err := appserver.NewClient(l.version)
 		if err != nil {
+			l.mu.Unlock()
 			return executor.TurnResult{}, err
 		}
 		l.client = &client
 	}
+	client := l.client
+	l.mu.Unlock()
 
-	return l.client.Execute(ctx, req)
+	return client.Execute(ctx, req)
 }

@@ -83,10 +83,10 @@ type apiError struct {
 
 func (c *Client) Plan(ctx context.Context, input InputEnvelope, previousResponseID string) (Result, error) {
 	if strings.TrimSpace(c.APIKey) == "" {
-		return Result{}, errors.New("OPENAI_API_KEY is required for live planner calls")
+		return Result{}, ErrMissingAPIKey
 	}
 	if strings.TrimSpace(c.Model) == "" {
-		return Result{}, errors.New("planner model is required for live planner calls")
+		return Result{}, ErrMissingModel
 	}
 
 	body, err := c.buildCreateRequest(input, previousResponseID)
@@ -116,27 +116,33 @@ func (c *Client) Plan(ctx context.Context, input InputEnvelope, previousResponse
 		return Result{}, decodeAPIError(resp)
 	}
 
-	var parsed createResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
 		return Result{}, err
 	}
+	rawResponse := string(responseBody)
+
+	var parsed createResponse
+	if err := json.Unmarshal(responseBody, &parsed); err != nil {
+		return Result{}, NewValidationError(err, rawResponse, "", "")
+	}
 	if strings.TrimSpace(parsed.ID) == "" {
-		return Result{}, errors.New("responses api returned an empty response id")
+		return Result{}, NewValidationError(errors.New("responses api returned an empty response id"), rawResponse, "", "")
 	}
 
 	rawOutput, err := extractOutputText(parsed)
 	if err != nil {
-		return Result{}, err
+		return Result{}, NewValidationError(err, rawResponse, "", parsed.ID)
 	}
 
 	var output OutputEnvelope
 	decoder := json.NewDecoder(strings.NewReader(rawOutput))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&output); err != nil {
-		return Result{}, fmt.Errorf("planner output was not valid JSON: %w", err)
+		return Result{}, NewValidationError(fmt.Errorf("planner output was not valid JSON: %w", err), rawResponse, rawOutput, parsed.ID)
 	}
 	if err := ValidateOutput(output); err != nil {
-		return Result{}, fmt.Errorf("planner output failed planner.v1 validation: %w", err)
+		return Result{}, NewValidationError(fmt.Errorf("planner output failed planner.v1 validation: %w", err), rawResponse, rawOutput, parsed.ID)
 	}
 
 	return Result{

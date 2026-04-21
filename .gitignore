@@ -19,6 +19,11 @@ go.work.sum
 # Repo-local runtime state
 .orchestrator/state/
 .orchestrator/logs/
+.orchestrator/artifacts/
+
+# Local environment and secret files
+.env
+.env.*
 
 # Editor and OS noise
 .idea/

@@ -125,6 +125,59 @@ func TestClientPlanRejectsInvalidPlannerOutput(t *testing.T) {
 	if !strings.Contains(err.Error(), "planner output failed planner.v1 validation") {
 		t.Fatalf("expected planner validation error, got: %v", err)
 	}
+	if !IsValidationError(err) {
+		t.Fatalf("expected validation error type, got: %T", err)
+	}
+	rawResponse, rawOutput, responseID, ok := ValidationErrorData(err)
+	if !ok {
+		t.Fatal("ValidationErrorData() found = false, want true")
+	}
+	if responseID != "resp_invalid" {
+		t.Fatalf("responseID = %q, want resp_invalid", responseID)
+	}
+	if !strings.Contains(rawResponse, `"id":"resp_invalid"`) {
+		t.Fatalf("rawResponse = %q, want response envelope", rawResponse)
+	}
+	if !strings.Contains(rawOutput, `"outcome":"complete"`) {
+		t.Fatalf("rawOutput = %q, want invalid planner payload", rawOutput)
+	}
+}
+
+func TestClientPlanRejectsMultiplePlannerPayloads(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+		  "id":"resp_multiple",
+		  "output":[
+		    {
+		      "type":"message",
+		      "role":"assistant",
+		      "content":[
+		        {
+		          "type":"output_text",
+		          "text":"{\"contract_version\":\"planner.v1\",\"outcome\":\"pause\",\"pause\":{\"reason\":\"wait\"},\"complete\":{\"summary\":\"done\"}}"
+		        }
+		      ]
+		    }
+		  ]
+		}`))
+	}))
+	defer server.Close()
+
+	client := Client{
+		APIKey:     "test-key",
+		Model:      "gpt-5.1",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+	}
+
+	_, err := client.Plan(context.Background(), validInputEnvelope(), "")
+	if err == nil {
+		t.Fatal("Plan unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "exactly one outcome payload must be set") {
+		t.Fatalf("expected multiple payload validation error, got: %v", err)
+	}
 }
 
 func TestClientPlanFailsClearlyWithoutAPIKey(t *testing.T) {

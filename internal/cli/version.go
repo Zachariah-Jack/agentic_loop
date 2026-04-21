@@ -5,17 +5,20 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"strings"
+
+	"orchestrator/internal/buildinfo"
 )
 
 func newVersionCommand() Command {
 	return Command{
 		Name:    "version",
-		Summary: "Print the orchestrator binary version.",
+		Summary: "Print the orchestrator build version and release metadata.",
 		Description: stringsJoin(
 			"Usage:",
 			"  orchestrator version",
 			"",
-			"Prints the binary version for this CLI shell.",
+			"Prints the binary version, revision, and build time for this CLI shell.",
 		),
 		Run: runVersion,
 	}
@@ -32,6 +35,14 @@ func runVersion(_ context.Context, inv Invocation) error {
 		return err
 	}
 
-	fmt.Fprintln(inv.Stdout, inv.Version)
+	info := buildinfo.Current()
+	version := strings.TrimSpace(inv.Version)
+	if version == "" {
+		version = info.Version
+	}
+
+	fmt.Fprintf(inv.Stdout, "version: %s\n", version)
+	fmt.Fprintf(inv.Stdout, "revision: %s\n", info.Revision)
+	fmt.Fprintf(inv.Stdout, "build_time: %s\n", info.BuildTime)
 	return nil
 }

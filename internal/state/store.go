@@ -32,7 +32,11 @@ type Run struct {
 	RepoPath                 string
 	Goal                     string
 	Status                   RunStatus
+	LatestStopReason         string
+	RuntimeIssueReason       string
+	RuntimeIssueMessage      string
 	PreviousResponseID       string
+	HumanReplies             []HumanReply
 	CollectedContext         *CollectedContextState
 	ExecutorTransport        string
 	ExecutorThreadID         string
@@ -43,6 +47,8 @@ type Run struct {
 	ExecutorLastFailureStage string
 	ExecutorLastError        string
 	ExecutorLastMessage      string
+	ExecutorApproval         *ExecutorApproval
+	ExecutorLastControl      *ExecutorControl
 	CreatedAt                time.Time
 	UpdatedAt                time.Time
 	LatestCheckpoint         Checkpoint
@@ -65,6 +71,13 @@ type CreateRunParams struct {
 	Checkpoint Checkpoint
 }
 
+type HumanReply struct {
+	ID         string    `json:"id"`
+	Source     string    `json:"source"`
+	ReceivedAt time.Time `json:"received_at"`
+	Payload    string    `json:"payload"`
+}
+
 type Stats struct {
 	TotalRuns     int64
 	ResumableRuns int64
@@ -80,12 +93,36 @@ type ExecutorState struct {
 	LastFailureStage string
 	LastError        string
 	LastMessage      string
+	Approval         *ExecutorApproval
+	LastControl      *ExecutorControl
+}
+
+type ExecutorApproval struct {
+	State      string `json:"state,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	RequestID  string `json:"request_id,omitempty"`
+	ApprovalID string `json:"approval_id,omitempty"`
+	ItemID     string `json:"item_id,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Command    string `json:"command,omitempty"`
+	CWD        string `json:"cwd,omitempty"`
+	GrantRoot  string `json:"grant_root,omitempty"`
+	RawParams  string `json:"raw_params,omitempty"`
+}
+
+type ExecutorControl struct {
+	Action  string    `json:"action,omitempty"`
+	Payload string    `json:"payload,omitempty"`
+	At      time.Time `json:"at,omitempty"`
 }
 
 type CollectedContextState struct {
-	Focus     string                   `json:"focus"`
-	Questions []string                 `json:"questions,omitempty"`
-	Results   []CollectedContextResult `json:"results,omitempty"`
+	Focus         string                   `json:"focus"`
+	Questions     []string                 `json:"questions,omitempty"`
+	Results       []CollectedContextResult `json:"results,omitempty"`
+	ToolResults   []PluginToolResult       `json:"tool_results,omitempty"`
+	WorkerResults []WorkerActionResult     `json:"worker_results,omitempty"`
+	WorkerPlan    *WorkerPlanResult        `json:"worker_plan,omitempty"`
 }
 
 type CollectedContextResult struct {
@@ -96,6 +133,116 @@ type CollectedContextResult struct {
 	Preview       string   `json:"preview,omitempty"`
 	Entries       []string `json:"entries,omitempty"`
 	Truncated     bool     `json:"truncated,omitempty"`
+}
+
+type PluginToolResult struct {
+	Tool            string         `json:"tool"`
+	Success         bool           `json:"success"`
+	Message         string         `json:"message,omitempty"`
+	Data            map[string]any `json:"data,omitempty"`
+	ArtifactPath    string         `json:"artifact_path,omitempty"`
+	ArtifactPreview string         `json:"artifact_preview,omitempty"`
+}
+
+type WorkerActionResult struct {
+	Action          string                   `json:"action"`
+	Success         bool                     `json:"success"`
+	Message         string                   `json:"message,omitempty"`
+	Worker          *WorkerResultSummary     `json:"worker,omitempty"`
+	ListedWorkers   []WorkerResultSummary    `json:"listed_workers,omitempty"`
+	Removed         bool                     `json:"removed,omitempty"`
+	ArtifactPath    string                   `json:"artifact_path,omitempty"`
+	ArtifactPreview string                   `json:"artifact_preview,omitempty"`
+	Integration     *IntegrationSummary      `json:"integration,omitempty"`
+	Apply           *IntegrationApplySummary `json:"apply,omitempty"`
+}
+
+type WorkerResultSummary struct {
+	WorkerID                   string    `json:"worker_id,omitempty"`
+	WorkerName                 string    `json:"worker_name,omitempty"`
+	WorkerStatus               string    `json:"worker_status,omitempty"`
+	AssignedScope              string    `json:"assigned_scope,omitempty"`
+	WorktreePath               string    `json:"worktree_path,omitempty"`
+	WorkerTaskSummary          string    `json:"worker_task_summary,omitempty"`
+	ExecutorPromptSummary      string    `json:"worker_executor_prompt_summary,omitempty"`
+	WorkerResultSummary        string    `json:"worker_result_summary,omitempty"`
+	WorkerErrorSummary         string    `json:"worker_error_summary,omitempty"`
+	ExecutorThreadID           string    `json:"executor_thread_id,omitempty"`
+	ExecutorTurnID             string    `json:"executor_turn_id,omitempty"`
+	ExecutorTurnStatus         string    `json:"executor_turn_status,omitempty"`
+	ExecutorApprovalState      string    `json:"executor_approval_state,omitempty"`
+	ExecutorApprovalKind       string    `json:"executor_approval_kind,omitempty"`
+	ExecutorApprovalPreview    string    `json:"executor_approval_preview,omitempty"`
+	ExecutorInterruptible      bool      `json:"executor_interruptible,omitempty"`
+	ExecutorSteerable          bool      `json:"executor_steerable,omitempty"`
+	ExecutorFailureStage       string    `json:"executor_failure_stage,omitempty"`
+	ExecutorLastControlAction  string    `json:"executor_last_control_action,omitempty"`
+	ExecutorLastControlPayload string    `json:"executor_last_control_payload,omitempty"`
+	StartedAt                  time.Time `json:"started_at,omitempty"`
+	CompletedAt                time.Time `json:"completed_at,omitempty"`
+}
+
+type IntegrationSummary struct {
+	WorkerIDs          []string                   `json:"worker_ids,omitempty"`
+	Workers            []IntegrationWorkerSummary `json:"workers,omitempty"`
+	ConflictCandidates []ConflictCandidate        `json:"conflict_candidates,omitempty"`
+	IntegrationPreview string                     `json:"integration_preview,omitempty"`
+}
+
+type IntegrationWorkerSummary struct {
+	WorkerID            string   `json:"worker_id,omitempty"`
+	WorkerName          string   `json:"worker_name,omitempty"`
+	WorktreePath        string   `json:"worktree_path,omitempty"`
+	WorkerResultSummary string   `json:"worker_result_summary,omitempty"`
+	FileList            []string `json:"file_list,omitempty"`
+	DiffSummary         []string `json:"diff_summary,omitempty"`
+}
+
+type ConflictCandidate struct {
+	Path        string   `json:"path,omitempty"`
+	Reason      string   `json:"reason,omitempty"`
+	WorkerIDs   []string `json:"worker_ids,omitempty"`
+	WorkerNames []string `json:"worker_names,omitempty"`
+}
+
+type WorkerPlanResult struct {
+	Status                  string                   `json:"status,omitempty"`
+	WorkerIDs               []string                 `json:"worker_ids,omitempty"`
+	Workers                 []WorkerResultSummary    `json:"workers,omitempty"`
+	ConcurrencyLimit        int                      `json:"concurrency_limit,omitempty"`
+	IntegrationRequested    bool                     `json:"integration_requested,omitempty"`
+	IntegrationArtifactPath string                   `json:"integration_artifact_path,omitempty"`
+	IntegrationPreview      string                   `json:"integration_preview,omitempty"`
+	ApplyMode               string                   `json:"apply_mode,omitempty"`
+	ApplyArtifactPath       string                   `json:"apply_artifact_path,omitempty"`
+	Apply                   *IntegrationApplySummary `json:"apply,omitempty"`
+	Message                 string                   `json:"message,omitempty"`
+}
+
+type IntegrationApplySummary struct {
+	Status             string                   `json:"status,omitempty"`
+	SourceArtifactPath string                   `json:"source_artifact_path,omitempty"`
+	ApplyMode          string                   `json:"apply_mode,omitempty"`
+	FilesApplied       []IntegrationAppliedFile `json:"files_applied,omitempty"`
+	FilesSkipped       []IntegrationSkippedFile `json:"files_skipped,omitempty"`
+	ConflictCandidates []ConflictCandidate      `json:"conflict_candidates,omitempty"`
+	BeforeSummary      string                   `json:"before_summary,omitempty"`
+	AfterSummary       string                   `json:"after_summary,omitempty"`
+}
+
+type IntegrationAppliedFile struct {
+	WorkerID   string `json:"worker_id,omitempty"`
+	WorkerName string `json:"worker_name,omitempty"`
+	Path       string `json:"path,omitempty"`
+	ChangeKind string `json:"change_kind,omitempty"`
+}
+
+type IntegrationSkippedFile struct {
+	WorkerID   string `json:"worker_id,omitempty"`
+	WorkerName string `json:"worker_name,omitempty"`
+	Path       string `json:"path,omitempty"`
+	ChangeKind string `json:"change_kind,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 func Open(path string) (*Store, error) {
@@ -139,7 +286,11 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			latest_checkpoint_json TEXT NOT NULL,
+			latest_stop_reason TEXT NOT NULL DEFAULT '',
+			runtime_issue_reason TEXT NOT NULL DEFAULT '',
+			runtime_issue_message TEXT NOT NULL DEFAULT '',
 			previous_response_id TEXT NOT NULL DEFAULT '',
+			human_replies_json TEXT NOT NULL DEFAULT '',
 			collected_context_json TEXT NOT NULL DEFAULT '',
 			executor_transport TEXT NOT NULL DEFAULT '',
 			executor_thread_id TEXT NOT NULL DEFAULT '',
@@ -149,7 +300,9 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			executor_last_success INTEGER,
 			executor_last_failure_stage TEXT NOT NULL DEFAULT '',
 			executor_last_error TEXT NOT NULL DEFAULT '',
-			executor_last_message TEXT NOT NULL DEFAULT ''
+			executor_last_message TEXT NOT NULL DEFAULT '',
+			executor_approval_json TEXT NOT NULL DEFAULT '',
+			executor_last_control_json TEXT NOT NULL DEFAULT ''
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_runs_status_updated_at
 			ON runs(status, updated_at DESC);`,
@@ -167,6 +320,40 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_checkpoints_run_created_at
 			ON checkpoints(run_id, created_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS workers (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			worker_name TEXT NOT NULL,
+			worker_status TEXT NOT NULL,
+			assigned_scope TEXT NOT NULL DEFAULT '',
+			worktree_path TEXT NOT NULL,
+			worker_task_summary TEXT NOT NULL DEFAULT '',
+			worker_executor_prompt_summary TEXT NOT NULL DEFAULT '',
+			worker_result_summary TEXT NOT NULL DEFAULT '',
+			worker_error_summary TEXT NOT NULL DEFAULT '',
+			executor_thread_id TEXT NOT NULL DEFAULT '',
+			executor_turn_id TEXT NOT NULL DEFAULT '',
+			executor_turn_status TEXT NOT NULL DEFAULT '',
+			executor_approval_state TEXT NOT NULL DEFAULT '',
+			executor_approval_kind TEXT NOT NULL DEFAULT '',
+			executor_approval_preview TEXT NOT NULL DEFAULT '',
+			executor_interruptible INTEGER NOT NULL DEFAULT 0,
+			executor_steerable INTEGER NOT NULL DEFAULT 0,
+			executor_failure_stage TEXT NOT NULL DEFAULT '',
+			executor_last_control_action TEXT NOT NULL DEFAULT '',
+			executor_approval_json TEXT NOT NULL DEFAULT '',
+			executor_last_control_json TEXT NOT NULL DEFAULT '',
+			assigned_at TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL DEFAULT '',
+			completed_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_worktree_path
+			ON workers(worktree_path);`,
+		`CREATE INDEX IF NOT EXISTS idx_workers_run_updated_at
+			ON workers(run_id, updated_at DESC);`,
 	}
 
 	for _, statement := range statements {
@@ -176,6 +363,18 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	}
 
 	if err := s.ensureRunsColumn(ctx, "previous_response_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureRunsColumn(ctx, "latest_stop_reason", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureRunsColumn(ctx, "runtime_issue_reason", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureRunsColumn(ctx, "runtime_issue_message", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureRunsColumn(ctx, "human_replies_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureRunsColumn(ctx, "collected_context_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
@@ -208,8 +407,65 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	if err := s.ensureRunsColumn(ctx, "executor_last_message", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureRunsColumn(ctx, "executor_approval_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureRunsColumn(ctx, "executor_last_control_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "worker_task_summary", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "worker_executor_prompt_summary", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "worker_result_summary", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "worker_error_summary", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "executor_turn_status", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "executor_approval_state", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "executor_approval_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "executor_approval_preview", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "executor_interruptible", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "executor_steerable", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "executor_failure_stage", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "executor_last_control_action", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "executor_approval_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "executor_last_control_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "assigned_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "started_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureWorkersColumn(ctx, "completed_at", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 
-	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version = 7;"); err != nil {
+	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version = 15;"); err != nil {
 		return err
 	}
 
@@ -266,9 +522,9 @@ func (s *Store) CreateRun(ctx context.Context, params CreateRunParams) (Run, err
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO runs (
-			id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, previous_response_id, collected_context_json,
-			executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json,
+			executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message, executor_approval_json, executor_last_control_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		runID,
 		params.RepoPath,
 		params.Goal,
@@ -283,7 +539,13 @@ func (s *Store) CreateRun(ctx context.Context, params CreateRunParams) (Run, err
 		"",
 		"",
 		"",
+		"",
+		"",
+		"",
+		"",
 		nil,
+		"",
+		"",
 		"",
 		"",
 		"",
@@ -300,15 +562,19 @@ func (s *Store) CreateRun(ctx context.Context, params CreateRunParams) (Run, err
 	}
 
 	return Run{
-		ID:                 runID,
-		RepoPath:           params.RepoPath,
-		Goal:               params.Goal,
-		Status:             status,
-		PreviousResponseID: "",
-		CollectedContext:   nil,
-		CreatedAt:          createdAt,
-		UpdatedAt:          updatedAt,
-		LatestCheckpoint:   checkpoint,
+		ID:                  runID,
+		RepoPath:            params.RepoPath,
+		Goal:                params.Goal,
+		Status:              status,
+		LatestStopReason:    "",
+		RuntimeIssueReason:  "",
+		RuntimeIssueMessage: "",
+		PreviousResponseID:  "",
+		HumanReplies:        nil,
+		CollectedContext:    nil,
+		CreatedAt:           createdAt,
+		UpdatedAt:           updatedAt,
+		LatestCheckpoint:    checkpoint,
 	}, nil
 }
 
@@ -324,6 +590,156 @@ func (s *Store) SavePlannerTurn(ctx context.Context, runID string, previousRespo
 	return s.saveCheckpointAndResponseID(ctx, runID, previousResponseID, true, checkpoint)
 }
 
+func (s *Store) SavePlannerCompletion(ctx context.Context, runID string, previousResponseID string, checkpoint Checkpoint) error {
+	if strings.TrimSpace(runID) == "" {
+		return errors.New("run id is required")
+	}
+	if strings.TrimSpace(previousResponseID) == "" {
+		return errors.New("previous response id is required")
+	}
+	if checkpoint.Sequence == 0 {
+		return errors.New("checkpoint sequence is required")
+	}
+	if checkpoint.Stage == "" {
+		return errors.New("checkpoint stage is required")
+	}
+	if checkpoint.Label == "" {
+		return errors.New("checkpoint label is required")
+	}
+
+	if checkpoint.CreatedAt.IsZero() {
+		checkpoint.CreatedAt = time.Now().UTC()
+	} else {
+		checkpoint.CreatedAt = checkpoint.CreatedAt.UTC()
+	}
+
+	checkpointJSON, err := json.Marshal(checkpoint)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := insertCheckpointTx(ctx, tx, runID, checkpoint); err != nil {
+		return err
+	}
+
+	result, err := tx.ExecContext(ctx,
+		`UPDATE runs
+		 SET updated_at = ?,
+		     latest_checkpoint_json = ?,
+		     latest_stop_reason = '',
+		     runtime_issue_reason = '',
+		     runtime_issue_message = '',
+		     previous_response_id = ?,
+		     status = ?
+		 WHERE id = ?`,
+		formatTime(checkpoint.CreatedAt),
+		string(checkpointJSON),
+		previousResponseID,
+		string(StatusCompleted),
+		runID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("run %s not found", runID)
+	}
+
+	return tx.Commit()
+}
+
+func (s *Store) RecordHumanReply(ctx context.Context, runID string, source string, payload string, receivedAt time.Time) (HumanReply, error) {
+	if strings.TrimSpace(runID) == "" {
+		return HumanReply{}, errors.New("run id is required")
+	}
+	if strings.TrimSpace(source) == "" {
+		return HumanReply{}, errors.New("human reply source is required")
+	}
+	if receivedAt.IsZero() {
+		receivedAt = time.Now().UTC()
+	} else {
+		receivedAt = receivedAt.UTC()
+	}
+
+	replyID, err := newHumanReplyID()
+	if err != nil {
+		return HumanReply{}, err
+	}
+
+	reply := HumanReply{
+		ID:         replyID,
+		Source:     strings.TrimSpace(source),
+		ReceivedAt: receivedAt,
+		Payload:    payload,
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return HumanReply{}, err
+	}
+	defer tx.Rollback()
+
+	var existingJSON string
+	if err := tx.QueryRowContext(ctx, `SELECT human_replies_json FROM runs WHERE id = ? LIMIT 1`, runID).Scan(&existingJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return HumanReply{}, fmt.Errorf("run %s not found", runID)
+		}
+		return HumanReply{}, err
+	}
+
+	replies, err := unmarshalHumanReplies(existingJSON)
+	if err != nil {
+		return HumanReply{}, err
+	}
+	replies = append(replies, reply)
+
+	encoded, err := marshalHumanReplies(replies)
+	if err != nil {
+		return HumanReply{}, err
+	}
+
+	result, err := tx.ExecContext(ctx,
+		`UPDATE runs
+		 SET updated_at = ?,
+		     latest_stop_reason = '',
+		     runtime_issue_reason = '',
+		     runtime_issue_message = '',
+		     human_replies_json = ?
+		 WHERE id = ?`,
+		formatTime(receivedAt),
+		encoded,
+		runID,
+	)
+	if err != nil {
+		return HumanReply{}, err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return HumanReply{}, err
+	}
+	if rows == 0 {
+		return HumanReply{}, fmt.Errorf("run %s not found", runID)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return HumanReply{}, err
+	}
+
+	return reply, nil
+}
+
 func (s *Store) SaveCollectedContext(ctx context.Context, runID string, collectedContext *CollectedContextState) error {
 	if strings.TrimSpace(runID) == "" {
 		return errors.New("run id is required")
@@ -337,6 +753,9 @@ func (s *Store) SaveCollectedContext(ctx context.Context, runID string, collecte
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE runs
 		 SET updated_at = ?,
+		     latest_stop_reason = '',
+		     runtime_issue_reason = '',
+		     runtime_issue_message = '',
 		     collected_context_json = ?
 		 WHERE id = ?`,
 		formatTime(time.Now().UTC()),
@@ -363,9 +782,21 @@ func (s *Store) SaveExecutorState(ctx context.Context, runID string, executorSta
 		return errors.New("run id is required")
 	}
 
+	approvalJSON, err := marshalExecutorApproval(executorState.Approval)
+	if err != nil {
+		return err
+	}
+	lastControlJSON, err := marshalExecutorControl(executorState.LastControl)
+	if err != nil {
+		return err
+	}
+
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE runs
 		 SET updated_at = ?,
+		     latest_stop_reason = '',
+		     runtime_issue_reason = '',
+		     runtime_issue_message = '',
 		     executor_transport = ?,
 		     executor_thread_id = ?,
 		     executor_thread_path = ?,
@@ -374,7 +805,9 @@ func (s *Store) SaveExecutorState(ctx context.Context, runID string, executorSta
 		     executor_last_success = ?,
 		     executor_last_failure_stage = ?,
 		     executor_last_error = ?,
-		     executor_last_message = ?
+		     executor_last_message = ?,
+		     executor_approval_json = ?,
+		     executor_last_control_json = ?
 		 WHERE id = ?`,
 		formatTime(time.Now().UTC()),
 		strings.TrimSpace(executorState.Transport),
@@ -386,6 +819,8 @@ func (s *Store) SaveExecutorState(ctx context.Context, runID string, executorSta
 		strings.TrimSpace(executorState.LastFailureStage),
 		strings.TrimSpace(executorState.LastError),
 		strings.TrimSpace(executorState.LastMessage),
+		approvalJSON,
+		lastControlJSON,
 		runID,
 	)
 	if err != nil {
@@ -427,6 +862,14 @@ func (s *Store) SaveExecutorTurn(ctx context.Context, runID string, executorStat
 	if err != nil {
 		return err
 	}
+	approvalJSON, err := marshalExecutorApproval(executorState.Approval)
+	if err != nil {
+		return err
+	}
+	lastControlJSON, err := marshalExecutorControl(executorState.LastControl)
+	if err != nil {
+		return err
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -442,6 +885,9 @@ func (s *Store) SaveExecutorTurn(ctx context.Context, runID string, executorStat
 		`UPDATE runs
 		 SET updated_at = ?,
 		     latest_checkpoint_json = ?,
+		     latest_stop_reason = '',
+		     runtime_issue_reason = '',
+		     runtime_issue_message = '',
 		     executor_transport = ?,
 		     executor_thread_id = ?,
 		     executor_thread_path = ?,
@@ -450,7 +896,9 @@ func (s *Store) SaveExecutorTurn(ctx context.Context, runID string, executorStat
 		     executor_last_success = ?,
 		     executor_last_failure_stage = ?,
 		     executor_last_error = ?,
-		     executor_last_message = ?
+		     executor_last_message = ?,
+		     executor_approval_json = ?,
+		     executor_last_control_json = ?
 		 WHERE id = ?`,
 		formatTime(checkpoint.CreatedAt),
 		string(checkpointJSON),
@@ -463,6 +911,8 @@ func (s *Store) SaveExecutorTurn(ctx context.Context, runID string, executorStat
 		strings.TrimSpace(executorState.LastFailureStage),
 		strings.TrimSpace(executorState.LastError),
 		strings.TrimSpace(executorState.LastMessage),
+		approvalJSON,
+		lastControlJSON,
 		runID,
 	)
 	if err != nil {
@@ -482,8 +932,8 @@ func (s *Store) SaveExecutorTurn(ctx context.Context, runID string, executorStat
 
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, bool, error) {
 	return s.querySingleRun(ctx,
-		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, previous_response_id, collected_context_json,
-		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message
+		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json,
+		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message, executor_approval_json, executor_last_control_json
 		 FROM runs
 		 WHERE id = ?
 		 LIMIT 1`,
@@ -547,8 +997,8 @@ func (s *Store) saveCheckpointAndResponseID(ctx context.Context, runID string, p
 
 func (s *Store) LatestResumableRun(ctx context.Context) (Run, bool, error) {
 	return s.querySingleRun(ctx,
-		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, previous_response_id, collected_context_json,
-		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message
+		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json,
+		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message, executor_approval_json, executor_last_control_json
 		 FROM runs
 		 WHERE status NOT IN (?, ?, ?)
 		 ORDER BY updated_at DESC, created_at DESC
@@ -561,11 +1011,26 @@ func (s *Store) LatestResumableRun(ctx context.Context) (Run, bool, error) {
 
 func (s *Store) LatestRun(ctx context.Context) (Run, bool, error) {
 	return s.querySingleRun(ctx,
-		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, previous_response_id, collected_context_json,
-		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message
+		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json,
+		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message, executor_approval_json, executor_last_control_json
 		 FROM runs
 		 ORDER BY updated_at DESC, created_at DESC
 		 LIMIT 1`,
+	)
+}
+
+func (s *Store) ListRuns(ctx context.Context, limit int) ([]Run, error) {
+	if limit <= 0 {
+		return []Run{}, nil
+	}
+
+	return s.queryRuns(ctx,
+		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json,
+		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message, executor_approval_json, executor_last_control_json
+		 FROM runs
+		 ORDER BY updated_at DESC, created_at DESC
+		 LIMIT ?`,
+		limit,
 	)
 }
 
@@ -604,16 +1069,121 @@ func insertCheckpointTx(ctx context.Context, tx *sql.Tx, runID string, checkpoin
 	return err
 }
 
-func (s *Store) querySingleRun(ctx context.Context, query string, args ...any) (Run, bool, error) {
-	row := s.db.QueryRowContext(ctx, query, args...)
+func (s *Store) SaveRuntimeIssue(ctx context.Context, runID string, reason string, message string) error {
+	if strings.TrimSpace(runID) == "" {
+		return errors.New("run id is required")
+	}
+	if strings.TrimSpace(reason) == "" {
+		return errors.New("runtime issue reason is required")
+	}
+	if strings.TrimSpace(message) == "" {
+		return errors.New("runtime issue message is required")
+	}
 
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE runs
+		 SET updated_at = ?,
+		     latest_stop_reason = ?,
+		     runtime_issue_reason = ?,
+		     runtime_issue_message = ?
+		 WHERE id = ?`,
+		formatTime(time.Now().UTC()),
+		strings.TrimSpace(reason),
+		strings.TrimSpace(reason),
+		strings.TrimSpace(message),
+		runID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("run %s not found", runID)
+	}
+
+	return nil
+}
+
+func (s *Store) SaveLatestStopReason(ctx context.Context, runID string, reason string) error {
+	if strings.TrimSpace(runID) == "" {
+		return errors.New("run id is required")
+	}
+	if strings.TrimSpace(reason) == "" {
+		return errors.New("latest stop reason is required")
+	}
+
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE runs
+		 SET updated_at = ?,
+		     latest_stop_reason = ?
+		 WHERE id = ?`,
+		formatTime(time.Now().UTC()),
+		strings.TrimSpace(reason),
+		runID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("run %s not found", runID)
+	}
+
+	return nil
+}
+
+func (s *Store) ClearLatestStopReason(ctx context.Context, runID string) error {
+	if strings.TrimSpace(runID) == "" {
+		return errors.New("run id is required")
+	}
+
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE runs
+		 SET updated_at = ?,
+		     latest_stop_reason = ''
+		 WHERE id = ?`,
+		formatTime(time.Now().UTC()),
+		runID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("run %s not found", runID)
+	}
+
+	return nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRun(scanner rowScanner) (Run, error) {
 	var (
 		run                      Run
 		status                   string
 		createdAtRaw             string
 		updatedAtRaw             string
 		checkpointJSON           string
+		latestStopReason         string
+		runtimeIssueReason       string
+		runtimeIssueMessage      string
 		previousResponseID       string
+		humanRepliesJSON         string
 		collectedContextJSON     string
 		executorTransport        string
 		executorThreadID         string
@@ -624,9 +1194,11 @@ func (s *Store) querySingleRun(ctx context.Context, query string, args ...any) (
 		executorLastFailureStage string
 		executorLastError        string
 		executorLastMessage      string
+		executorApprovalJSON     string
+		executorLastControlJSON  string
 	)
 
-	if err := row.Scan(
+	if err := scanner.Scan(
 		&run.ID,
 		&run.RepoPath,
 		&run.Goal,
@@ -634,7 +1206,11 @@ func (s *Store) querySingleRun(ctx context.Context, query string, args ...any) (
 		&createdAtRaw,
 		&updatedAtRaw,
 		&checkpointJSON,
+		&latestStopReason,
+		&runtimeIssueReason,
+		&runtimeIssueMessage,
 		&previousResponseID,
+		&humanRepliesJSON,
 		&collectedContextJSON,
 		&executorTransport,
 		&executorThreadID,
@@ -645,32 +1221,39 @@ func (s *Store) querySingleRun(ctx context.Context, query string, args ...any) (
 		&executorLastFailureStage,
 		&executorLastError,
 		&executorLastMessage,
+		&executorApprovalJSON,
+		&executorLastControlJSON,
 	); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Run{}, false, nil
-		}
-		return Run{}, false, err
+		return Run{}, err
 	}
 
 	createdAt, err := time.Parse(time.RFC3339Nano, createdAtRaw)
 	if err != nil {
-		return Run{}, false, err
+		return Run{}, err
 	}
 	updatedAt, err := time.Parse(time.RFC3339Nano, updatedAtRaw)
 	if err != nil {
-		return Run{}, false, err
+		return Run{}, err
 	}
 
 	var checkpoint Checkpoint
 	if err := json.Unmarshal([]byte(checkpointJSON), &checkpoint); err != nil {
-		return Run{}, false, err
+		return Run{}, err
 	}
 
 	run.Status = RunStatus(status)
+	run.LatestStopReason = latestStopReason
+	run.RuntimeIssueReason = runtimeIssueReason
+	run.RuntimeIssueMessage = runtimeIssueMessage
 	run.PreviousResponseID = previousResponseID
+	humanReplies, err := unmarshalHumanReplies(humanRepliesJSON)
+	if err != nil {
+		return Run{}, err
+	}
+	run.HumanReplies = humanReplies
 	collectedContext, err := unmarshalCollectedContext(collectedContextJSON)
 	if err != nil {
-		return Run{}, false, err
+		return Run{}, err
 	}
 	run.CollectedContext = collectedContext
 	run.ExecutorTransport = executorTransport
@@ -682,14 +1265,68 @@ func (s *Store) querySingleRun(ctx context.Context, query string, args ...any) (
 	run.ExecutorLastFailureStage = executorLastFailureStage
 	run.ExecutorLastError = executorLastError
 	run.ExecutorLastMessage = executorLastMessage
+	executorApproval, err := unmarshalExecutorApproval(executorApprovalJSON)
+	if err != nil {
+		return Run{}, err
+	}
+	run.ExecutorApproval = executorApproval
+	executorLastControl, err := unmarshalExecutorControl(executorLastControlJSON)
+	if err != nil {
+		return Run{}, err
+	}
+	run.ExecutorLastControl = executorLastControl
 	run.CreatedAt = createdAt
 	run.UpdatedAt = updatedAt
 	run.LatestCheckpoint = checkpoint
+	return run, nil
+}
+
+func (s *Store) querySingleRun(ctx context.Context, query string, args ...any) (Run, bool, error) {
+	row := s.db.QueryRowContext(ctx, query, args...)
+
+	run, err := scanRun(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Run{}, false, nil
+		}
+		return Run{}, false, err
+	}
+
 	return run, true, nil
 }
 
+func (s *Store) queryRuns(ctx context.Context, query string, args ...any) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	runs := make([]Run, 0)
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return runs, nil
+}
+
 func (s *Store) ensureRunsColumn(ctx context.Context, columnName string, definition string) error {
-	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info(runs);")
+	return s.ensureTableColumn(ctx, "runs", columnName, definition)
+}
+
+func (s *Store) ensureWorkersColumn(ctx context.Context, columnName string, definition string) error {
+	return s.ensureTableColumn(ctx, "workers", columnName, definition)
+}
+
+func (s *Store) ensureTableColumn(ctx context.Context, tableName string, columnName string, definition string) error {
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s);", tableName))
 	if err != nil {
 		return err
 	}
@@ -715,19 +1352,19 @@ func (s *Store) ensureRunsColumn(ctx context.Context, columnName string, definit
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE runs ADD COLUMN %s %s;", columnName, definition))
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s;", tableName, columnName, definition))
 	return err
 }
 
 func updateRunStatement(persistResponseID bool) string {
 	if persistResponseID {
 		return `UPDATE runs
-		 SET updated_at = ?, latest_checkpoint_json = ?, previous_response_id = ?
+		 SET updated_at = ?, latest_checkpoint_json = ?, latest_stop_reason = '', runtime_issue_reason = '', runtime_issue_message = '', previous_response_id = ?
 		 WHERE id = ?`
 	}
 
 	return `UPDATE runs
-		SET updated_at = ?, latest_checkpoint_json = ?
+		SET updated_at = ?, latest_checkpoint_json = ?, latest_stop_reason = '', runtime_issue_reason = '', runtime_issue_message = ''
 		WHERE id = ?`
 }
 
@@ -746,6 +1383,30 @@ func updateRunArgs(runID string, checkpoint Checkpoint, checkpointJSON string, p
 		checkpointJSON,
 		runID,
 	}
+}
+
+func marshalHumanReplies(replies []HumanReply) (string, error) {
+	if len(replies) == 0 {
+		return "", nil
+	}
+
+	encoded, err := json.Marshal(replies)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func unmarshalHumanReplies(value string) ([]HumanReply, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+
+	var replies []HumanReply
+	if err := json.Unmarshal([]byte(value), &replies); err != nil {
+		return nil, err
+	}
+	return replies, nil
 }
 
 func marshalCollectedContext(collectedContext *CollectedContextState) (string, error) {
@@ -772,6 +1433,54 @@ func unmarshalCollectedContext(value string) (*CollectedContextState, error) {
 	return &collectedContext, nil
 }
 
+func marshalExecutorApproval(approval *ExecutorApproval) (string, error) {
+	if approval == nil {
+		return "", nil
+	}
+
+	encoded, err := json.Marshal(approval)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func unmarshalExecutorApproval(value string) (*ExecutorApproval, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+
+	var approval ExecutorApproval
+	if err := json.Unmarshal([]byte(value), &approval); err != nil {
+		return nil, err
+	}
+	return &approval, nil
+}
+
+func marshalExecutorControl(control *ExecutorControl) (string, error) {
+	if control == nil {
+		return "", nil
+	}
+
+	encoded, err := json.Marshal(control)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func unmarshalExecutorControl(value string) (*ExecutorControl, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+
+	var control ExecutorControl
+	if err := json.Unmarshal([]byte(value), &control); err != nil {
+		return nil, err
+	}
+	return &control, nil
+}
+
 func newRunID() (string, error) {
 	bytes := make([]byte, 16)
 	if _, err := rand.Read(bytes); err != nil {
@@ -779,6 +1488,15 @@ func newRunID() (string, error) {
 	}
 
 	return "run_" + hex.EncodeToString(bytes), nil
+}
+
+func newHumanReplyID() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+
+	return "human_" + hex.EncodeToString(bytes), nil
 }
 
 func formatTime(value time.Time) string {
