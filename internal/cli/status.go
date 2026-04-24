@@ -47,6 +47,7 @@ func runStatus(ctx context.Context, inv Invocation) error {
 		return err
 	}
 
+	cfg := currentConfig(inv)
 	verbosity := resolveOutputVerbosity(inv)
 	_, pluginSummary := plugins.Load(inv.RepoRoot)
 	cfgState := "missing"
@@ -65,8 +66,12 @@ func runStatus(ctx context.Context, inv Invocation) error {
 	fmt.Fprintln(inv.Stdout, "  planner.transport: responses_api")
 	fmt.Fprintf(inv.Stdout, "  planner.model: %s\n", resolvePlannerModel(inv))
 	fmt.Fprintf(inv.Stdout, "  planner.api_key: %s\n", plannerAPIKeyStatus())
-	fmt.Fprintf(inv.Stdout, "  workers.concurrency_limit: %d\n", inv.Config.WorkerConcurrencyLimit)
-	fmt.Fprintf(inv.Stdout, "  review.drift_watcher_enabled: %t\n", inv.Config.DriftWatcherEnabled)
+	modelHealth := buildModelHealthSnapshot(ctx, inv, nil)
+	fmt.Fprintf(inv.Stdout, "  planner.model_verification: %s\n", modelHealth.Planner.VerificationState)
+	fmt.Fprintf(inv.Stdout, "  executor.model_verification: %s\n", modelHealth.Executor.VerificationState)
+	fmt.Fprintf(inv.Stdout, "  executor.model_request: %s\n", valueOrUnavailable(modelHealth.Executor.RequestedModel))
+	fmt.Fprintf(inv.Stdout, "  workers.concurrency_limit: %d\n", cfg.WorkerConcurrencyLimit)
+	fmt.Fprintf(inv.Stdout, "  review.drift_watcher_enabled: %t\n", cfg.DriftWatcherEnabled)
 	fmt.Fprintf(inv.Stdout, "  plugins.enabled: %t\n", pluginSummary.Enabled)
 	fmt.Fprintf(inv.Stdout, "  plugins.loaded: %d\n", pluginSummary.Loaded)
 	fmt.Fprintf(inv.Stdout, "  plugins.load_failures: %d\n", len(pluginSummary.Failures))
@@ -74,16 +79,16 @@ func runStatus(ctx context.Context, inv Invocation) error {
 	fmt.Fprintf(inv.Stdout, "  workers.support: %s\n", workerSupportLabel(workerSupport))
 	fmt.Fprintln(inv.Stdout, "  executor.transport.primary: codex_app_server")
 	fmt.Fprintf(inv.Stdout, "  executor.app_server: %s\n", executorAppServerState())
-	fmt.Fprintf(inv.Stdout, "  ntfy.configured: %t\n", ntfyConfigured(inv.Config))
+	fmt.Fprintf(inv.Stdout, "  ntfy.configured: %t\n", ntfyConfigured(cfg))
 	if verbosity != outputVerbosityQuiet {
 		fmt.Fprintf(inv.Stdout, "  plugins.directory: %s\n", valueOrUnavailable(strings.TrimSpace(pluginSummary.Directory)))
 		fmt.Fprintf(inv.Stdout, "  plugins.last_load_failure: %s\n", valueOrUnavailable(pluginFailureSummary(pluginSummary)))
 		fmt.Fprintf(inv.Stdout, "  workers.directory: %s\n", inv.Layout.WorkersDir)
-		fmt.Fprintf(inv.Stdout, "  ntfy.server_url: %s\n", valueOrUnavailable(strings.TrimSpace(inv.Config.NTFY.ServerURL)))
-		fmt.Fprintf(inv.Stdout, "  ntfy.topic: %s\n", valueOrUnavailable(strings.TrimSpace(inv.Config.NTFY.Topic)))
-		fmt.Fprintf(inv.Stdout, "  ntfy.auth_token: %s\n", ntfyAuthTokenState(inv.Config))
+		fmt.Fprintf(inv.Stdout, "  ntfy.server_url: %s\n", valueOrUnavailable(strings.TrimSpace(cfg.NTFY.ServerURL)))
+		fmt.Fprintf(inv.Stdout, "  ntfy.topic: %s\n", valueOrUnavailable(strings.TrimSpace(cfg.NTFY.Topic)))
+		fmt.Fprintf(inv.Stdout, "  ntfy.auth_token: %s\n", ntfyAuthTokenState(cfg))
 	}
-	fmt.Fprintf(inv.Stdout, "  ntfy.bridge: %s\n", ntfyBridgeState(inv.Config))
+	fmt.Fprintf(inv.Stdout, "  ntfy.bridge: %s\n", ntfyBridgeState(cfg))
 
 	fmt.Fprintln(inv.Stdout, "")
 	fmt.Fprintln(inv.Stdout, "persistence:")
@@ -143,6 +148,7 @@ func runStatus(ctx context.Context, inv Invocation) error {
 			fmt.Fprintf(inv.Stdout, "  summary.goal: %s\n", latestRun.Goal)
 			fmt.Fprintf(inv.Stdout, "  summary.status: %s\n", latestRun.Status)
 			fmt.Fprintf(inv.Stdout, "  summary.updated_at: %s\n", latestRun.UpdatedAt.Format(timeLayout))
+			fmt.Fprintf(inv.Stdout, "  summary.elapsed: %s\n", runElapsedLabel(latestRun, time.Now().UTC()))
 			fmt.Fprintf(inv.Stdout, "  summary.resumable: %t\n", isRunResumable(latestRun))
 			fmt.Fprintf(inv.Stdout, "  summary.completed: %t\n", latestRun.Status == state.StatusCompleted)
 			fmt.Fprintf(inv.Stdout, "  summary.next_operator_action: %s\n", nextOperatorActionForExistingRun(latestRun))
@@ -153,6 +159,8 @@ func runStatus(ctx context.Context, inv Invocation) error {
 			fmt.Fprintf(inv.Stdout, "  planner.outcome: %s\n", valueOrUnavailable(latestPlannerOutcome))
 			fmt.Fprintf(inv.Stdout, "  executor.turn_status: %s\n", valueOrUnavailable(latestRun.ExecutorTurnStatus))
 			fmt.Fprintf(inv.Stdout, "  executor.preview: %s\n", valueOrUnavailable(previewString(latestRun.ExecutorLastMessage, 240)))
+			fmt.Fprintf(inv.Stdout, "  executor.failure_stage: %s\n", valueOrUnavailable(latestRun.ExecutorLastFailureStage))
+			fmt.Fprintf(inv.Stdout, "  executor.last_error: %s\n", valueOrUnavailable(latestRun.ExecutorLastError))
 			fmt.Fprintf(inv.Stdout, "  executor.approval_state: %s\n", valueOrUnavailable(executorApprovalStateValue(latestRun)))
 			fmt.Fprintf(inv.Stdout, "  executor.approval_kind: %s\n", valueOrUnavailable(executorApprovalKindValue(latestRun)))
 			fmt.Fprintf(inv.Stdout, "  executor.thread_id: %s\n", valueOrUnavailable(latestRun.ExecutorThreadID))
@@ -164,7 +172,16 @@ func runStatus(ctx context.Context, inv Invocation) error {
 			fmt.Fprintf(inv.Stdout, "  human_reply.count: %d\n", len(latestRun.HumanReplies))
 			fmt.Fprintf(inv.Stdout, "  stop.reason: %s\n", valueOrUnavailable(latestRun.LatestStopReason))
 			fmt.Fprintf(inv.Stdout, "  stop.stable_checkpoint: %s\n", checkpointSummary(latestRun.LatestCheckpoint))
-			fmt.Fprintf(inv.Stdout, "  artifact.path: %s\n", valueOrUnavailable(latestArtifactPathFromEvents(latestEvents)))
+			fmt.Fprintf(inv.Stdout, "  artifact.path: %s\n", valueOrUnavailable(latestArtifactPath(latestRun, latestEvents)))
+			modelHealth = buildModelHealthSnapshot(ctx, inv, &latestRun)
+			fmt.Fprintf(inv.Stdout, "  model_health.needs_attention: %t\n", modelHealth.NeedsAttention)
+			fmt.Fprintf(inv.Stdout, "  model_health.blocking: %t\n", modelHealth.Blocking)
+			fmt.Fprintf(inv.Stdout, "  model_health.message: %s\n", valueOrUnavailable(modelHealth.Message))
+			fmt.Fprintf(inv.Stdout, "  planner.model_verification: %s\n", valueOrUnavailable(modelHealth.Planner.VerificationState))
+			fmt.Fprintf(inv.Stdout, "  executor.model_verification: %s\n", valueOrUnavailable(modelHealth.Executor.VerificationState))
+			fmt.Fprintf(inv.Stdout, "  executor.model_requested: %s\n", valueOrUnavailable(modelHealth.Executor.RequestedModel))
+			fmt.Fprintf(inv.Stdout, "  executor.model_error: %s\n", valueOrUnavailable(modelHealth.Executor.LastError))
+			writeOperatorStatus(inv.Stdout, verbosity, "  planner.", operatorStatusFromState(latestRun.PlannerOperatorStatus))
 			integrationArtifactPath := latestIntegrationArtifactPathFromEvents(latestEvents)
 			integrationApplyStatus, integrationApplyArtifactPath := latestIntegrationApplySummaryFromEvents(latestEvents)
 			fmt.Fprintf(inv.Stdout, "  integration.present: %t\n", strings.TrimSpace(integrationArtifactPath) != "")
@@ -196,7 +213,6 @@ func runStatus(ctx context.Context, inv Invocation) error {
 			if verbosity.verboseEnabled() && latestRun.ExecutorTurnStatus != "" {
 				fmt.Fprintf(inv.Stdout, "  executor.transport: %s\n", valueOrUnavailable(latestRun.ExecutorTransport))
 				fmt.Fprintf(inv.Stdout, "  executor.turn_id: %s\n", valueOrUnavailable(latestRun.ExecutorTurnID))
-				fmt.Fprintf(inv.Stdout, "  executor.last_error: %s\n", valueOrUnavailable(latestRun.ExecutorLastError))
 			}
 		} else {
 			fmt.Fprintln(inv.Stdout, "")
@@ -333,6 +349,46 @@ func latestArtifactPathFromEvents(events []journal.Event) string {
 	for idx := len(events) - 1; idx >= 0; idx-- {
 		if path := strings.TrimSpace(events[idx].ArtifactPath); path != "" {
 			return path
+		}
+	}
+	return ""
+}
+
+func latestArtifactPath(run state.Run, events []journal.Event) string {
+	if path := latestArtifactPathFromEvents(events); path != "" {
+		return path
+	}
+	return latestArtifactPathFromRun(run)
+}
+
+func latestArtifactPathFromRun(run state.Run) string {
+	if run.CollectedContext == nil {
+		return ""
+	}
+	if path := strings.TrimSpace(run.CollectedContext.ArtifactPath); path != "" {
+		return path
+	}
+	for idx := len(run.CollectedContext.WorkerResults) - 1; idx >= 0; idx-- {
+		if path := strings.TrimSpace(run.CollectedContext.WorkerResults[idx].ArtifactPath); path != "" {
+			return path
+		}
+	}
+	for idx := len(run.CollectedContext.ToolResults) - 1; idx >= 0; idx-- {
+		if path := strings.TrimSpace(run.CollectedContext.ToolResults[idx].ArtifactPath); path != "" {
+			return path
+		}
+	}
+	if run.CollectedContext.WorkerPlan != nil {
+		if path := strings.TrimSpace(run.CollectedContext.WorkerPlan.ApplyArtifactPath); path != "" {
+			return path
+		}
+		if path := strings.TrimSpace(run.CollectedContext.WorkerPlan.IntegrationArtifactPath); path != "" {
+			return path
+		}
+		if run.CollectedContext.WorkerPlan.Apply != nil {
+			if path := strings.TrimSpace(run.CollectedContext.WorkerPlan.Apply.SourceArtifactPath); path != "" {
+				return path
+			}
 		}
 	}
 	return ""

@@ -1,48 +1,59 @@
-# Orchestrator Roadmap
+# Brick Breaker Android — Roadmap
 
-## Phase 0: Documentation Bootstrap
+## Mission
+Turn the current repository into a complete and polished Android Brick Breaker game by first evaluating what already exists, then closing the highest-value gaps in a disciplined order.
 
-- Establish the primary architecture source.
-- Lock canonical repo decisions in ADRs.
-- Create repo contracts for future executor sessions.
+## Phase 1 — Repo Truth And Gap Assessment
+- inspect the current repository structure and implementation
+- identify the actual game architecture and current feature set
+- determine what already works, what is partial, and what is missing
+- validate build/run status
+- update this roadmap if repo truth suggests a better execution order
 
-## Phase 1: Persistence Spine
+## Phase 2 — Core Gameplay Completion
+- finalize paddle movement and controls
+- finalize ball movement and collision behavior
+- finalize brick generation and break logic
+- finalize scoring
+- finalize life/loss/reset behavior
+- finalize win/level-clear behavior
+- ensure gameplay loop is stable and fun
 
-- Define session, checkpoint, and event contracts.
-- Implement SQLite plus JSONL persistence with resumable checkpoints after AI turns.
-- Prove that a session can resume from persisted state.
+## Phase 3 — Game Structure And Progression
+- implement or refine title/start flow
+- implement pause/resume
+- implement game over flow
+- implement restart/try again flow
+- add multiple levels, patterns, or difficulty progression
+- tune progression pacing
 
-## Phase 2: Planner Contract
+## Phase 4 — Polish And Feedback
+- add visual polish to bricks, paddle, ball, background, and HUD
+- add juice such as hit feedback, transitions, particles, or screen feedback where appropriate
+- add sound effects
+- improve readability and overall game feel
+- reduce rough edges in menus and flow
 
-- Define the planner input and output envelope.
-- Support explicit planner outcomes for execute, ask-human, pause, resume, and complete.
-- Keep completion authority planner-owned.
+## Phase 5 — Stability And Quality
+- fix gameplay bugs
+- fix collision edge cases
+- improve code clarity where needed
+- ensure consistent builds
+- remove placeholder behavior and obvious unfinished elements
 
-## Phase 3: Primary Executor Integration
+## Phase 6 — Finish Line Review
+- compare the finished implementation against the brief
+- identify remaining gaps to “fully finished”
+- close final issues
+- produce a durable completion summary in repo artifacts if useful
 
-- Integrate the executor through `codex app-server`.
-- Capture executor activity and results durably.
-- Preserve planner and CLI boundaries.
+## Execution Priorities
+1. repo truth first
+2. buildability and current playability
+3. core gameplay completeness
+4. progression and flow
+5. polish
+6. final stabilization
 
-## Phase 4: Fallback Executor Path
-
-- Add `codex exec --json` as a fallback transport.
-- Keep persistence and planner behavior transport-neutral.
-
-## Phase 5: Durable Loop And Resume
-
-- Wire the end-to-end planner to executor loop.
-- Support safe pause points after AI turns.
-- Resume from the latest committed checkpoint.
-
-## Phase 6: Operator Experience
-
-- Add terminal visibility for planner state, executor activity, and recent events.
-- Add fixed hotkeys for safe pause and visibility control.
-- Add verbosity controls that affect presentation only.
-
-## Phase 7: Notification Bridge And Bootstrap
-
-- Add the `ntfy` bridge for outbound notifications and inbound human replies.
-- Load repo-local `AGENTS.md` guidance into task execution.
-- Harden bootstrap behavior for a brand new repo.
+## Notes
+The planner should remain strategy-owner. Executor work should be bounded, evidence-based, and aligned to this roadmap, but the roadmap may be refined when the actual repository state justifies it.

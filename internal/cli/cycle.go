@@ -35,16 +35,36 @@ func executeBoundedCycle(
 	run state.Run,
 	mode boundedCycleMode,
 ) error {
+	if err := applyRuntimeConfigAtSafePoint(ctx, &inv, journalWriter, run); err != nil {
+		return err
+	}
+
 	cycleResult, cycleErr := boundedCycleRunner(ctx, inv, store, journalWriter, run)
 	if cycleResult.Run.ID == "" {
 		cycleResult.Run = run
 	}
+	if err := applyRuntimeConfigAtSafePoint(ctx, &inv, journalWriter, cycleResult.Run); err != nil {
+		return err
+	}
+
 	stopReason := orchestration.StopReasonForBoundedCycle(cycleResult, cycleErr)
 	if stopReason != "" && cycleResult.Run.LatestStopReason != stopReason {
 		if err := store.SaveLatestStopReason(ctx, cycleResult.Run.ID, stopReason); err != nil {
 			return err
 		}
 		cycleResult.Run.LatestStopReason = stopReason
+	}
+
+	emitEngineEvent(inv, "safe_point_reached", eventPayloadForRun(cycleResult.Run, map[string]any{
+		"command":     mode.Command,
+		"cycle_error": errorString(cycleErr),
+		"stop_reason": stopReason,
+	}))
+	if cycleResult.Run.Status == state.StatusCompleted {
+		emitEngineEvent(inv, "run_completed", eventPayloadForRun(cycleResult.Run, map[string]any{
+			"command":     mode.Command,
+			"stop_reason": stopReason,
+		}))
 	}
 
 	if err := writeBoundedCycleReport(inv.Stdout, inv, cycleResult, cycleErr, mode); err != nil {
@@ -63,7 +83,7 @@ func runBoundedCycle(
 ) (orchestration.Result, error) {
 	plannerClient := planner.Client{
 		APIKey: plannerAPIKey(),
-		Model:  resolvePlannerModel(inv),
+		Model:  resolvePlannerAPIModel(ctx, inv),
 	}
 	pluginManager := loadRuntimePlugins(journalWriter, run)
 
@@ -74,9 +94,10 @@ func runBoundedCycle(
 		Executor:                   &lazyExecutorClient{version: inv.Version},
 		HumanInteractor:            newHumanInteractor(inv, journalWriter),
 		DriftWatcher:               orchestration.NewDeterministicDriftWatcher(),
-		DriftReviewOn:              inv.Config.DriftWatcherEnabled,
-		WorkerPlanConcurrencyLimit: inv.Config.WorkerConcurrencyLimit,
+		DriftReviewOn:              currentConfig(inv).DriftWatcherEnabled,
+		WorkerPlanConcurrencyLimit: currentConfig(inv).WorkerConcurrencyLimit,
 		Plugins:                    pluginManager,
+		Events:                     inv.Events,
 	}
 
 	return cycle.RunOnce(ctx, run)
@@ -129,12 +150,13 @@ func loadRuntimePlugins(journalWriter *journal.Journal, run state.Run) *plugins.
 
 func newHumanInteractor(inv Invocation, journalWriter *journal.Journal) orchestration.HumanInteractor {
 	terminal := terminalHumanInteractor{input: inv.Stdin, output: inv.Stdout}
+	cfg := currentConfig(inv)
 
-	if !ntfybridge.IsConfigured(inv.Config.NTFY) {
+	if !ntfybridge.IsConfigured(cfg.NTFY) {
 		return terminal
 	}
 
-	client, err := ntfybridge.NewClient(inv.Config.NTFY)
+	client, err := ntfybridge.NewClient(cfg.NTFY)
 	if err != nil {
 		return terminal
 	}
@@ -145,6 +167,13 @@ func newHumanInteractor(inv Invocation, journalWriter *journal.Journal) orchestr
 		output:   inv.Stdout,
 		journal:  journalWriter,
 	}
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func writeBoundedCycleReport(stdout io.Writer, inv Invocation, cycleResult orchestration.Result, cycleErr error, mode boundedCycleMode) error {

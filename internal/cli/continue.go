@@ -32,15 +32,18 @@ const (
 func newContinueCommand() Command {
 	return Command{
 		Name:    "continue",
-		Summary: "Advance the latest unfinished run through bounded cycles.",
+		Summary: "Advance the latest unfinished run until a real stop boundary.",
 		Description: stringsJoin(
 			"Usage:",
 			"  orchestrator continue [--max-cycles N]",
 			"",
 			"Requires the target repo contract scaffold created by `orchestrator init`.",
 			"",
-			"Loads the latest unfinished run from persisted state and executes repeated",
-			"bounded cycles on that existing run until a mechanical stop boundary is hit.",
+			"Loads the latest unfinished run from persisted state and, by default,",
+			"keeps advancing it in the foreground through repeated bounded cycles",
+			"until a mechanical stop boundary is hit.",
+			"",
+			fmt.Sprintf("Use --max-cycles N to keep this invocation explicitly bounded (recommended safe small number: %d).", defaultContinueMaxCycles),
 		),
 		Run: runContinue,
 	}
@@ -49,7 +52,7 @@ func newContinueCommand() Command {
 func runContinue(ctx context.Context, inv Invocation) error {
 	fs := flag.NewFlagSet("continue", flag.ContinueOnError)
 	fs.SetOutput(inv.Stderr)
-	maxCycles := fs.Int("max-cycles", defaultContinueMaxCycles, "Maximum bounded cycles to execute in this foreground invocation.")
+	maxCycles := fs.Int("max-cycles", 0, "Maximum bounded cycles to execute in this foreground invocation.")
 	if err := fs.Parse(inv.Args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintln(inv.Stdout, newContinueCommand().Description)
@@ -58,7 +61,13 @@ func runContinue(ctx context.Context, inv Invocation) error {
 		return err
 	}
 
-	if *maxCycles <= 0 {
+	maxCyclesExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "max-cycles" {
+			maxCyclesExplicit = true
+		}
+	})
+	if maxCyclesExplicit && *maxCycles <= 0 {
 		return errors.New("continue requires --max-cycles >= 1")
 	}
 	if contract := inspectTargetRepoContract(inv.RepoRoot); !contract.Ready {
@@ -85,20 +94,30 @@ func runContinue(ctx context.Context, inv Invocation) error {
 		return nil
 	}
 
-	if err := journalWriter.Append(journal.Event{
-		Type:        "continue.started",
-		RunID:       run.ID,
-		RepoPath:    run.RepoPath,
-		Goal:        run.Goal,
-		Status:      string(run.Status),
-		Message:     fmt.Sprintf("foreground continue invocation started (max_cycles=%d)", *maxCycles),
-		CycleNumber: 0,
-		Checkpoint:  journalCheckpointRef(run.LatestCheckpoint),
-	}); err != nil {
-		return err
+	if maxCyclesExplicit {
+		if err := journalWriter.Append(journal.Event{
+			Type:        "continue.started",
+			RunID:       run.ID,
+			RepoPath:    run.RepoPath,
+			Goal:        run.Goal,
+			Status:      string(run.Status),
+			Message:     fmt.Sprintf("foreground continue invocation started (max_cycles=%d)", *maxCycles),
+			CycleNumber: 0,
+			Checkpoint:  journalCheckpointRef(run.LatestCheckpoint),
+		}); err != nil {
+			return err
+		}
+
+		return executeContinueCycles(ctx, inv, store, journalWriter, run, *maxCycles)
 	}
 
-	return executeContinueCycles(ctx, inv, store, journalWriter, run, *maxCycles)
+	return executeForegroundLoop(ctx, inv, store, journalWriter, run, foregroundLoopMode{
+		Command:         "continue",
+		RunAction:       "continued_existing_run",
+		EventPrefix:     "continue",
+		InvocationLabel: "continue",
+		StopFlagKey:     "continue.stop_flag_path",
+	})
 }
 
 func executeContinueCycles(
@@ -110,11 +129,35 @@ func executeContinueCycles(
 	maxCycles int,
 ) error {
 	currentRun := run
+	executeHandoffGraceUsed := false
 
-	for cycleNumber := 1; cycleNumber <= maxCycles; cycleNumber++ {
+	for cycleNumber := 1; ; cycleNumber++ {
+		if err := applyRuntimeConfigAtSafePoint(ctx, &inv, journalWriter, currentRun); err != nil {
+			return err
+		}
+
 		cycleResult, cycleErr := boundedCycleRunner(ctx, inv, store, journalWriter, currentRun)
 		effectiveRun := mergeCycleRun(currentRun, cycleResult)
-		stopReason := determineContinueStopReason(cycleResult, effectiveRun, cycleErr, cycleNumber, maxCycles)
+		if err := applyRuntimeConfigAtSafePoint(ctx, &inv, journalWriter, effectiveRun); err != nil {
+			return err
+		}
+		readyExecuteHandoff := continueReadyExecuteHandoff(cycleResult)
+		allowExecuteHandoffGrace := cycleNumber >= maxCycles && readyExecuteHandoff && !executeHandoffGraceUsed
+		stopReason := determineContinueStopReason(cycleResult, effectiveRun, cycleErr, cycleNumber, maxCycles, allowExecuteHandoffGrace)
+
+		emitEngineEvent(inv, "safe_point_reached", eventPayloadForRun(effectiveRun, map[string]any{
+			"command":      "continue",
+			"cycle_number": cycleNumber,
+			"stop_reason":  string(stopReason),
+			"cycle_error":  errorString(cycleErr),
+		}))
+		if effectiveRun.Status == state.StatusCompleted {
+			emitEngineEvent(inv, "run_completed", eventPayloadForRun(effectiveRun, map[string]any{
+				"command":      "continue",
+				"cycle_number": cycleNumber,
+				"stop_reason":  string(stopReason),
+			}))
+		}
 
 		if err := writeContinueCycleReport(inv.Stdout, inv, cycleNumber, effectiveRun, cycleResult, cycleErr, stopReason); err != nil {
 			return err
@@ -152,7 +195,7 @@ func executeContinueCycles(
 				RepoPath:           effectiveRun.RepoPath,
 				Goal:               effectiveRun.Goal,
 				Status:             string(effectiveRun.Status),
-				Message:            continueStopMessage(stopReason, cycleErr),
+				Message:            continueStopMessage(stopReason, cycleResult, cycleErr),
 				CycleNumber:        cycleNumber,
 				StopReason:         string(stopReason),
 				ResponseID:         latestPlannerResponseID(cycleResult),
@@ -166,10 +209,12 @@ func executeContinueCycles(
 			return cycleErr
 		}
 
+		if allowExecuteHandoffGrace {
+			executeHandoffGraceUsed = true
+		}
+
 		currentRun = effectiveRun
 	}
-
-	return nil
 }
 
 func determineContinueStopReason(
@@ -178,6 +223,7 @@ func determineContinueStopReason(
 	cycleErr error,
 	cycleNumber int,
 	maxCycles int,
+	allowExecuteHandoffGrace bool,
 ) continueStopReason {
 	switch {
 	case run.LatestStopReason == orchestration.StopReasonExecutorApprovalReq || executorApprovalStateValue(run) == orchestrationApprovalStateRequired:
@@ -197,7 +243,7 @@ func determineContinueStopReason(
 		return continueStopReasonPlannerComplete
 	case cycleResult.FirstPlannerResult.Output.Outcome == planner.OutcomeAskHuman:
 		return continueStopReasonPlannerAskHuman
-	case cycleNumber >= maxCycles:
+	case cycleNumber >= maxCycles && !allowExecuteHandoffGrace:
 		return continueStopReasonMaxCyclesReached
 	default:
 		return continueStopReasonNone
@@ -250,11 +296,34 @@ func firstPlannerOutcome(cycleResult orchestration.Result) string {
 	return string(cycleResult.FirstPlannerResult.Output.Outcome)
 }
 
-func continueStopMessage(stopReason continueStopReason, cycleErr error) string {
+func continueStopMessage(stopReason continueStopReason, cycleResult orchestration.Result, cycleErr error) string {
 	if stopReason == continueStopReasonTransportProcessError && cycleErr != nil {
 		return cycleErr.Error()
 	}
+	if stopReason == continueStopReasonMaxCyclesReached {
+		switch {
+		case cycleResult.ExecutorDispatched:
+			return "continue invocation stopped: max_cycles_reached after executor dispatch"
+		case continueReadyExecuteHandoff(cycleResult):
+			return "continue invocation stopped: max_cycles_reached with execute ready but not yet dispatched"
+		default:
+			return "continue invocation stopped: max_cycles_reached before executor dispatch"
+		}
+	}
 	return "continue invocation stopped: " + string(stopReason)
+}
+
+func continueReadyExecuteHandoff(cycleResult orchestration.Result) bool {
+	if cycleResult.ExecutorDispatched {
+		return false
+	}
+
+	nextPlannerTurn := preferredSecondPlannerTurn(cycleResult.ReconsiderationPlannerTurn, cycleResult.SecondPlannerTurn)
+	if nextPlannerTurn == nil {
+		return false
+	}
+
+	return orchestration.ShouldDispatchExecutor(nextPlannerTurn.Output)
 }
 
 func journalCheckpointRef(checkpoint state.Checkpoint) *journal.CheckpointRef {

@@ -17,6 +17,14 @@ import (
 
 const autoStopFlagFileName = "auto.stop"
 
+type foregroundLoopMode struct {
+	Command         string
+	RunAction       string
+	EventPrefix     string
+	InvocationLabel string
+	StopFlagKey     string
+}
+
 func newAutoCommand() Command {
 	return Command{
 		Name:    "auto",
@@ -134,35 +142,56 @@ func executeAutoLoop(
 	command string,
 	runAction string,
 ) error {
+	return executeForegroundLoop(ctx, inv, store, journalWriter, run, foregroundLoopMode{
+		Command:         command,
+		RunAction:       runAction,
+		EventPrefix:     "auto",
+		InvocationLabel: "auto",
+		StopFlagKey:     "auto.stop_flag_path",
+	})
+}
+
+func executeForegroundLoop(
+	ctx context.Context,
+	inv Invocation,
+	store *state.Store,
+	journalWriter *journal.Journal,
+	run state.Run,
+	mode foregroundLoopMode,
+) error {
 	stopFlagPath := autoStopFlagPath(inv.Layout)
 	if err := journalWriter.Append(journal.Event{
-		Type:       "auto.started",
+		Type:       mode.EventPrefix + ".started",
 		RunID:      run.ID,
 		RepoPath:   run.RepoPath,
 		Goal:       run.Goal,
 		Status:     string(run.Status),
-		Message:    "foreground auto invocation started",
+		Message:    foregroundLoopMessage(mode.InvocationLabel, "started"),
 		Checkpoint: journalCheckpointRef(run.LatestCheckpoint),
 	}); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(inv.Stdout, "auto.stop_flag_path: %s\n", stopFlagPath)
+	fmt.Fprintf(inv.Stdout, "%s: %s\n", mode.StopFlagKey, stopFlagPath)
 
 	currentRun := run
 	for cycleNumber := 1; ; cycleNumber++ {
+		if err := applyRuntimeConfigAtSafePoint(ctx, &inv, journalWriter, currentRun); err != nil {
+			return err
+		}
+
 		cycleResult, cycleErr := boundedCycleRunner(ctx, inv, store, journalWriter, currentRun)
 		effectiveRun := mergeCycleRun(currentRun, cycleResult)
 
 		if cycleErr == nil && len(effectiveRun.HumanReplies) > len(currentRun.HumanReplies) {
 			waitingPlannerTurn := plannerTurnThatAskedHuman(cycleResult)
 			if err := journalWriter.Append(journal.Event{
-				Type:               "auto.waiting_for_human",
+				Type:               mode.EventPrefix + ".waiting_for_human",
 				RunID:              effectiveRun.ID,
 				RepoPath:           effectiveRun.RepoPath,
 				Goal:               effectiveRun.Goal,
 				Status:             string(effectiveRun.Status),
-				Message:            "foreground auto invocation waited for human input and resumed after one raw reply",
+				Message:            foregroundLoopMessage(mode.InvocationLabel, "waiting_for_human"),
 				CycleNumber:        cycleNumber,
 				ResponseID:         plannerResultResponseID(waitingPlannerTurn),
 				PreviousResponseID: effectiveRun.PreviousResponseID,
@@ -177,8 +206,18 @@ func executeAutoLoop(
 		if err != nil {
 			return err
 		}
+		if stopRequested {
+			emitEngineEvent(inv, "stop_flag_detected", eventPayloadForRun(effectiveRun, map[string]any{
+				"cycle_number": cycleNumber,
+				"path":         stopFlagPath,
+			}))
+		}
 
-		stopReason := determineAutoStopReason(cycleResult, effectiveRun, cycleErr, stopRequested)
+		if err := applyRuntimeConfigAtSafePoint(ctx, &inv, journalWriter, effectiveRun); err != nil {
+			return err
+		}
+
+		stopReason := determineForegroundStopReason(cycleResult, effectiveRun, cycleErr, stopRequested)
 		if stopReason != "" && effectiveRun.LatestStopReason != stopReason {
 			if err := store.SaveLatestStopReason(ctx, effectiveRun.ID, stopReason); err != nil {
 				return err
@@ -186,12 +225,27 @@ func executeAutoLoop(
 			effectiveRun.LatestStopReason = stopReason
 		}
 
+		emitEngineEvent(inv, "safe_point_reached", eventPayloadForRun(effectiveRun, map[string]any{
+			"command":      mode.Command,
+			"cycle_number": cycleNumber,
+			"stop_reason":  stopReason,
+			"cycle_error":  errorString(cycleErr),
+		}))
+		if effectiveRun.Status == state.StatusCompleted {
+			emitEngineEvent(inv, "run_completed", eventPayloadForRun(effectiveRun, map[string]any{
+				"command":      mode.Command,
+				"cycle_number": cycleNumber,
+				"stop_reason":  stopReason,
+			}))
+		}
+
 		if err := writeCommandReport(inv.Stdout, resolveOutputVerbosity(inv), commandReport{
-			Command:                    command,
-			RunAction:                  runAction,
+			Command:                    mode.Command,
+			RunAction:                  mode.RunAction,
 			CycleNumber:                cycleNumber,
 			PlannerModel:               resolvePlannerModel(inv),
 			Run:                        effectiveRun,
+			Continuous:                 true,
 			StopReason:                 stopReason,
 			LatestArtifactPath:         latestArtifactPathForRun(inv.Layout, effectiveRun.ID),
 			FirstPlannerResult:         cycleResult.FirstPlannerResult,
@@ -205,16 +259,16 @@ func executeAutoLoop(
 
 		if cycleErr == nil {
 			if err := journalWriter.Append(journal.Event{
-				Type:               "auto.cycle.completed",
+				Type:               mode.EventPrefix + ".cycle.completed",
 				RunID:              effectiveRun.ID,
 				RepoPath:           effectiveRun.RepoPath,
 				Goal:               effectiveRun.Goal,
 				Status:             string(effectiveRun.Status),
-				Message:            "bounded cycle completed during foreground auto invocation",
+				Message:            foregroundLoopMessage(mode.InvocationLabel, "cycle_completed"),
 				CycleNumber:        cycleNumber,
 				ResponseID:         latestPlannerResponseID(cycleResult),
 				PreviousResponseID: effectiveRun.PreviousResponseID,
-				PlannerOutcome:     latestAutoPlannerOutcome(cycleResult),
+				PlannerOutcome:     latestForegroundPlannerOutcome(cycleResult),
 				Checkpoint:         journalCheckpointRef(effectiveRun.LatestCheckpoint),
 			}); err != nil {
 				return err
@@ -223,17 +277,17 @@ func executeAutoLoop(
 
 		if stopReason != "" {
 			if err := journalWriter.Append(journal.Event{
-				Type:               "auto.stopped",
+				Type:               mode.EventPrefix + ".stopped",
 				RunID:              effectiveRun.ID,
 				RepoPath:           effectiveRun.RepoPath,
 				Goal:               effectiveRun.Goal,
 				Status:             string(effectiveRun.Status),
-				Message:            autoStopMessage(stopReason, cycleErr),
+				Message:            foregroundStopMessage(mode.InvocationLabel, stopReason, cycleErr),
 				CycleNumber:        cycleNumber,
 				StopReason:         stopReason,
 				ResponseID:         latestPlannerResponseID(cycleResult),
 				PreviousResponseID: effectiveRun.PreviousResponseID,
-				PlannerOutcome:     latestAutoPlannerOutcome(cycleResult),
+				PlannerOutcome:     latestForegroundPlannerOutcome(cycleResult),
 				Checkpoint:         journalCheckpointRef(effectiveRun.LatestCheckpoint),
 			}); err != nil {
 				return err
@@ -309,10 +363,12 @@ func createAutoRun(ctx context.Context, inv Invocation, goal string) (*state.Sto
 		return nil, nil, state.Run{}, fmt.Errorf("created run %s could not be reloaded", createdRun.ID)
 	}
 
+	emitEngineEvent(inv, "run_started", eventPayloadForRun(run, nil))
+
 	return store, journalWriter, run, nil
 }
 
-func determineAutoStopReason(
+func determineForegroundStopReason(
 	cycleResult orchestration.Result,
 	run state.Run,
 	cycleErr error,
@@ -334,7 +390,7 @@ func determineAutoStopReason(
 		}
 	case run.Status == state.StatusCompleted:
 		return orchestration.StopReasonPlannerComplete
-	case latestAutoPlannerOutcome(cycleResult) == string(planner.OutcomeAskHuman):
+	case latestForegroundPlannerOutcome(cycleResult) == string(planner.OutcomeAskHuman):
 		return orchestration.StopReasonPlannerAskHuman
 	case stopRequested:
 		return orchestration.StopReasonOperatorStopRequested
@@ -343,7 +399,7 @@ func determineAutoStopReason(
 	}
 }
 
-func latestAutoPlannerOutcome(cycleResult orchestration.Result) string {
+func latestForegroundPlannerOutcome(cycleResult orchestration.Result) string {
 	if cycleResult.SecondPlannerTurn != nil {
 		return string(cycleResult.SecondPlannerTurn.Output.Outcome)
 	}
@@ -377,14 +433,27 @@ func plannerResultOutcome(result *planner.Result) string {
 	return string(result.Output.Outcome)
 }
 
-func autoStopMessage(stopReason string, cycleErr error) string {
+func foregroundLoopMessage(invocationLabel string, phase string) string {
+	switch phase {
+	case "started":
+		return fmt.Sprintf("foreground %s invocation started", invocationLabel)
+	case "cycle_completed":
+		return fmt.Sprintf("bounded cycle completed during foreground %s invocation", invocationLabel)
+	case "waiting_for_human":
+		return fmt.Sprintf("foreground %s invocation waited for human input and resumed after one raw reply", invocationLabel)
+	default:
+		return fmt.Sprintf("foreground %s invocation", invocationLabel)
+	}
+}
+
+func foregroundStopMessage(invocationLabel string, stopReason string, cycleErr error) string {
 	switch {
 	case stopReason == orchestration.StopReasonOperatorStopRequested:
-		return "foreground auto invocation stopped after operator stop flag was detected"
+		return fmt.Sprintf("foreground %s invocation stopped after operator stop flag was detected", invocationLabel)
 	case stopReason == orchestration.StopReasonTransportProcessError && cycleErr != nil:
 		return cycleErr.Error()
 	default:
-		return "foreground auto invocation stopped: " + stopReason
+		return fmt.Sprintf("foreground %s invocation stopped: %s", invocationLabel, stopReason)
 	}
 }
 

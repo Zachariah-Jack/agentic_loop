@@ -48,7 +48,7 @@ func TestClientPlanBuildsExpectedResponsesRequest(t *testing.T) {
 
 	client := Client{
 		APIKey:     "test-key",
-		Model:      "gpt-5.1",
+		Model:      "gpt-test",
 		BaseURL:    server.URL,
 		HTTPClient: server.Client(),
 	}
@@ -64,7 +64,7 @@ func TestClientPlanBuildsExpectedResponsesRequest(t *testing.T) {
 	if result.Output.Outcome != OutcomePause {
 		t.Fatalf("unexpected outcome: %s", result.Output.Outcome)
 	}
-	if captured.Model != "gpt-5.1" {
+	if captured.Model != "gpt-test" {
 		t.Fatalf("unexpected model: %s", captured.Model)
 	}
 	if captured.PreviousResponseID != "resp_prev" {
@@ -113,7 +113,7 @@ func TestClientPlanRejectsInvalidPlannerOutput(t *testing.T) {
 
 	client := Client{
 		APIKey:     "test-key",
-		Model:      "gpt-5.1",
+		Model:      "gpt-test",
 		BaseURL:    server.URL,
 		HTTPClient: server.Client(),
 	}
@@ -166,7 +166,7 @@ func TestClientPlanRejectsMultiplePlannerPayloads(t *testing.T) {
 
 	client := Client{
 		APIKey:     "test-key",
-		Model:      "gpt-5.1",
+		Model:      "gpt-test",
 		BaseURL:    server.URL,
 		HTTPClient: server.Client(),
 	}
@@ -182,7 +182,7 @@ func TestClientPlanRejectsMultiplePlannerPayloads(t *testing.T) {
 
 func TestClientPlanFailsClearlyWithoutAPIKey(t *testing.T) {
 	client := Client{
-		Model: "gpt-5.1",
+		Model: "gpt-test",
 	}
 
 	_, err := client.Plan(context.Background(), validInputEnvelope(), "")

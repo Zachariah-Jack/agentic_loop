@@ -122,7 +122,7 @@ func TestRunSetupYesWritesDefaultsWithoutPrompting(t *testing.T) {
 	for _, want := range []string{
 		"setup.mode: non_interactive_yes",
 		"config.state: created",
-		"saved.planner_model: gpt-5.1",
+		"saved.planner_model: " + config.PlannerModelLatestGPT5,
 		"saved.review.drift_watcher_enabled: false",
 		"saved.ntfy.server_url: unset",
 		"saved.ntfy.topic: unset",

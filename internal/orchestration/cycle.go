@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"orchestrator/internal/activity"
 	"orchestrator/internal/executor"
 	"orchestrator/internal/journal"
 	"orchestrator/internal/planner"
@@ -46,6 +47,7 @@ type Cycle struct {
 	DriftReviewOn              bool
 	WorkerPlanConcurrencyLimit int
 	Plugins                    *plugins.Manager
+	Events                     activity.Publisher
 }
 
 type Result struct {
@@ -56,6 +58,36 @@ type Result struct {
 	PostExecutorPlannerTurn    *planner.Result
 	ExecutorResult             *executor.TurnResult
 	ExecutorDispatched         bool
+}
+
+func (c Cycle) emitEvent(name string, run state.Run, extra map[string]any) {
+	if c.Events == nil {
+		return
+	}
+
+	payload := map[string]any{}
+	if strings.TrimSpace(run.ID) != "" {
+		payload["run_id"] = run.ID
+	}
+	if strings.TrimSpace(run.RepoPath) != "" {
+		payload["repo_path"] = run.RepoPath
+	}
+	if strings.TrimSpace(string(run.Status)) != "" {
+		payload["status"] = string(run.Status)
+	}
+	if run.LatestCheckpoint.Sequence > 0 {
+		payload["checkpoint"] = map[string]any{
+			"sequence":   run.LatestCheckpoint.Sequence,
+			"stage":      run.LatestCheckpoint.Stage,
+			"label":      run.LatestCheckpoint.Label,
+			"safe_pause": run.LatestCheckpoint.SafePause,
+		}
+	}
+	for key, value := range extra {
+		payload[key] = value
+	}
+
+	c.Events.Publish(name, payload)
 }
 
 const (
@@ -99,12 +131,40 @@ func (c Cycle) RunOnce(ctx context.Context, run state.Run) (result Result, err e
 		}
 	}
 
+	initialPendingAction, initialPendingPresent, err := c.Store.GetPendingAction(ctx, run.ID)
+	if err != nil {
+		return Result{}, err
+	}
+	initialControlMessage, hasInitialIntervention, err := c.Store.NextQueuedControlMessage(ctx, run.ID)
+	if err != nil {
+		return Result{}, err
+	}
+
 	recentEvents, err := c.Journal.ReadRecent(run.ID, 5)
 	if err != nil {
 		return Result{}, err
 	}
 
 	firstInput := BuildPlannerInput(run, recentEvents, nil, nil, nil, c.pluginToolDescriptors())
+	if hasInitialIntervention {
+		firstInput.PendingAction = mapPendingActionToPlanner(initialPendingAction, initialPendingPresent)
+		firstInput.ControlIntervention = mapControlMessageToPlanner(initialControlMessage, "queued_control_message_before_planner_turn")
+		c.emitEvent("safe_point_intervention_pending", run, map[string]any{
+			"control_message_id": initialControlMessage.ID,
+			"source":             initialControlMessage.Source,
+			"reason":             initialControlMessage.Reason,
+			"message_preview":    previewString(initialControlMessage.RawText, 240),
+		})
+		c.emitEvent("planner_intervention_turn_started", run, map[string]any{
+			"phase":              "initial",
+			"control_message_id": initialControlMessage.ID,
+			"source":             initialControlMessage.Source,
+		})
+	}
+	c.emitEvent("planner_turn_started", run, map[string]any{
+		"phase":                "initial",
+		"control_intervention": hasInitialIntervention,
+	})
 	firstPlannerResult, err := c.Planner.Plan(ctx, firstInput, run.PreviousResponseID)
 	if err != nil {
 		stopReason := StopReasonForError(err)
@@ -173,6 +233,13 @@ func (c Cycle) RunOnce(ctx context.Context, run state.Run) (result Result, err e
 	}); err != nil {
 		return Result{}, err
 	}
+	c.emitEvent("planner_turn_completed", updatedRun, map[string]any{
+		"phase":           "initial",
+		"planner_outcome": string(firstPlannerResult.Output.Outcome),
+		"response_id":     firstPlannerResult.ResponseID,
+		"operator_status": plannerOperatorStatusEventPayload(firstPlannerResult.Output.OperatorStatus),
+	})
+	c.emitPlannerOperatorMessage(updatedRun, "initial", firstPlannerResult)
 
 	if err := c.Journal.Append(journal.Event{
 		Type:               "checkpoint.persisted",
@@ -195,6 +262,27 @@ func (c Cycle) RunOnce(ctx context.Context, run state.Run) (result Result, err e
 		FirstPlannerResult: firstPlannerResult,
 	}
 
+	if hasInitialIntervention {
+		if err := c.Store.ConsumeControlMessage(ctx, initialControlMessage.ID, time.Now().UTC()); err != nil {
+			return result, err
+		}
+		c.emitEvent("control_message_consumed", updatedRun, map[string]any{
+			"control_message_id": initialControlMessage.ID,
+			"source":             initialControlMessage.Source,
+			"reason":             initialControlMessage.Reason,
+		})
+		c.emitEvent("planner_intervention_turn_completed", updatedRun, map[string]any{
+			"phase":              "initial",
+			"control_message_id": initialControlMessage.ID,
+			"planner_outcome":    string(firstPlannerResult.Output.Outcome),
+			"response_id":        firstPlannerResult.ResponseID,
+		})
+	}
+
+	if err := c.persistPendingAction(ctx, updatedRun, firstPlannerResult, false, ""); err != nil {
+		return result, err
+	}
+
 	if ShouldMarkRunCompleted(firstPlannerResult.Output) {
 		if err := c.appendRunCompletedEvent(updatedRun, firstPlannerResult, &firstPlannerCheckpoint); err != nil {
 			return result, err
@@ -206,6 +294,17 @@ func (c Cycle) RunOnce(ctx context.Context, run state.Run) (result Result, err e
 	activePlannerResult := firstPlannerResult
 
 	activeRun, activePlannerResult, result, err = c.maybeRunDriftReview(ctx, updatedRun, result, firstPlannerResult)
+	if err != nil {
+		return result, err
+	}
+	if activeRun.ID != "" {
+		result.Run = activeRun
+	}
+	if activeRun.Status == state.StatusCompleted || ShouldMarkRunCompleted(activePlannerResult.Output) {
+		return result, nil
+	}
+
+	activeRun, activePlannerResult, result, err = c.maybeRunControlIntervention(ctx, activeRun, activePlannerResult, result)
 	if err != nil {
 		return result, err
 	}
@@ -514,6 +613,170 @@ func buildRawHumanReplies(run state.Run) []planner.RawHumanReply {
 	return replies
 }
 
+func mapPendingActionToPlanner(pending state.PendingAction, found bool) *planner.PendingActionInput {
+	if !found {
+		return &planner.PendingActionInput{Present: false}
+	}
+
+	mapped := &planner.PendingActionInput{
+		Present:                true,
+		TurnType:               strings.TrimSpace(pending.TurnType),
+		PlannerOutcome:         strings.TrimSpace(pending.PlannerOutcome),
+		PlannerResponseID:      strings.TrimSpace(pending.PlannerResponseID),
+		PendingActionSummary:   strings.TrimSpace(pending.PendingActionSummary),
+		PendingExecutorPrompt:  strings.TrimSpace(pending.PendingExecutorPrompt),
+		PendingExecutorSummary: strings.TrimSpace(pending.PendingExecutorSummary),
+		PendingReason:          strings.TrimSpace(pending.PendingReason),
+		Held:                   pending.Held,
+		HoldReason:             strings.TrimSpace(pending.HoldReason),
+		UpdatedAt:              pending.UpdatedAt,
+	}
+	if pending.PendingDispatchTarget != nil {
+		mapped.PendingDispatchTarget = &planner.PendingDispatchTarget{
+			Kind:         strings.TrimSpace(pending.PendingDispatchTarget.Kind),
+			WorkerID:     strings.TrimSpace(pending.PendingDispatchTarget.WorkerID),
+			WorkerName:   strings.TrimSpace(pending.PendingDispatchTarget.WorkerName),
+			WorktreePath: strings.TrimSpace(pending.PendingDispatchTarget.WorktreePath),
+		}
+	}
+	return mapped
+}
+
+func mapControlMessageToPlanner(message state.ControlMessage, pauseReason string) *planner.ControlInterventionInput {
+	return &planner.ControlInterventionInput{
+		Present:        true,
+		InterventionID: strings.TrimSpace(message.ID),
+		RawMessage:     message.RawText,
+		Source:         strings.TrimSpace(message.Source),
+		Reason:         firstNonEmpty(strings.TrimSpace(message.Reason), "operator_intervention"),
+		PauseReason:    firstNonEmpty(strings.TrimSpace(pauseReason), "operator_intervention_at_safe_point"),
+		QueuedAt:       message.CreatedAt,
+	}
+}
+
+func (c Cycle) persistPendingAction(
+	ctx context.Context,
+	run state.Run,
+	plannerTurn planner.Result,
+	held bool,
+	holdReason string,
+) error {
+	pendingAction, err := BuildPendingAction(run, plannerTurn)
+	if err != nil {
+		return err
+	}
+	if pendingAction != nil {
+		pendingAction.Held = held
+		pendingAction.HoldReason = strings.TrimSpace(holdReason)
+	}
+	if err := c.Store.SavePendingAction(ctx, run.ID, pendingAction); err != nil {
+		return err
+	}
+
+	if pendingAction == nil {
+		c.emitEvent("pending_action_cleared", run, map[string]any{
+			"response_id": plannerTurn.ResponseID,
+		})
+		return nil
+	}
+
+	c.emitEvent("pending_action_updated", run, map[string]any{
+		"turn_type":       pendingAction.TurnType,
+		"planner_outcome": pendingAction.PlannerOutcome,
+		"response_id":     pendingAction.PlannerResponseID,
+		"held":            pendingAction.Held,
+		"hold_reason":     pendingAction.HoldReason,
+		"dispatch_target": pendingActionDispatchPayload(pendingAction.PendingDispatchTarget),
+		"action_summary":  pendingAction.PendingActionSummary,
+	})
+	return nil
+}
+
+func (c Cycle) clearPendingAction(ctx context.Context, run state.Run) error {
+	if strings.TrimSpace(run.ID) == "" {
+		return nil
+	}
+	pendingAction, found, err := c.Store.GetPendingAction(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	if err := c.Store.SavePendingAction(ctx, run.ID, nil); err != nil {
+		return err
+	}
+	c.emitEvent("pending_action_cleared", run, map[string]any{
+		"turn_type":       pendingAction.TurnType,
+		"planner_outcome": pendingAction.PlannerOutcome,
+		"response_id":     pendingAction.PlannerResponseID,
+	})
+	return nil
+}
+
+func BuildPendingAction(run state.Run, plannerTurn planner.Result) (*state.PendingAction, error) {
+	switch plannerTurn.Output.Outcome {
+	case planner.OutcomeExecute:
+		prompt, err := RenderExecutorPrompt(run.Goal, plannerTurn.Output)
+		if err != nil {
+			return nil, err
+		}
+		return &state.PendingAction{
+			TurnType:               "executor_dispatch",
+			PlannerOutcome:         string(plannerTurn.Output.Outcome),
+			PlannerResponseID:      strings.TrimSpace(plannerTurn.ResponseID),
+			PendingActionSummary:   ExecutorTask(plannerTurn.Output),
+			PendingExecutorPrompt:  prompt,
+			PendingExecutorSummary: previewString(prompt, 240),
+			PendingDispatchTarget: &state.PendingDispatchTarget{
+				Kind: "primary_executor",
+			},
+			PendingReason: "planner_selected_execute",
+			UpdatedAt:     time.Now().UTC(),
+		}, nil
+	case planner.OutcomeCollectContext:
+		focus := "collect additional repo context"
+		if plannerTurn.Output.CollectContext != nil {
+			focus = firstNonEmpty(strings.TrimSpace(plannerTurn.Output.CollectContext.Focus), focus)
+		}
+		return &state.PendingAction{
+			TurnType:             "collect_context",
+			PlannerOutcome:       string(plannerTurn.Output.Outcome),
+			PlannerResponseID:    strings.TrimSpace(plannerTurn.ResponseID),
+			PendingActionSummary: focus,
+			PendingReason:        "planner_selected_collect_context",
+			UpdatedAt:            time.Now().UTC(),
+		}, nil
+	case planner.OutcomeAskHuman:
+		question := "ask the human a question"
+		if plannerTurn.Output.AskHuman != nil {
+			question = firstNonEmpty(strings.TrimSpace(plannerTurn.Output.AskHuman.Question), question)
+		}
+		return &state.PendingAction{
+			TurnType:             "ask_human",
+			PlannerOutcome:       string(plannerTurn.Output.Outcome),
+			PlannerResponseID:    strings.TrimSpace(plannerTurn.ResponseID),
+			PendingActionSummary: question,
+			PendingReason:        "planner_selected_ask_human",
+			UpdatedAt:            time.Now().UTC(),
+		}, nil
+	default:
+		return nil, nil
+	}
+}
+
+func pendingActionDispatchPayload(target *state.PendingDispatchTarget) map[string]any {
+	if target == nil {
+		return nil
+	}
+	return map[string]any{
+		"kind":          strings.TrimSpace(target.Kind),
+		"worker_id":     strings.TrimSpace(target.WorkerID),
+		"worker_name":   strings.TrimSpace(target.WorkerName),
+		"worktree_path": strings.TrimSpace(target.WorktreePath),
+	}
+}
+
 func ShouldAskHuman(output planner.OutputEnvelope) bool {
 	return output.Outcome == planner.OutcomeAskHuman && output.AskHuman != nil
 }
@@ -621,9 +884,15 @@ func plannerDeclaredCompletionMessage(output planner.OutputEnvelope) string {
 
 func (c Cycle) savePlannerTurn(ctx context.Context, runID string, plannerTurn planner.Result, checkpoint state.Checkpoint) error {
 	if ShouldMarkRunCompleted(plannerTurn.Output) {
-		return c.Store.SavePlannerCompletion(ctx, runID, plannerTurn.ResponseID, checkpoint)
+		if err := c.Store.SavePlannerCompletion(ctx, runID, plannerTurn.ResponseID, checkpoint); err != nil {
+			return err
+		}
+		return c.Store.SavePlannerOperatorStatus(ctx, runID, mapPlannerOperatorStatusToState(plannerTurn.Output.ContractVersion, plannerTurn.Output.OperatorStatus))
 	}
-	return c.Store.SavePlannerTurn(ctx, runID, plannerTurn.ResponseID, checkpoint)
+	if err := c.Store.SavePlannerTurn(ctx, runID, plannerTurn.ResponseID, checkpoint); err != nil {
+		return err
+	}
+	return c.Store.SavePlannerOperatorStatus(ctx, runID, mapPlannerOperatorStatusToState(plannerTurn.Output.ContractVersion, plannerTurn.Output.OperatorStatus))
 }
 
 func (c Cycle) appendRunCompletedEvent(run state.Run, plannerTurn planner.Result, checkpoint *state.Checkpoint) error {
@@ -742,6 +1011,13 @@ func (c Cycle) runSecondPlannerTurn(
 	if err := c.Journal.Append(checkpointEvent); err != nil {
 		return result, err
 	}
+	c.emitEvent("planner_turn_completed", finalRun, map[string]any{
+		"phase":           checkpointLabel,
+		"planner_outcome": string(secondPlannerTurn.Output.Outcome),
+		"response_id":     secondPlannerTurn.ResponseID,
+		"operator_status": plannerOperatorStatusEventPayload(secondPlannerTurn.Output.OperatorStatus),
+	})
+	c.emitPlannerOperatorMessage(finalRun, checkpointLabel, secondPlannerTurn)
 
 	c.runPluginHooks(ctx, plugins.HookPlannerAfter, finalRun, &secondPlannerTurn, nil, "", nil)
 
@@ -757,10 +1033,69 @@ func (c Cycle) runSecondPlannerTurn(
 	}
 	if originCheckpointLabel == "planner_turn_post_drift_review" {
 		result.ReconsiderationPlannerTurn = &secondPlannerTurn
+		if err := c.persistPendingAction(ctx, finalRun, secondPlannerTurn, false, ""); err != nil {
+			return result, err
+		}
 		return result, nil
 	}
 	result.SecondPlannerTurn = &secondPlannerTurn
+	if err := c.persistPendingAction(ctx, finalRun, secondPlannerTurn, false, ""); err != nil {
+		return result, err
+	}
 	return result, nil
+}
+
+func mapPlannerOperatorStatusToState(contractVersion string, status *planner.OperatorStatus) *state.PlannerOperatorStatus {
+	if status == nil {
+		return nil
+	}
+
+	return &state.PlannerOperatorStatus{
+		ContractVersion:    strings.TrimSpace(contractVersion),
+		OperatorMessage:    strings.TrimSpace(status.OperatorMessage),
+		CurrentFocus:       strings.TrimSpace(status.CurrentFocus),
+		NextIntendedStep:   strings.TrimSpace(status.NextIntendedStep),
+		WhyThisStep:        strings.TrimSpace(status.WhyThisStep),
+		ProgressPercent:    status.ProgressPercent,
+		ProgressConfidence: strings.TrimSpace(string(status.ProgressConfidence)),
+		ProgressBasis:      strings.TrimSpace(status.ProgressBasis),
+	}
+}
+
+func plannerOperatorStatusEventPayload(status *planner.OperatorStatus) map[string]any {
+	if status == nil {
+		return nil
+	}
+
+	return map[string]any{
+		"operator_message":    strings.TrimSpace(status.OperatorMessage),
+		"current_focus":       strings.TrimSpace(status.CurrentFocus),
+		"next_intended_step":  strings.TrimSpace(status.NextIntendedStep),
+		"why_this_step":       strings.TrimSpace(status.WhyThisStep),
+		"progress_percent":    status.ProgressPercent,
+		"progress_confidence": strings.TrimSpace(string(status.ProgressConfidence)),
+		"progress_basis":      strings.TrimSpace(status.ProgressBasis),
+	}
+}
+
+func (c Cycle) emitPlannerOperatorMessage(run state.Run, phase string, plannerTurn planner.Result) {
+	if plannerTurn.Output.OperatorStatus == nil {
+		return
+	}
+
+	c.emitEvent("planner_operator_message", run, map[string]any{
+		"phase":               strings.TrimSpace(phase),
+		"planner_outcome":     string(plannerTurn.Output.Outcome),
+		"response_id":         plannerTurn.ResponseID,
+		"operator_message":    strings.TrimSpace(plannerTurn.Output.OperatorStatus.OperatorMessage),
+		"current_focus":       strings.TrimSpace(plannerTurn.Output.OperatorStatus.CurrentFocus),
+		"next_intended_step":  strings.TrimSpace(plannerTurn.Output.OperatorStatus.NextIntendedStep),
+		"why_this_step":       strings.TrimSpace(plannerTurn.Output.OperatorStatus.WhyThisStep),
+		"progress_percent":    plannerTurn.Output.OperatorStatus.ProgressPercent,
+		"progress_confidence": strings.TrimSpace(string(plannerTurn.Output.OperatorStatus.ProgressConfidence)),
+		"progress_basis":      strings.TrimSpace(plannerTurn.Output.OperatorStatus.ProgressBasis),
+		"contract_version":    strings.TrimSpace(plannerTurn.Output.ContractVersion),
+	})
 }
 
 func (c Cycle) maybeRunDriftReview(
@@ -883,12 +1218,131 @@ func (c Cycle) maybeRunDriftReview(
 	return result.Run, *result.ReconsiderationPlannerTurn, result, nil
 }
 
+func (c Cycle) maybeRunControlIntervention(
+	ctx context.Context,
+	currentRun state.Run,
+	currentPlannerTurn planner.Result,
+	result Result,
+) (state.Run, planner.Result, Result, error) {
+	controlMessage, found, err := c.Store.NextQueuedControlMessage(ctx, currentRun.ID)
+	if err != nil {
+		return currentRun, currentPlannerTurn, result, err
+	}
+	if !found {
+		return currentRun, currentPlannerTurn, result, nil
+	}
+
+	pendingAction, pendingFound, err := c.Store.GetPendingAction(ctx, currentRun.ID)
+	if err != nil {
+		return currentRun, currentPlannerTurn, result, err
+	}
+	if pendingFound && !pendingAction.Held {
+		if err := c.persistPendingAction(ctx, currentRun, currentPlannerTurn, true, "control_message_queued"); err != nil {
+			return currentRun, currentPlannerTurn, result, err
+		}
+		pendingAction, pendingFound, err = c.Store.GetPendingAction(ctx, currentRun.ID)
+		if err != nil {
+			return currentRun, currentPlannerTurn, result, err
+		}
+	}
+
+	if err := c.Journal.Append(journal.Event{
+		Type:               "control.intervention.pending",
+		RunID:              currentRun.ID,
+		RepoPath:           currentRun.RepoPath,
+		Goal:               currentRun.Goal,
+		Status:             string(currentRun.Status),
+		Message:            "queued control message is holding the pending planner-selected action at a safe point",
+		ResponseID:         currentPlannerTurn.ResponseID,
+		PreviousResponseID: currentRun.PreviousResponseID,
+		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		HumanReplyID:       controlMessage.ID,
+		HumanReplySource:   controlMessage.Source,
+		HumanReplyPayload:  controlMessage.RawText,
+		Checkpoint:         checkpointRef(&currentRun.LatestCheckpoint),
+	}); err != nil {
+		return currentRun, currentPlannerTurn, result, err
+	}
+
+	c.emitEvent("safe_point_intervention_pending", currentRun, map[string]any{
+		"control_message_id": controlMessage.ID,
+		"source":             controlMessage.Source,
+		"reason":             controlMessage.Reason,
+		"planner_outcome":    string(currentPlannerTurn.Output.Outcome),
+		"message_preview":    previewString(controlMessage.RawText, 240),
+	})
+
+	postInterventionEvents, err := c.Journal.ReadRecent(currentRun.ID, 8)
+	if err != nil {
+		return currentRun, currentPlannerTurn, result, err
+	}
+
+	interventionInput := BuildPlannerInput(currentRun, postInterventionEvents, nil, nil, nil, c.pluginToolDescriptors())
+	interventionInput.PendingAction = mapPendingActionToPlanner(pendingAction, pendingFound)
+	interventionInput.ControlIntervention = mapControlMessageToPlanner(controlMessage, "operator_intervention_at_safe_point")
+
+	c.emitEvent("planner_intervention_turn_started", currentRun, map[string]any{
+		"control_message_id": controlMessage.ID,
+		"source":             controlMessage.Source,
+		"reason":             controlMessage.Reason,
+		"planner_outcome":    string(currentPlannerTurn.Output.Outcome),
+		"response_id":        currentPlannerTurn.ResponseID,
+	})
+
+	result, err = c.runSecondPlannerTurn(
+		ctx,
+		currentRun,
+		result,
+		interventionInput,
+		string(currentPlannerTurn.Output.Outcome),
+		"planner_turn_post_control_intervention",
+		"planner intervention response validated and persisted",
+		"planner intervention checkpoint persisted",
+		"planner intervention turn failed",
+	)
+	if err != nil {
+		return result.Run, currentPlannerTurn, result, err
+	}
+
+	if err := c.Store.ConsumeControlMessage(ctx, controlMessage.ID, time.Now().UTC()); err != nil {
+		return result.Run, currentPlannerTurn, result, err
+	}
+	if result.Run.ID != "" {
+		c.emitEvent("control_message_consumed", result.Run, map[string]any{
+			"control_message_id": controlMessage.ID,
+			"source":             controlMessage.Source,
+			"reason":             controlMessage.Reason,
+		})
+	}
+
+	var updatedPlannerTurn *planner.Result
+	switch {
+	case result.SecondPlannerTurn != nil:
+		updatedPlannerTurn = result.SecondPlannerTurn
+	case result.ReconsiderationPlannerTurn != nil:
+		updatedPlannerTurn = result.ReconsiderationPlannerTurn
+	}
+	if updatedPlannerTurn == nil || result.Run.ID == "" {
+		return currentRun, currentPlannerTurn, result, nil
+	}
+
+	c.emitEvent("planner_intervention_turn_completed", result.Run, map[string]any{
+		"control_message_id": controlMessage.ID,
+		"planner_outcome":    string(updatedPlannerTurn.Output.Outcome),
+		"response_id":        updatedPlannerTurn.ResponseID,
+	})
+	return result.Run, *updatedPlannerTurn, result, nil
+}
+
 func (c Cycle) handleAskHuman(
 	ctx context.Context,
 	result Result,
 	currentRun state.Run,
 	currentPlannerTurn planner.Result,
 ) (Result, error) {
+	if err := c.clearPendingAction(ctx, currentRun); err != nil {
+		return result, err
+	}
 	if c.HumanInteractor == nil {
 		err := errors.New("human interactor is required when planner outcome is ask_human")
 		failedRun, issueErr := c.persistRuntimeIssue(ctx, currentRun, StopReasonForError(err), err.Error())
@@ -1010,6 +1464,9 @@ func (c Cycle) handleCollectContext(
 	currentRun state.Run,
 	currentPlannerTurn planner.Result,
 ) (Result, error) {
+	if err := c.clearPendingAction(ctx, currentRun); err != nil {
+		return result, err
+	}
 	collectedContext, err := BuildCollectedContextState(currentRun.RepoPath, currentPlannerTurn.Output)
 	if err != nil {
 		return result, err
@@ -1036,6 +1493,7 @@ func (c Cycle) handleCollectContext(
 		collectedContext.WorkerResults = append(collectedContext.WorkerResults, planWorkerResults...)
 		collectedContext.WorkerPlan = planResult
 	}
+	collectedContext.ArtifactPath, collectedContext.ArtifactPreview = persistCollectedContextStateArtifact(currentRun, collectedContext)
 	if err := c.Store.SaveCollectedContext(ctx, currentRun.ID, collectedContext); err != nil {
 		return result, err
 	}
@@ -1048,6 +1506,12 @@ func (c Cycle) handleCollectContext(
 		return result, fmt.Errorf("updated run %s could not be reloaded after context collection", currentRun.ID)
 	}
 	result.Run = latestRun
+	contextArtifactPath := ""
+	contextArtifactPreview := ""
+	if latestRun.CollectedContext != nil {
+		contextArtifactPath = strings.TrimSpace(latestRun.CollectedContext.ArtifactPath)
+		contextArtifactPreview = strings.TrimSpace(latestRun.CollectedContext.ArtifactPreview)
+	}
 
 	for _, item := range collectedContext.Results {
 		contextArtifactPath, contextArtifactPreview := persistCollectedContextArtifact(latestRun, item)
@@ -1107,6 +1571,8 @@ func (c Cycle) handleCollectContext(
 		ResponseID:         currentPlannerTurn.ResponseID,
 		PreviousResponseID: latestRun.PreviousResponseID,
 		PlannerOutcome:     string(currentPlannerTurn.Output.Outcome),
+		ArtifactPath:       contextArtifactPath,
+		ArtifactPreview:    contextArtifactPreview,
 		Checkpoint:         checkpointRef(&latestRun.LatestCheckpoint),
 	}); err != nil {
 		return result, err
@@ -1148,6 +1614,9 @@ func (c Cycle) handleExecute(
 	currentRun state.Run,
 	currentPlannerTurn planner.Result,
 ) (Result, error) {
+	if err := c.clearPendingAction(ctx, currentRun); err != nil {
+		return result, err
+	}
 	if c.Executor == nil {
 		err := errors.New("executor is required when planner outcome is execute")
 		failedRun, issueErr := c.persistRuntimeIssue(ctx, currentRun, StopReasonTransportProcessError, err.Error())
@@ -1181,6 +1650,10 @@ func (c Cycle) handleExecute(
 	}); err != nil {
 		return result, err
 	}
+	c.emitEvent("executor_turn_started", currentRun, map[string]any{
+		"task":        ExecutorTask(currentPlannerTurn.Output),
+		"response_id": currentPlannerTurn.ResponseID,
+	})
 
 	executorResult, execErr := c.Executor.Execute(ctx, executor.TurnRequest{
 		RunID:      currentRun.ID,
@@ -1296,6 +1769,18 @@ func (c Cycle) handleExecute(
 	}); err != nil {
 		return result, err
 	}
+	c.emitEvent(executorEngineEventName(approvalRequired, executorFailed), latestRun, map[string]any{
+		"turn_status":       string(executorResult.TurnStatus),
+		"thread_id":         executorResult.ThreadID,
+		"turn_id":           executorResult.TurnID,
+		"stop_reason":       stopReason,
+		"failure_stage":     executorFailureStage(executorResult),
+		"error_message":     executorErrorMessage,
+		"model":             strings.TrimSpace(executorResult.Model),
+		"model_provider":    strings.TrimSpace(executorResult.ModelProvider),
+		"model_unavailable": modelUnavailableFromExecutorError(executorErrorMessage),
+		"output_preview":    previewString(executorResult.FinalMessage, 240),
+	})
 
 	if executorCheckpoint != nil {
 		if err := c.Journal.Append(journal.Event{
@@ -1409,6 +1894,10 @@ func (c Cycle) handleExecute(
 func (c Cycle) continueExecutorTurn(ctx context.Context, currentRun state.Run) (Result, error) {
 	result := Result{Run: currentRun}
 
+	if err := c.clearPendingAction(ctx, currentRun); err != nil {
+		return result, err
+	}
+
 	if c.Executor == nil {
 		err := errors.New("executor is required when continuing an active executor turn")
 		failedRun, issueErr := c.persistRuntimeIssue(ctx, currentRun, StopReasonTransportProcessError, err.Error())
@@ -1436,6 +1925,12 @@ func (c Cycle) continueExecutorTurn(ctx context.Context, currentRun state.Run) (
 	}); err != nil {
 		return result, err
 	}
+
+	c.emitEvent("executor_turn_started", currentRun, map[string]any{
+		"phase":     "continue",
+		"thread_id": currentRun.ExecutorThreadID,
+		"turn_id":   currentRun.ExecutorTurnID,
+	})
 
 	executorResult, execErr := c.Executor.Execute(ctx, executor.TurnRequest{
 		RunID:      currentRun.ID,
@@ -1546,6 +2041,19 @@ func (c Cycle) continueExecutorTurn(ctx context.Context, currentRun state.Run) (
 	}); err != nil {
 		return result, err
 	}
+	c.emitEvent(executorEngineEventName(approvalRequired, executorFailed), latestRun, map[string]any{
+		"phase":             "continue",
+		"turn_status":       string(executorResult.TurnStatus),
+		"thread_id":         executorResult.ThreadID,
+		"turn_id":           executorResult.TurnID,
+		"stop_reason":       stopReason,
+		"failure_stage":     executorFailureStage(executorResult),
+		"error_message":     executorErrorMessage,
+		"model":             strings.TrimSpace(executorResult.Model),
+		"model_provider":    strings.TrimSpace(executorResult.ModelProvider),
+		"model_unavailable": modelUnavailableFromExecutorError(executorErrorMessage),
+		"output_preview":    previewString(executorResult.FinalMessage, 240),
+	})
 
 	if executorCheckpoint != nil {
 		if err := c.Journal.Append(journal.Event{
@@ -1667,6 +2175,9 @@ func hasContinuableWorkerTurn(worker state.Worker) bool {
 func (c Cycle) continueWorkerPlan(ctx context.Context, currentRun state.Run, workers []state.Worker) (state.Run, bool, error) {
 	if len(workers) == 0 {
 		return currentRun, false, nil
+	}
+	if err := c.clearPendingAction(ctx, currentRun); err != nil {
+		return currentRun, true, err
 	}
 	if c.Executor == nil {
 		err := errors.New("executor is required when continuing active worker executor turns")
@@ -2590,7 +3101,7 @@ func (c Cycle) executeWorkerCreate(
 
 	worker.WorkerStatus = state.WorkerStatusIdle
 	worker.UpdatedAt = time.Now().UTC()
-	worker.WorkerResultSummary = "isolated worker created"
+	worker.WorkerResultSummary = "isolated worker created; awaiting explicit dispatch"
 	if err := c.Store.SaveWorker(ctx, worker); err != nil {
 		return state.WorkerActionResult{}, err
 	}
@@ -2626,7 +3137,7 @@ func (c Cycle) executeWorkerCreate(
 	return state.WorkerActionResult{
 		Action:  string(action.Action),
 		Success: true,
-		Message: "worker created",
+		Message: "worker created; awaiting explicit dispatch",
 		Worker:  func() *state.WorkerResultSummary { summary := summarizeWorker(reloaded); return &summary }(),
 	}, nil
 }
@@ -3690,6 +4201,10 @@ func (c Cycle) persistRuntimeIssue(ctx context.Context, run state.Run, reason st
 	}
 
 	c.runPluginHooks(ctx, plugins.HookFaultRecorded, updatedRun, nil, nil, reason, errors.New(strings.TrimSpace(message)))
+	c.emitEvent("fault_recorded", updatedRun, map[string]any{
+		"reason":  strings.TrimSpace(reason),
+		"message": strings.TrimSpace(message),
+	})
 
 	return updatedRun, nil
 }
@@ -3926,6 +4441,28 @@ func executorCheckpointLabel(status executor.TurnStatus) string {
 		return "executor_turn_completed"
 	}
 	return "executor_turn_failed"
+}
+
+func executorEngineEventName(approvalRequired bool, executorFailed bool) string {
+	if approvalRequired {
+		return "executor_approval_required"
+	}
+	if executorFailed {
+		return "executor_turn_failed"
+	}
+	return "executor_turn_completed"
+}
+
+func modelUnavailableFromExecutorError(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	if normalized == "" || !strings.Contains(normalized, "model") {
+		return false
+	}
+	return strings.Contains(normalized, "does not exist") ||
+		strings.Contains(normalized, "do not have access") ||
+		strings.Contains(normalized, "don't have access") ||
+		strings.Contains(normalized, "lack access") ||
+		strings.Contains(normalized, "lacks access")
 }
 
 func executorFailureMessage(result executor.TurnResult) string {

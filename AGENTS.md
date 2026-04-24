@@ -12,6 +12,14 @@ Before making any non-trivial code, schema, workflow, or architecture change, re
 4. `docs/architecture/ADR-002-canonical-repo-contract.md`
 5. `docs/CLI_ENGINE_EXECPLAN.md`
 
+Before making any non-trivial GUI, console, protocol, planner-status, or operator-intervention change, also read:
+
+6. `docs/ORCHESTRATOR_V2_CONSOLE_SPEC.md`
+7. `docs/ORCHESTRATOR_V2_CONTROL_PROTOCOL.md`
+8. `docs/ORCHESTRATOR_V2_PLANNER_CONTRACT.md`
+9. `docs/ORCHESTRATOR_V2_ROADMAP.md`
+10. `docs/architecture/ADR-008-v2-operator-console.md`
+
 If those documents conflict, `docs/ORCHESTRATOR_CLI_UPDATED_SPEC.md` is the primary architecture source.
 
 ## Repo Working Rules
@@ -32,6 +40,14 @@ If those documents conflict, `docs/ORCHESTRATOR_CLI_UPDATED_SPEC.md` is the prim
 - Safe pause points occur after AI turns have completed and been durably recorded.
 - Visibility features, verbosity control, and hotkeys are operator features, not planner authority.
 - Parallel executor workers may be added later only when boundaries are explicit and durable. They are not part of v1.
+
+## V2 Console Guardrails
+
+- Do not put semantic decisions in the GUI or console shell.
+- Do not bypass the engine protocol for console actions.
+- Do not expose hidden chain-of-thought.
+- Do not print secrets or store them carelessly.
+- Keep headless CLI mode fully working while adding console features.
 
 ## v1 Guardrails
 

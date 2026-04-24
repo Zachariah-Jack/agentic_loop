@@ -78,6 +78,7 @@ func runHistory(ctx context.Context, inv Invocation) error {
 		fmt.Fprintf(inv.Stdout, "run.%d.updated_at: %s\n", idx+1, run.UpdatedAt.Format(timeLayout))
 		fmt.Fprintf(inv.Stdout, "run.%d.stop_reason: %s\n", idx+1, valueOrUnavailable(run.LatestStopReason))
 		fmt.Fprintf(inv.Stdout, "run.%d.checkpoint_label: %s\n", idx+1, valueOrUnavailable(run.LatestCheckpoint.Label))
+		fmt.Fprintf(inv.Stdout, "run.%d.artifact_path: %s\n", idx+1, valueOrUnavailable(latestArtifactPathFromRun(run)))
 		fmt.Fprintf(inv.Stdout, "run.%d.resumable: %t\n", idx+1, isRunResumable(run))
 		fmt.Fprintf(inv.Stdout, "run.%d.workers_used: %t\n", idx+1, workerStats.Total > 0)
 		fmt.Fprintf(inv.Stdout, "run.%d.next_operator_action: %s\n", idx+1, nextOperatorActionForExistingRun(run))

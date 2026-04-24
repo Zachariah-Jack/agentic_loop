@@ -13,6 +13,15 @@ const (
 	configFile = "config.json"
 )
 
+const (
+	PlannerModelLatestGPT5 = "gpt-5-latest"
+
+	VerbosityQuiet   = "quiet"
+	VerbosityNormal  = "normal"
+	VerbosityVerbose = "verbose"
+	VerbosityTrace   = "trace"
+)
+
 type Config struct {
 	Version                int        `json:"version"`
 	LogLevel               string     `json:"log_level"`
@@ -36,7 +45,7 @@ func Default() Config {
 		Version:                1,
 		LogLevel:               "info",
 		Verbosity:              "normal",
-		PlannerModel:           "gpt-5.1",
+		PlannerModel:           PlannerModelLatestGPT5,
 		WorkerConcurrencyLimit: 2,
 	}
 }
@@ -108,4 +117,19 @@ func WithDefaults(cfg Config) Config {
 	}
 
 	return cfg
+}
+
+func NormalizeVerbosity(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", VerbosityNormal:
+		return VerbosityNormal, nil
+	case VerbosityQuiet:
+		return VerbosityQuiet, nil
+	case VerbosityVerbose:
+		return VerbosityVerbose, nil
+	case VerbosityTrace:
+		return VerbosityTrace, nil
+	default:
+		return "", errors.New("verbosity must be one of quiet, normal, verbose, or trace")
+	}
 }

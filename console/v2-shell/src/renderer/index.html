@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Orchestrator V2 Shell</title>
+    <link rel="icon" href="../../assets/icon.svg" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <div class="eyebrow">Operator Cockpit</div>
+        <h1>Orchestrator Console</h1>
+        <p class="subtitle">Start, watch, guide, and inspect autonomous app-building from one clear control surface.</p>
+      </div>
+      <div id="connection-badge" class="badge badge-disconnected">disconnected: not connected</div>
+    </header>
+
+    <section class="top-status-strip" aria-label="Current connection and run status">
+      <div id="top-status-bar" class="top-status-grid">
+        <div class="top-status-item"><span>Connection</span><strong>Disconnected</strong></div>
+        <div class="top-status-item"><span>Server</span><strong>http://127.0.0.1:44777</strong></div>
+        <div class="top-status-item top-status-wide"><span>Repo</span><strong>No repo loaded from control server yet</strong></div>
+        <div class="top-status-item"><span>Run</span><strong>No active run</strong></div>
+        <div class="top-status-item"><span>State</span><strong>Disconnected</strong></div>
+        <div class="top-status-item top-status-wide"><span>Blocker</span><strong>None</strong></div>
+        <div class="top-status-item"><span>Verbosity</span><strong>normal</strong></div>
+      </div>
+      <div class="top-status-actions">
+        <button id="top-refresh" class="button" title="Gets the latest run, connection, planner, worker, and approval state.">Update Dashboard</button>
+        <button id="top-reconnect" class="button button-primary">Connect</button>
+      </div>
+    </section>
+
+    <section id="disconnected-banner" class="connection-banner">
+      <strong>Connection Status: Not Connected.</strong>
+      <span>Start the Orchestrator engine for your repo, confirm the address, then click Connect.</span>
+    </section>
+
+    <div class="workspace-shell">
+      <aside class="side-nav" aria-label="Console sections">
+        <button class="side-nav-item active" data-tab-target="home">Home</button>
+        <button class="side-nav-item" data-tab-target="run">Run</button>
+        <button class="side-nav-item" data-tab-target="attention">Action Required <span id="attention-badge" class="nav-badge" hidden>0</span></button>
+        <button class="side-nav-item" data-tab-target="chat">Chat</button>
+        <button class="side-nav-item" data-tab-target="files">Files</button>
+        <button class="side-nav-item" data-tab-target="activity">Live Output</button>
+        <button class="side-nav-item" data-tab-target="workers">Workers</button>
+        <button class="side-nav-item" data-tab-target="terminal">Terminal</button>
+        <button class="side-nav-item" data-tab-target="settings">Settings</button>
+        <button class="side-nav-item" data-tab-target="dogfood">Dogfood Notes</button>
+      </aside>
+
+    <main class="app-grid">
+      <section id="home-dashboard" class="panel panel-home" data-pane="home">
+        <div class="home-hero">
+          <div>
+            <div class="eyebrow">Guided Home</div>
+            <h2>What should I do now?</h2>
+            <p id="home-recommendation-title" class="home-recommendation-title">Connect to the control server.</p>
+            <p id="home-recommendation-detail" class="home-recommendation-detail">Start the local control server, then connect this shell.</p>
+            <p id="home-refresh-meta" class="panel-meta">Last refreshed: Not refreshed yet</p>
+          </div>
+          <div class="home-action-stack">
+            <button id="home-primary-action" class="button button-primary">Connect</button>
+            <button id="home-refresh-everything" class="button" title="Gets the latest run, connection, planner, worker, and approval state.">Update Dashboard</button>
+            <button id="home-safe-stop" class="button button-danger-soft">Safe Stop</button>
+          </div>
+        </div>
+
+        <div id="home-error" class="issue-box" hidden>
+          <div class="viewer-heading">Home Status Issue</div>
+          <div id="home-error-body" class="issue-body"></div>
+        </div>
+
+        <div class="home-grid">
+          <article id="run-launcher-card" class="home-card home-card-wide">
+            <div class="panel-header">
+              <h3>Run Control</h3>
+              <div class="panel-meta">Start Build and Continue Build use explicit engine protocol actions. Terminal commands are backup-only.</div>
+            </div>
+            <label class="field">
+              <span>Goal for a new run</span>
+              <textarea id="home-goal" rows="4" placeholder="Build the next highest-value slice from the repo contract files."></textarea>
+            </label>
+            <div class="button-row">
+              <button id="home-use-default-goal" class="button">Fill Starter Goal</button>
+              <button id="home-start-run" class="button button-primary">Start Build</button>
+              <button id="home-continue-run" class="button">Continue Build</button>
+            </div>
+            <details class="advanced-help">
+              <summary>Backup terminal commands</summary>
+              <p class="panel-note">Use these only if protocol Start/Continue is unavailable or you are intentionally using the terminal.</p>
+              <div class="button-row">
+                <button id="home-prepare-start-command" class="button button-quiet">Copy terminal command as backup</button>
+                <button id="home-prepare-continue-command" class="button button-quiet">Copy continue command as backup</button>
+              </div>
+              <pre id="home-command-preview" class="command-preview">Terminal backup: no command prepared.</pre>
+            </details>
+          </article>
+
+          <article class="home-card">
+            <h3>Current Repo</h3>
+            <div id="home-repo-body" class="home-stack"></div>
+          </article>
+
+          <article class="home-card">
+            <h3>Current Run</h3>
+            <div id="home-run-body" class="home-stack"></div>
+          </article>
+
+          <article class="home-card">
+            <h3>Progress</h3>
+            <div id="home-progress-body" class="home-stack"></div>
+          </article>
+
+          <article class="home-card">
+            <h3>Planner Says</h3>
+            <div id="home-planner-body" class="home-stack"></div>
+          </article>
+
+          <article class="home-card">
+            <h3>Needs Attention</h3>
+            <div id="home-attention-body" class="home-stack"></div>
+          </article>
+
+          <article class="home-card">
+            <h3>Codex Readiness</h3>
+            <div id="home-codex-body" class="home-stack"></div>
+          </article>
+
+          <article class="home-card">
+            <h3>Latest Artifact</h3>
+            <div id="home-artifact-body" class="home-stack"></div>
+          </article>
+
+          <article class="home-card home-card-wide">
+            <div class="panel-header">
+              <h3>Recent Activity Highlights</h3>
+              <div class="panel-meta">Real protocol events only.</div>
+            </div>
+            <div id="home-activity-body" class="home-activity-list"></div>
+          </article>
+
+          <article class="home-card home-card-wide">
+            <h3>Quick Buttons</h3>
+            <div class="quick-button-grid">
+              <button id="home-open-contracts" class="button">Open Contract Files</button>
+              <button id="home-open-latest-artifact" class="button">Open Latest Artifact</button>
+              <button id="home-add-dogfood-note" class="button">Add Dogfood Note</button>
+              <button id="home-open-terminal" class="button">Open Operator Terminal</button>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="connection-panel" class="panel panel-connection" data-pane="settings">
+        <h2>Connection</h2>
+        <label class="field">
+          <span>Control server address</span>
+          <input id="address-input" type="text" placeholder="http://127.0.0.1:44777" />
+        </label>
+        <label class="activity-toggle connection-toggle"><input id="auto-reconnect" type="checkbox" checked /> Auto reconnect and rehydrate</label>
+        <button id="connect-button" class="button button-primary">Connect</button>
+        <p id="connection-details" class="panel-note">Start <code>orchestrator control serve</code> first. This shell talks only to the loopback control server and event stream.</p>
+        <div id="issue-box" class="issue-box" hidden>
+          <div class="viewer-heading">Last Protocol Issue</div>
+          <div id="issue-body" class="issue-body"></div>
+        </div>
+      </section>
+
+      <section id="model-settings-panel" class="panel panel-models" data-pane="settings">
+        <div class="panel-header">
+          <h2>Model Health</h2>
+          <div class="panel-meta">Planner model and Codex model/access are separate. Tests report truthfully and never silently downgrade.</div>
+        </div>
+        <div id="model-health-body" class="detail-grid"></div>
+        <div class="button-row">
+          <button id="test-planner-model" class="button">Test Planner Model</button>
+          <button id="test-executor-model" class="button">Test Codex Config</button>
+        </div>
+        <p class="panel-note">Planner model comes from orchestrator config or <code>OPENAI_MODEL</code>. Codex executor model is controlled by external Codex configuration and may only be known when Codex reports it or fails.</p>
+      </section>
+
+      <section class="panel panel-controls" data-pane="run">
+        <h2>Run Controls</h2>
+        <div class="button-row">
+          <button id="refresh-status" class="button" title="Gets the latest run, connection, planner, worker, and approval state.">Update Dashboard</button>
+          <button id="refresh-artifacts" class="button" title="Reloads generated planner/executor/context files.">Reload Outputs</button>
+          <button id="safe-stop" class="button">Safe Stop</button>
+          <button id="clear-stop" class="button">Clear Stop</button>
+        </div>
+        <div class="inline-control">
+          <label class="field">
+            <span>Verbosity</span>
+            <select id="verbosity-select">
+              <option value="quiet">Quiet</option>
+              <option value="normal">Normal</option>
+              <option value="verbose">Verbose</option>
+              <option value="trace">Trace</option>
+            </select>
+          </label>
+        </div>
+        <p id="verbosity-help" class="panel-note">Normal: concise operator messages and key status.</p>
+      </section>
+
+      <section id="control-chat-panel" class="panel panel-chat" data-pane="chat">
+        <h2>Control Chat - affects the active run at the next safe point</h2>
+        <label class="field">
+          <span>Raw human intervention message</span>
+          <textarea id="control-message" rows="5" placeholder="Make that wall red, not blue."></textarea>
+        </label>
+        <button id="send-control-message" class="button button-primary">Queue Control Message</button>
+        <p class="panel-note">This queues a real <code>inject_control_message</code> protocol action. The planner decides what to do with the raw message at a safe point.</p>
+      </section>
+
+      <section class="panel panel-side-chat" data-pane="chat">
+        <div class="panel-header">
+          <h2>Side Chat - recorded only for now</h2>
+          <div class="panel-meta">This does not affect the run. Messages are stored through the protocol, but there is no AI conversation backend yet.</div>
+        </div>
+        <label class="field">
+          <span>Side chat message</span>
+          <textarea id="side-chat-message" rows="4" placeholder="What still remains before release?"></textarea>
+        </label>
+        <div class="inline-control">
+          <label class="field">
+            <span>Context policy</span>
+            <select id="side-chat-context-policy">
+              <option value="repo_and_latest_run_summary">repo_and_latest_run_summary</option>
+              <option value="repo_only">repo_only</option>
+              <option value="none">none</option>
+            </select>
+          </label>
+          <button id="send-side-chat-message" class="button button-primary">Record Side Message</button>
+        </div>
+        <div id="side-chat-body" class="side-chat-list"></div>
+      </section>
+
+      <section id="dogfood-panel" class="panel panel-dogfood" data-pane="dogfood">
+        <div class="panel-header">
+          <h2>Dogfood Notes</h2>
+          <div class="panel-meta">Quick issue capture for internal daily use. Notes are timestamped, repo-scoped, and tied to the latest run when available.</div>
+        </div>
+        <label class="field">
+          <span>Title</span>
+          <input id="dogfood-title" type="text" placeholder="Reconnect leaves stale artifact selected" />
+        </label>
+        <label class="field">
+          <span>Note</span>
+          <textarea id="dogfood-note" rows="4" placeholder="What happened, where it hurt, and what you expected instead."></textarea>
+        </label>
+        <button id="capture-dogfood-issue" class="button button-primary">Capture Dogfood Note</button>
+        <div class="artifact-layout">
+          <div id="dogfood-body" class="artifact-list"></div>
+          <div class="artifact-viewer-shell">
+            <div class="viewer-heading">Selected Note</div>
+            <pre id="dogfood-detail" class="viewer-content">Capture a friction note, bug, or daily-use annoyance here. Notes are stored through the real engine protocol.</pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel panel-progress" data-pane="run">
+        <div class="panel-header">
+          <h2>Progress &amp; Roadmap Alignment</h2>
+          <div class="panel-meta">Planner-safe operator status plus current roadmap context when available. This does not invent progress data.</div>
+        </div>
+        <div id="progress-body" class="detail-grid"></div>
+      </section>
+
+      <section class="panel panel-status" data-pane="run">
+        <h2>Status</h2>
+        <div id="status-body" class="status-grid"></div>
+      </section>
+
+      <section class="panel panel-pending" data-pane="run">
+        <h2>Pending Action</h2>
+        <div id="pending-body" class="detail-grid"></div>
+      </section>
+
+      <section id="approval-panel" class="panel panel-approval" data-pane="attention">
+        <div class="panel-header">
+          <h2>Action Required</h2>
+          <div class="panel-meta">Shown when Codex or a worker needs the operator. Primary executor approve/deny is protocol-backed.</div>
+        </div>
+        <div id="approval-body" class="detail-grid"></div>
+        <div class="button-row">
+          <button id="approve-executor" class="button button-primary" disabled>Approve</button>
+          <button id="deny-executor" class="button" disabled>Deny</button>
+          <button id="copy-approval-details" class="button">Copy technical details</button>
+        </div>
+      </section>
+
+      <section class="panel panel-summary" data-pane="run">
+        <h2>What Happened?</h2>
+        <div id="summary-body" class="summary-grid"></div>
+      </section>
+
+      <section id="workers-panel" class="panel panel-workers" data-pane="workers">
+        <div class="panel-header">
+          <h2>Workers</h2>
+          <div class="panel-meta">Explicit operator-triggered worker actions only. Apply and advanced worker control remain deferred.</div>
+        </div>
+        <div class="worker-layout">
+          <div class="worker-list-shell">
+            <div class="button-row">
+              <button id="refresh-workers" class="button">Refresh Workers</button>
+            </div>
+            <div id="workers-body" class="worker-list"></div>
+          </div>
+          <div class="worker-detail-shell">
+            <div class="viewer-heading">Selected Worker</div>
+            <div id="worker-detail-body" class="detail-grid"></div>
+
+            <div class="worker-form-shell">
+              <div class="viewer-heading">Create Worker</div>
+              <label class="field">
+                <span>Worker name</span>
+                <input id="worker-create-name" type="text" placeholder="code-survey" />
+              </label>
+              <label class="field">
+                <span>Scope</span>
+                <textarea id="worker-create-scope" rows="3" placeholder="Inspect the shell layout and wiring boundaries."></textarea>
+              </label>
+              <button id="worker-create" class="button button-primary">Create Worker</button>
+            </div>
+
+            <div class="worker-form-shell">
+              <div class="viewer-heading">Dispatch Worker</div>
+              <label class="field">
+                <span>Bounded executor prompt</span>
+                <textarea id="worker-dispatch-prompt" rows="5" placeholder="Inspect the shell, summarize the next bounded edit, and write only within the assigned scope."></textarea>
+              </label>
+              <button id="worker-dispatch" class="button button-primary">Dispatch Selected Worker</button>
+            </div>
+
+            <div class="worker-form-shell">
+              <div class="viewer-heading">Integrate Worker Outputs</div>
+              <label class="field">
+                <span>Worker IDs (comma-separated)</span>
+                <input id="worker-integrate-ids" type="text" placeholder="worker_a,worker_b" />
+              </label>
+              <div class="button-row">
+                <button id="worker-integrate" class="button">Build Integration Preview</button>
+                <button id="worker-remove" class="button">Remove Selected Worker</button>
+              </div>
+              <div class="panel-note">Integration builds a preview artifact only. Manual apply is still deferred from this shell slice.</div>
+            </div>
+
+            <div class="worker-form-shell">
+              <div class="viewer-heading">Latest Worker Action Result</div>
+              <pre id="worker-action-result" class="viewer-content worker-result-shell">No worker action run yet. Create, dispatch, remove, or integrate through the real engine protocol.</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="terminal-panel" class="panel panel-terminal" data-pane="terminal">
+        <div class="panel-header">
+          <h2>Operator Terminal</h2>
+          <div id="terminal-meta" class="panel-meta">Local operator shell tabs for convenience. Engine run control still belongs to the explicit protocol actions.</div>
+        </div>
+        <div id="terminal-tabs" class="terminal-tabs"></div>
+        <pre id="terminal-output" class="viewer-content terminal-output">Start the terminal to open a local operator shell session.</pre>
+        <div class="button-row">
+          <button id="terminal-new" class="button">New Tab</button>
+          <button id="terminal-close" class="button">Close Tab</button>
+          <button id="terminal-stop" class="button">Stop Terminal</button>
+          <button id="terminal-clear" class="button">Clear Output</button>
+        </div>
+        <label class="field">
+          <span>Terminal input</span>
+          <textarea id="terminal-input" rows="3" placeholder="dir"></textarea>
+        </label>
+        <button id="terminal-send" class="button button-primary">Send To Terminal</button>
+      </section>
+
+      <section id="artifacts-panel" class="panel panel-artifacts" data-pane="files">
+        <div class="panel-header">
+          <h2>Artifacts</h2>
+          <div id="artifacts-meta" class="panel-meta">Latest artifact unavailable</div>
+        </div>
+        <div class="artifact-layout">
+          <div id="artifact-list" class="artifact-list"></div>
+          <div class="artifact-viewer-shell">
+            <div class="viewer-heading">Artifact Viewer</div>
+            <pre id="artifact-viewer" class="viewer-content">Select an artifact to view its content.</pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="contracts-panel" class="panel panel-contracts" data-pane="files">
+        <div class="panel-header">
+          <h2>Contract Files</h2>
+          <div class="panel-meta">Protocol-backed editor for the canonical repo files only.</div>
+        </div>
+        <div class="contract-layout">
+          <div id="contract-file-list" class="contract-file-list"></div>
+          <div class="contract-editor-shell">
+            <div id="contract-editor-meta" class="viewer-heading">No contract file opened yet.</div>
+            <textarea id="contract-editor" rows="16" placeholder="Open a contract file to edit it."></textarea>
+            <div class="button-row">
+              <button id="open-selected-contract" class="button">Open Selected</button>
+              <button id="save-contract" class="button button-primary">Save Contract File</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel panel-autofill" data-pane="files">
+        <div class="panel-header">
+          <h2>AI Autofill Wizard</h2>
+          <div class="panel-meta">Guided contract drafting through the real engine protocol. Drafts preview first and save only when you choose.</div>
+        </div>
+        <div id="autofill-step-label" class="panel-meta">Step 1 of 4: project summary</div>
+
+        <div class="wizard-step" data-autofill-step="0">
+          <label class="field">
+            <span>Project summary</span>
+            <textarea id="autofill-project-summary" rows="5" placeholder="What are you building, for whom, and why does it matter?"></textarea>
+          </label>
+        </div>
+
+        <div class="wizard-step" data-autofill-step="1" hidden>
+          <label class="field">
+            <span>Desired outcome</span>
+            <textarea id="autofill-desired-outcome" rows="4" placeholder="What should this repo and product accomplish next?"></textarea>
+          </label>
+          <label class="field">
+            <span>Users and platform</span>
+            <textarea id="autofill-users-platform" rows="3" placeholder="Who uses this and on what platform(s)?"></textarea>
+          </label>
+        </div>
+
+        <div class="wizard-step" data-autofill-step="2" hidden>
+          <label class="field">
+            <span>Constraints</span>
+            <textarea id="autofill-constraints" rows="4" placeholder="Important constraints, guardrails, or non-goals"></textarea>
+          </label>
+          <label class="field">
+            <span>Milestones</span>
+            <textarea id="autofill-milestones" rows="4" placeholder="Near-term milestones or sequencing notes"></textarea>
+          </label>
+        </div>
+
+        <div class="wizard-step" data-autofill-step="3" hidden>
+          <label class="field">
+            <span>Decisions</span>
+            <textarea id="autofill-decisions" rows="4" placeholder="Known locked decisions, tradeoffs, or architecture choices"></textarea>
+          </label>
+          <label class="field">
+            <span>Operator notes</span>
+            <textarea id="autofill-notes" rows="4" placeholder="Loose notes, assumptions, or context worth preserving"></textarea>
+          </label>
+          <div class="wizard-targets">
+            <div class="viewer-heading">Draft targets</div>
+            <label><input type="checkbox" data-autofill-target=".orchestrator/brief.md" checked /> .orchestrator/brief.md</label>
+            <label><input type="checkbox" data-autofill-target=".orchestrator/roadmap.md" checked /> .orchestrator/roadmap.md</label>
+            <label><input type="checkbox" data-autofill-target=".orchestrator/decisions.md" checked /> .orchestrator/decisions.md</label>
+            <label><input type="checkbox" data-autofill-target=".orchestrator/human-notes.md" checked /> .orchestrator/human-notes.md</label>
+            <label><input type="checkbox" data-autofill-target="AGENTS.md" /> AGENTS.md</label>
+          </div>
+        </div>
+
+        <div class="button-row">
+          <button id="autofill-back" class="button">Back</button>
+          <button id="autofill-next" class="button">Next</button>
+          <button id="run-autofill" class="button button-primary">Draft Selected Files</button>
+        </div>
+
+        <div id="autofill-meta" class="panel-meta">Answer the guided questions, choose target files, then draft through the real engine protocol.</div>
+        <div class="artifact-layout">
+          <div id="autofill-file-list" class="artifact-list"></div>
+          <div class="artifact-viewer-shell">
+            <div class="viewer-heading">Draft Preview</div>
+            <pre id="autofill-preview" class="viewer-content">Drafted contract content will preview here before any save.</pre>
+            <div class="button-row">
+              <button id="save-autofill-draft" class="button button-primary" disabled>Save Selected Draft</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel panel-repo-tree" data-pane="files">
+        <div class="panel-header">
+          <h2>Repo Browser</h2>
+          <div class="panel-meta">Read-only repo browsing through explicit engine protocol actions. Arbitrary editing is still deferred.</div>
+        </div>
+        <div class="button-row">
+          <button id="repo-root" class="button">Repo Root</button>
+          <button id="repo-up" class="button">Up</button>
+          <button id="repo-refresh" class="button">Refresh Tree</button>
+          <button id="repo-open-in-contract" class="button">Open In Contract Editor</button>
+        </div>
+        <div id="repo-tree-meta" class="panel-meta">repo root | read-only</div>
+        <div class="artifact-layout">
+          <div id="repo-tree-list" class="artifact-list"></div>
+          <div class="artifact-viewer-shell">
+            <div id="repo-file-meta" class="viewer-heading">Select a repo file to view it.</div>
+            <pre id="repo-file-viewer" class="viewer-content">Repo browsing is read-only in this slice. Canonical contract files can still be opened in the contract editor.</pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="events-panel" class="panel panel-events" data-pane="activity">
+        <div class="panel-header">
+          <h2>Live Output</h2>
+          <div id="events-meta" class="panel-meta">Human-readable live run log from planner, executor/Codex, worker, approval, model, and shell events.</div>
+        </div>
+        <div class="activity-toolbar">
+          <label class="field activity-search">
+            <span>Search</span>
+            <input id="events-filter-text" type="text" placeholder="Filter by event, run, or payload text" />
+          </label>
+          <label class="activity-toggle"><input id="events-current-run-only" type="checkbox" /> Current/latest run only</label>
+          <label class="activity-toggle"><input id="events-auto-scroll" type="checkbox" checked /> Auto-scroll to latest</label>
+        </div>
+        <div class="activity-categories">
+          <label class="activity-chip"><input type="checkbox" data-event-category="planner" checked /> Planner</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="executor" checked /> Executor</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="worker" checked /> Worker</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="approval" checked /> Approval</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="intervention" checked /> Intervention</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="fault" checked /> Fault</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="terminal" checked /> Terminal</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="status" checked /> Status</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="other" checked /> Other</label>
+        </div>
+        <div id="events-body" class="events-list"></div>
+      </section>
+    </main>
+    </div>
+
+    <footer id="flash-message" class="flash flash-info">Start <code>orchestrator control serve</code>, then connect this early protocol shell.</footer>
+
+    <script src="./shell-helpers.js"></script>
+    <script src="./view-model.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

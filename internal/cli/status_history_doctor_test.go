@@ -70,6 +70,18 @@ func TestRunStatusShowsLatestRunSummary(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveExecutorState() error = %v", err)
 	}
+	if err := store.SavePlannerOperatorStatus(context.Background(), run.ID, &state.PlannerOperatorStatus{
+		ContractVersion:    "planner.v1",
+		OperatorMessage:    "Implementing the next bounded slice.",
+		CurrentFocus:       "status summary rendering",
+		NextIntendedStep:   "persist the safe operator-facing planner summary",
+		WhyThisStep:        "the operator needs a concise live view of planner progress.",
+		ProgressPercent:    37,
+		ProgressConfidence: "medium",
+		ProgressBasis:      "bounded executor work already ran; current visibility slice is wiring planner status into the CLI.",
+	}); err != nil {
+		t.Fatalf("SavePlannerOperatorStatus() error = %v", err)
+	}
 
 	if _, err := store.RecordHumanReply(context.Background(), run.ID, "ntfy", "raw human reply", time.Date(2026, 4, 19, 21, 6, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("RecordHumanReply() error = %v", err)
@@ -142,6 +154,8 @@ func TestRunStatusShowsLatestRunSummary(t *testing.T) {
 		"  worker.1.name: frontend-worker",
 		"  worker.1.status: idle",
 		"  planner.outcome: execute",
+		"  planner.operator_message: Implementing the next bounded slice.",
+		"  planner.progress_percent: 37",
 		"  executor.turn_status: completed",
 		"  executor.preview: Applied the requested change and updated the planner-facing notes.",
 		"  executor.thread_id: thread_123",
@@ -206,6 +220,15 @@ func TestRunHistoryListsRecentRunsInReverseChronologicalOrder(t *testing.T) {
 	if err := store.SaveLatestStopReason(context.Background(), newerRun.ID, orchestration.StopReasonPlannerPause); err != nil {
 		t.Fatalf("SaveLatestStopReason(newer) error = %v", err)
 	}
+	if err := store.SaveCollectedContext(context.Background(), newerRun.ID, &state.CollectedContextState{
+		Focus:        "Inspect the latest collected context artifact",
+		ArtifactPath: ".orchestrator/artifacts/context/" + newerRun.ID + "/collected_context_latest.json",
+	}); err != nil {
+		t.Fatalf("SaveCollectedContext(newer) error = %v", err)
+	}
+	if err := store.SaveLatestStopReason(context.Background(), newerRun.ID, orchestration.StopReasonPlannerPause); err != nil {
+		t.Fatalf("SaveLatestStopReason(newer, after context) error = %v", err)
+	}
 
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -230,12 +253,14 @@ func TestRunHistoryListsRecentRunsInReverseChronologicalOrder(t *testing.T) {
 		"run.1.goal: newer resumable run",
 		"run.1.stop_reason: planner_pause",
 		"run.1.checkpoint_label: planner_turn_post_executor",
+		"run.1.artifact_path: .orchestrator/artifacts/context/" + newerRun.ID + "/collected_context_latest.json",
 		"run.1.resumable: true",
 		"run.1.next_operator_action: continue_existing_run",
 		"run.2.run_id: " + olderRun.ID,
 		"run.2.goal: older completed run",
 		"run.2.stop_reason: planner_complete",
 		"run.2.checkpoint_label: planner_declared_complete",
+		"run.2.artifact_path: unavailable",
 		"run.2.resumable: false",
 		"run.2.next_operator_action: no_action_required_run_completed",
 	} {
@@ -246,6 +271,71 @@ func TestRunHistoryListsRecentRunsInReverseChronologicalOrder(t *testing.T) {
 
 	if strings.Index(output, "run.1.run_id: "+newerRun.ID) > strings.Index(output, "run.2.run_id: "+olderRun.ID) {
 		t.Fatalf("history output not in reverse chronological order\n%s", output)
+	}
+}
+
+func TestRunStatusFallsBackToCollectedContextArtifactPathFromRunState(t *testing.T) {
+	t.Parallel()
+
+	layout := state.ResolveLayout(t.TempDir())
+	store, _, err := ensureRuntime(context.Background(), layout)
+	if err != nil {
+		t.Fatalf("ensureRuntime() error = %v", err)
+	}
+
+	run, err := store.CreateRun(context.Background(), state.CreateRunParams{
+		RepoPath: layout.RepoRoot,
+		Goal:     "inspect collected context artifact fallback",
+		Status:   state.StatusInitialized,
+		Checkpoint: state.Checkpoint{
+			Sequence:     2,
+			Stage:        "planner",
+			Label:        "planner_turn_post_collect_context",
+			SafePause:    true,
+			PlannerTurn:  1,
+			ExecutorTurn: 0,
+			CreatedAt:    time.Date(2026, 4, 22, 10, 0, 0, 0, time.UTC),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	if err := store.SaveCollectedContext(context.Background(), run.ID, &state.CollectedContextState{
+		Focus:           "Inspect one collected file",
+		ArtifactPath:    ".orchestrator/artifacts/context/" + run.ID + "/collected_context_latest.json",
+		ArtifactPreview: "{\"focus\":\"Inspect one collected file\"}",
+		Results: []state.CollectedContextResult{
+			{
+				RequestedPath: "README.md",
+				ResolvedPath:  filepath.Join(layout.RepoRoot, "README.md"),
+				Kind:          "missing",
+				Detail:        "path_not_found",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("SaveCollectedContext() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err = runStatus(context.Background(), Invocation{
+		Stdout:     &stdout,
+		Stderr:     &bytes.Buffer{},
+		RepoRoot:   layout.RepoRoot,
+		Layout:     layout,
+		Config:     config.Default(),
+		ConfigPath: filepath.Join(layout.RepoRoot, "missing-config.json"),
+		Version:    "test",
+	})
+	if err != nil {
+		t.Fatalf("runStatus() error = %v", err)
+	}
+
+	want := "  artifact.path: .orchestrator/artifacts/context/" + run.ID + "/collected_context_latest.json"
+	if !strings.Contains(stdout.String(), want) {
+		t.Fatalf("status output missing %q\n%s", want, stdout.String())
 	}
 }
 
@@ -358,8 +448,9 @@ func TestRootHelpShowsPrimeTimeWorkflow(t *testing.T) {
 
 	for _, want := range []string{
 		"Typical flow:",
-		"setup -> init -> run/auto start -> resume/continue/auto continue -> status/history/doctor",
+		"setup -> init -> run -> continue/status/history/doctor",
 		"auto",
+		"control",
 		"setup",
 		"init",
 		"run",

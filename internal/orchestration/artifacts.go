@@ -101,6 +101,29 @@ func persistCollectedContextArtifact(run state.Run, item state.CollectedContextR
 	return relativePath, previewString(string(encoded), 240)
 }
 
+func persistCollectedContextStateArtifact(run state.Run, collectedContext *state.CollectedContextState) (string, string) {
+	if collectedContext == nil {
+		return "", ""
+	}
+
+	artifact := *collectedContext
+	artifact.ArtifactPath = ""
+	artifact.ArtifactPreview = ""
+
+	encoded, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		return "", previewString("artifact_write_failed: "+err.Error(), 240)
+	}
+
+	fileName := fmt.Sprintf("collected_context_%s.json", time.Now().UTC().Format("20060102T150405.000000000Z"))
+	relativePath, err := writeRunArtifact(run, "context", fileName, encoded)
+	if err != nil {
+		return "", previewString("artifact_write_failed: "+err.Error(), 240)
+	}
+
+	return relativePath, previewString(string(encoded), 240)
+}
+
 func persistHumanReplyArtifact(run state.Run, reply state.HumanReply) (string, string) {
 	if len(reply.Payload) <= maxHumanReplyArtifactBytes {
 		return "", ""

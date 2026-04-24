@@ -2,7 +2,10 @@ package planner
 
 import "time"
 
-const ContractVersionV1 = "planner.v1"
+const (
+	ContractVersionV1 = "planner.v1"
+	ContractVersionV2 = "planner.v2"
+)
 
 type OutcomeKind string
 
@@ -24,20 +27,22 @@ const (
 )
 
 type InputEnvelope struct {
-	ContractVersion  string                   `json:"contract_version"`
-	RunID            string                   `json:"run_id"`
-	RepoPath         string                   `json:"repo_path"`
-	Goal             string                   `json:"goal"`
-	RunStatus        string                   `json:"run_status"`
-	LatestCheckpoint Checkpoint               `json:"latest_checkpoint"`
-	RecentEvents     []EventPreview           `json:"recent_events,omitempty"`
-	ExecutorResult   *ExecutorResultSummary   `json:"executor_result,omitempty"`
-	CollectedContext *CollectedContextSummary `json:"collected_context,omitempty"`
-	DriftReview      *DriftReviewSummary      `json:"drift_review,omitempty"`
-	PluginTools      []PluginToolDescriptor   `json:"plugin_tools,omitempty"`
-	RepoContracts    RepoContractAvailability `json:"repo_contracts"`
-	RawHumanReplies  []RawHumanReply          `json:"raw_human_replies,omitempty"`
-	Capabilities     CapabilityMarkers        `json:"capabilities"`
+	ContractVersion     string                    `json:"contract_version"`
+	RunID               string                    `json:"run_id"`
+	RepoPath            string                    `json:"repo_path"`
+	Goal                string                    `json:"goal"`
+	RunStatus           string                    `json:"run_status"`
+	LatestCheckpoint    Checkpoint                `json:"latest_checkpoint"`
+	RecentEvents        []EventPreview            `json:"recent_events,omitempty"`
+	ExecutorResult      *ExecutorResultSummary    `json:"executor_result,omitempty"`
+	CollectedContext    *CollectedContextSummary  `json:"collected_context,omitempty"`
+	DriftReview         *DriftReviewSummary       `json:"drift_review,omitempty"`
+	PendingAction       *PendingActionInput       `json:"pending_action,omitempty"`
+	ControlIntervention *ControlInterventionInput `json:"control_intervention,omitempty"`
+	PluginTools         []PluginToolDescriptor    `json:"plugin_tools,omitempty"`
+	RepoContracts       RepoContractAvailability  `json:"repo_contracts"`
+	RawHumanReplies     []RawHumanReply           `json:"raw_human_replies,omitempty"`
+	Capabilities        CapabilityMarkers         `json:"capabilities"`
 }
 
 type Checkpoint struct {
@@ -115,6 +120,38 @@ type DriftReviewSummary struct {
 	MissingContext                []string `json:"missing_context,omitempty"`
 	RecommendedPlannerAdjustments []string `json:"recommended_planner_adjustments,omitempty"`
 	EvidencePaths                 []string `json:"evidence_paths,omitempty"`
+}
+
+type PendingActionInput struct {
+	Present                bool                   `json:"present"`
+	TurnType               string                 `json:"turn_type,omitempty"`
+	PlannerOutcome         string                 `json:"planner_outcome,omitempty"`
+	PlannerResponseID      string                 `json:"planner_response_id,omitempty"`
+	PendingActionSummary   string                 `json:"pending_action_summary,omitempty"`
+	PendingExecutorPrompt  string                 `json:"pending_executor_prompt,omitempty"`
+	PendingExecutorSummary string                 `json:"pending_executor_prompt_summary,omitempty"`
+	PendingDispatchTarget  *PendingDispatchTarget `json:"pending_dispatch_target,omitempty"`
+	PendingReason          string                 `json:"pending_reason,omitempty"`
+	Held                   bool                   `json:"held,omitempty"`
+	HoldReason             string                 `json:"hold_reason,omitempty"`
+	UpdatedAt              time.Time              `json:"updated_at,omitempty"`
+}
+
+type PendingDispatchTarget struct {
+	Kind         string `json:"kind,omitempty"`
+	WorkerID     string `json:"worker_id,omitempty"`
+	WorkerName   string `json:"worker_name,omitempty"`
+	WorktreePath string `json:"worktree_path,omitempty"`
+}
+
+type ControlInterventionInput struct {
+	Present        bool      `json:"present"`
+	InterventionID string    `json:"intervention_id,omitempty"`
+	RawMessage     string    `json:"raw_message,omitempty"`
+	Source         string    `json:"source,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	PauseReason    string    `json:"pause_reason,omitempty"`
+	QueuedAt       time.Time `json:"queued_at,omitempty"`
 }
 
 type PluginToolDescriptor struct {
@@ -285,11 +322,30 @@ type IntegrationSkippedFile struct {
 type OutputEnvelope struct {
 	ContractVersion string                 `json:"contract_version"`
 	Outcome         OutcomeKind            `json:"outcome"`
+	OperatorStatus  *OperatorStatus        `json:"operator_status,omitempty"`
 	Execute         *ExecuteOutcome        `json:"execute,omitempty"`
 	AskHuman        *AskHumanOutcome       `json:"ask_human,omitempty"`
 	CollectContext  *CollectContextOutcome `json:"collect_context,omitempty"`
 	Pause           *PauseOutcome          `json:"pause,omitempty"`
 	Complete        *CompleteOutcome       `json:"complete,omitempty"`
+}
+
+type ProgressConfidence string
+
+const (
+	ProgressConfidenceLow    ProgressConfidence = "low"
+	ProgressConfidenceMedium ProgressConfidence = "medium"
+	ProgressConfidenceHigh   ProgressConfidence = "high"
+)
+
+type OperatorStatus struct {
+	OperatorMessage    string             `json:"operator_message"`
+	CurrentFocus       string             `json:"current_focus"`
+	NextIntendedStep   string             `json:"next_intended_step"`
+	WhyThisStep        string             `json:"why_this_step"`
+	ProgressPercent    int                `json:"progress_percent"`
+	ProgressConfidence ProgressConfidence `json:"progress_confidence"`
+	ProgressBasis      string             `json:"progress_basis"`
 }
 
 type ExecuteOutcome struct {

@@ -74,3 +74,42 @@ func TestWithDefaultsSetsWorkerConcurrencyLimit(t *testing.T) {
 		t.Fatalf("WorkerConcurrencyLimit = %d, want 2", cfg.WorkerConcurrencyLimit)
 	}
 }
+
+func TestDefaultPlannerModelUsesLatestGPT5Alias(t *testing.T) {
+	t.Parallel()
+
+	if got := Default().PlannerModel; got != PlannerModelLatestGPT5 {
+		t.Fatalf("Default().PlannerModel = %q, want %s", got, PlannerModelLatestGPT5)
+	}
+}
+
+func TestNormalizeVerbosityAcceptsKnownLevels(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: VerbosityNormal},
+		{input: " quiet ", want: VerbosityQuiet},
+		{input: "NORMAL", want: VerbosityNormal},
+		{input: "verbose", want: VerbosityVerbose},
+		{input: "trace", want: VerbosityTrace},
+	} {
+		got, err := NormalizeVerbosity(tc.input)
+		if err != nil {
+			t.Fatalf("NormalizeVerbosity(%q) error = %v", tc.input, err)
+		}
+		if got != tc.want {
+			t.Fatalf("NormalizeVerbosity(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestNormalizeVerbosityRejectsUnknownLevel(t *testing.T) {
+	t.Parallel()
+
+	if _, err := NormalizeVerbosity("chatty"); err == nil {
+		t.Fatal("NormalizeVerbosity(chatty) unexpectedly succeeded")
+	}
+}

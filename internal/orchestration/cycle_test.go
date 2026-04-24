@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"orchestrator/internal/activity"
 	"orchestrator/internal/executor"
 	"orchestrator/internal/journal"
 	"orchestrator/internal/planner"
@@ -256,6 +257,82 @@ func TestCycleRunOnceAskHumanRecordsRawReplyAndPerformsSecondPlannerTurn(t *test
 	}
 	if !containsEventType(events, "human.reply.recorded") {
 		t.Fatal("journal missing human.reply.recorded event")
+	}
+}
+
+func TestCycleRunOncePersistsPlannerOperatorStatusAndEmitsEvent(t *testing.T) {
+	t.Parallel()
+
+	store, journalWriter, run := newTestRuntime(t)
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	events := activity.NewBroker(activity.DefaultHistoryLimit)
+	stream, cancel := events.Subscribe(0)
+	defer cancel()
+
+	fakePlanner := &stubPlanner{
+		results: []planner.Result{
+			{
+				ResponseID: "resp_status",
+				Output: planner.OutputEnvelope{
+					ContractVersion: planner.ContractVersionV1,
+					Outcome:         planner.OutcomePause,
+					Pause:           &planner.PauseOutcome{Reason: "waiting at a safe boundary"},
+					OperatorStatus: &planner.OperatorStatus{
+						OperatorMessage:    "Implementing the next bounded slice.",
+						CurrentFocus:       "planner operator-status persistence",
+						NextIntendedStep:   "surface the safe status block through CLI and protocol",
+						WhyThisStep:        "operators need a live planner-safe summary without exposing hidden reasoning.",
+						ProgressPercent:    46,
+						ProgressConfidence: planner.ProgressConfidenceMedium,
+						ProgressBasis:      "cycle persistence and event routing already exist; this slice is wiring operator status through them.",
+					},
+				},
+			},
+		},
+	}
+
+	cycle := Cycle{
+		Store:   store,
+		Journal: journalWriter,
+		Planner: fakePlanner,
+		Events:  events,
+	}
+
+	result, err := cycle.RunOnce(context.Background(), run)
+	if err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if result.Run.PlannerOperatorStatus == nil {
+		t.Fatal("PlannerOperatorStatus = nil, want persisted planner-safe status")
+	}
+	if result.Run.PlannerOperatorStatus.OperatorMessage != "Implementing the next bounded slice." {
+		t.Fatalf("OperatorMessage = %q, want persisted operator message", result.Run.PlannerOperatorStatus.OperatorMessage)
+	}
+
+	seenPlannerCompleted := false
+	seenOperatorMessage := false
+	deadline := time.After(2 * time.Second)
+	for !seenPlannerCompleted || !seenOperatorMessage {
+		select {
+		case event := <-stream:
+			if event.Event == "planner_turn_completed" {
+				seenPlannerCompleted = true
+				if payload, _ := event.Payload["operator_status"].(map[string]any); payload == nil || payload["operator_message"] != "Implementing the next bounded slice." {
+					t.Fatalf("planner_turn_completed operator_status = %#v, want live operator status payload", event.Payload["operator_status"])
+				}
+			}
+			if event.Event == "planner_operator_message" {
+				seenOperatorMessage = true
+				if event.Payload["operator_message"] != "Implementing the next bounded slice." {
+					t.Fatalf("planner_operator_message payload = %#v, want operator message", event.Payload)
+				}
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for planner operator events")
+		}
 	}
 }
 
@@ -589,6 +666,199 @@ func TestCycleRunOnceExecuteApprovalRequiredPersistsStateAndStopsBeforeSecondPla
 	}
 }
 
+func TestCycleRunOnceQueuedControlMessageTriggersPlannerInterventionAtSafePoint(t *testing.T) {
+	t.Parallel()
+
+	store, journalWriter, run := newTestRuntime(t)
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	events := activity.NewBroker(activity.DefaultHistoryLimit)
+	eventStream, cancel := events.Subscribe(0)
+	defer cancel()
+
+	fakePlanner := &stubPlanner{
+		results: []planner.Result{
+			{
+				ResponseID: "resp_execute_initial",
+				Output: planner.OutputEnvelope{
+					ContractVersion: planner.ContractVersionV1,
+					Outcome:         planner.OutcomeExecute,
+					Execute: &planner.ExecuteOutcome{
+						Task:               "apply the blue wall change",
+						AcceptanceCriteria: []string{"bounded executor handoff prepared"},
+						WriteScope:         []string{"game/walls.go"},
+					},
+				},
+			},
+			{
+				ResponseID: "resp_pause_after_intervention",
+				Output: planner.OutputEnvelope{
+					ContractVersion: planner.ContractVersionV1,
+					Outcome:         planner.OutcomePause,
+					Pause: &planner.PauseOutcome{
+						Reason: "operator intervention received; pause before any executor dispatch",
+					},
+				},
+			},
+		},
+		afterPlan: func(call int, _ planner.InputEnvelope, _ string) {
+			if call != 1 {
+				return
+			}
+			if _, err := store.RecordControlMessage(context.Background(), state.CreateControlMessageParams{
+				RunID:         run.ID,
+				TargetBinding: "latest_unfinished_run",
+				Source:        "control_chat",
+				Reason:        "operator_intervention",
+				RawText:       "Make that wall red, not blue.",
+				CreatedAt:     time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("RecordControlMessage() error = %v", err)
+			}
+		},
+	}
+
+	fakeExecutor := &stubExecutor{}
+	cycle := Cycle{
+		Store:    store,
+		Journal:  journalWriter,
+		Planner:  fakePlanner,
+		Executor: fakeExecutor,
+		Events:   events,
+	}
+
+	result, err := cycle.RunOnce(context.Background(), run)
+	if err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+
+	if fakePlanner.calls != 2 {
+		t.Fatalf("planner calls = %d, want 2", fakePlanner.calls)
+	}
+	if fakeExecutor.calls != 0 {
+		t.Fatalf("executor calls = %d, want 0 after intervention pause", fakeExecutor.calls)
+	}
+	if result.ExecutorDispatched {
+		t.Fatal("ExecutorDispatched = true, want false after intervention pause")
+	}
+	if result.SecondPlannerTurn == nil {
+		t.Fatal("SecondPlannerTurn = nil, want intervention planner turn")
+	}
+	if result.SecondPlannerTurn.Output.Outcome != planner.OutcomePause {
+		t.Fatalf("SecondPlannerTurn outcome = %q, want pause", result.SecondPlannerTurn.Output.Outcome)
+	}
+	if result.Run.LatestCheckpoint.Label != "planner_turn_post_control_intervention" {
+		t.Fatalf("LatestCheckpoint.Label = %q, want planner_turn_post_control_intervention", result.Run.LatestCheckpoint.Label)
+	}
+	if result.Run.PreviousResponseID != "resp_pause_after_intervention" {
+		t.Fatalf("PreviousResponseID = %q, want resp_pause_after_intervention", result.Run.PreviousResponseID)
+	}
+
+	if fakePlanner.inputs[0].ControlIntervention != nil {
+		t.Fatalf("first planner input control_intervention = %#v, want nil", fakePlanner.inputs[0].ControlIntervention)
+	}
+	if fakePlanner.inputs[1].ControlIntervention == nil {
+		t.Fatal("second planner input missing control_intervention")
+	}
+	if fakePlanner.inputs[1].ControlIntervention.RawMessage != "Make that wall red, not blue." {
+		t.Fatalf("control_intervention.raw_message = %q, want raw operator message", fakePlanner.inputs[1].ControlIntervention.RawMessage)
+	}
+	if fakePlanner.inputs[1].ControlIntervention.Source != "control_chat" {
+		t.Fatalf("control_intervention.source = %q, want control_chat", fakePlanner.inputs[1].ControlIntervention.Source)
+	}
+	if fakePlanner.inputs[1].ControlIntervention.PauseReason != "operator_intervention_at_safe_point" {
+		t.Fatalf("control_intervention.pause_reason = %q, want operator_intervention_at_safe_point", fakePlanner.inputs[1].ControlIntervention.PauseReason)
+	}
+	if fakePlanner.inputs[1].PendingAction == nil {
+		t.Fatal("second planner input missing pending_action")
+	}
+	if !fakePlanner.inputs[1].PendingAction.Present {
+		t.Fatal("second planner input pending_action.present = false, want true")
+	}
+	if fakePlanner.inputs[1].PendingAction.PlannerOutcome != "execute" {
+		t.Fatalf("pending_action.planner_outcome = %q, want execute", fakePlanner.inputs[1].PendingAction.PlannerOutcome)
+	}
+	if fakePlanner.inputs[1].PendingAction.TurnType != "executor_dispatch" {
+		t.Fatalf("pending_action.turn_type = %q, want executor_dispatch", fakePlanner.inputs[1].PendingAction.TurnType)
+	}
+	if !fakePlanner.inputs[1].PendingAction.Held {
+		t.Fatal("pending_action.held = false, want true")
+	}
+	if fakePlanner.inputs[1].PendingAction.HoldReason != "control_message_queued" {
+		t.Fatalf("pending_action.hold_reason = %q, want control_message_queued", fakePlanner.inputs[1].PendingAction.HoldReason)
+	}
+	if fakePlanner.inputs[1].PendingAction.PendingDispatchTarget == nil || fakePlanner.inputs[1].PendingAction.PendingDispatchTarget.Kind != "primary_executor" {
+		t.Fatalf("pending_action.pending_dispatch_target = %#v, want primary_executor", fakePlanner.inputs[1].PendingAction.PendingDispatchTarget)
+	}
+	if !strings.Contains(fakePlanner.inputs[1].PendingAction.PendingExecutorPrompt, "apply the blue wall change") {
+		t.Fatalf("pending_action.pending_executor_prompt missing execute task:\n%s", fakePlanner.inputs[1].PendingAction.PendingExecutorPrompt)
+	}
+
+	queued, err := store.ListControlMessages(context.Background(), run.ID, state.ControlMessageQueued, 10)
+	if err != nil {
+		t.Fatalf("ListControlMessages(queued) error = %v", err)
+	}
+	if len(queued) != 0 {
+		t.Fatalf("queued control messages = %#v, want none after intervention consumption", queued)
+	}
+	consumed, err := store.ListControlMessages(context.Background(), run.ID, state.ControlMessageConsumed, 10)
+	if err != nil {
+		t.Fatalf("ListControlMessages(consumed) error = %v", err)
+	}
+	if len(consumed) != 1 {
+		t.Fatalf("consumed control messages len = %d, want 1", len(consumed))
+	}
+
+	pendingAction, found, err := store.GetPendingAction(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("GetPendingAction() error = %v", err)
+	}
+	if found {
+		t.Fatalf("pending action = %#v, want cleared after intervention pause turn", pendingAction)
+	}
+
+	journalEvents, err := journalWriter.ReadRecent(run.ID, 20)
+	if err != nil {
+		t.Fatalf("ReadRecent() error = %v", err)
+	}
+	if !containsEventType(journalEvents, "control.intervention.pending") {
+		t.Fatal("journal missing control.intervention.pending event")
+	}
+
+	requiredEvents := map[string]bool{
+		"pending_action_updated":              false,
+		"safe_point_intervention_pending":     false,
+		"planner_intervention_turn_started":   false,
+		"control_message_consumed":            false,
+		"planner_intervention_turn_completed": false,
+		"pending_action_cleared":              false,
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		allSeen := true
+		for _, seen := range requiredEvents {
+			if !seen {
+				allSeen = false
+				break
+			}
+		}
+		if allSeen {
+			break
+		}
+
+		select {
+		case event := <-eventStream:
+			if _, ok := requiredEvents[event.Event]; ok {
+				requiredEvents[event.Event] = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for intervention events: %#v", requiredEvents)
+		}
+	}
+}
+
 func TestCycleRunOncePersistsAndSurfacesNonExecuteOutcomeWithoutDispatch(t *testing.T) {
 	t.Parallel()
 
@@ -749,6 +1019,15 @@ func TestCycleRunOnceCollectContextPersistsResultsAndPerformsSecondPlannerTurn(t
 	if result.Run.CollectedContext.Focus != "Inspect the requested repo paths." {
 		t.Fatalf("CollectedContext.Focus = %q", result.Run.CollectedContext.Focus)
 	}
+	if result.Run.CollectedContext.ArtifactPath == "" {
+		t.Fatal("CollectedContext.ArtifactPath = empty, want run-scoped context artifact")
+	}
+	if !strings.HasPrefix(result.Run.CollectedContext.ArtifactPath, filepath.ToSlash(filepath.Join(contextArtifactDir, run.ID))+"/") {
+		t.Fatalf("CollectedContext.ArtifactPath = %q, want context artifact path under %s", result.Run.CollectedContext.ArtifactPath, contextArtifactDir)
+	}
+	if _, err := os.Stat(filepath.Join(run.RepoPath, filepath.FromSlash(result.Run.CollectedContext.ArtifactPath))); err != nil {
+		t.Fatalf("run-scoped context artifact missing at %s: %v", result.Run.CollectedContext.ArtifactPath, err)
+	}
 	if len(result.Run.CollectedContext.Results) != 3 {
 		t.Fatalf("CollectedContext.Results len = %d, want 3", len(result.Run.CollectedContext.Results))
 	}
@@ -789,11 +1068,127 @@ func TestCycleRunOnceCollectContextPersistsResultsAndPerformsSecondPlannerTurn(t
 	if !containsEventType(events, "context.collection.completed") {
 		t.Fatal("journal missing context.collection.completed event")
 	}
+	completedEvent := latestEventType(events, "context.collection.completed")
+	if completedEvent.ArtifactPath == "" {
+		t.Fatal("context.collection.completed missing run-scoped artifact path")
+	}
+	if completedEvent.ArtifactPath != result.Run.CollectedContext.ArtifactPath {
+		t.Fatalf("completedEvent.ArtifactPath = %q, want %q", completedEvent.ArtifactPath, result.Run.CollectedContext.ArtifactPath)
+	}
 	if countEventType(events, "context.collection.recorded") != 3 {
 		t.Fatalf("context.collection.recorded count = %d, want 3", countEventType(events, "context.collection.recorded"))
 	}
 	if countEventType(events, "planner.turn.completed") != 2 {
 		t.Fatalf("planner.turn.completed count = %d, want 2", countEventType(events, "planner.turn.completed"))
+	}
+}
+
+func TestCycleRunOnceCollectContextWorkerCreatePersistsPendingStateAndFeedsPlanner(t *testing.T) {
+	store, journalWriter, run := newTestRuntime(t)
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	installFakeGitForCycleTests(t)
+
+	fakePlanner := &stubPlanner{
+		results: []planner.Result{
+			{
+				ResponseID: "resp_collect_worker",
+				Output: planner.OutputEnvelope{
+					ContractVersion: planner.ContractVersionV1,
+					Outcome:         planner.OutcomeCollectContext,
+					CollectContext: &planner.CollectContextOutcome{
+						Focus: "Create an isolated worker before deciding whether to dispatch it.",
+						WorkerActions: []planner.WorkerAction{
+							{
+								Action:     planner.WorkerActionCreate,
+								WorkerName: "code-survey",
+								Scope:      "repo survey",
+							},
+						},
+					},
+				},
+			},
+			{
+				ResponseID: "resp_pause",
+				Output: planner.OutputEnvelope{
+					ContractVersion: planner.ContractVersionV1,
+					Outcome:         planner.OutcomePause,
+					Pause:           &planner.PauseOutcome{Reason: "stop after recording the worker create result"},
+				},
+			},
+		},
+	}
+
+	cycle := Cycle{
+		Store:   store,
+		Journal: journalWriter,
+		Planner: fakePlanner,
+	}
+
+	result, err := cycle.RunOnce(context.Background(), run)
+	if err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+
+	if result.Run.CollectedContext == nil {
+		t.Fatal("CollectedContext = nil, want persisted worker action result")
+	}
+	if result.Run.CollectedContext.ArtifactPath == "" {
+		t.Fatal("CollectedContext.ArtifactPath = empty, want run-scoped context artifact")
+	}
+	if len(result.Run.CollectedContext.WorkerResults) != 1 {
+		t.Fatalf("WorkerResults len = %d, want 1", len(result.Run.CollectedContext.WorkerResults))
+	}
+	workerResult := result.Run.CollectedContext.WorkerResults[0]
+	if workerResult.Worker == nil {
+		t.Fatal("WorkerResults[0].Worker = nil, want worker summary")
+	}
+	if workerResult.Worker.WorkerStatus != string(state.WorkerStatusIdle) {
+		t.Fatalf("WorkerResults[0].Worker.WorkerStatus = %q, want %q", workerResult.Worker.WorkerStatus, state.WorkerStatusIdle)
+	}
+	if !strings.Contains(workerResult.Message, "awaiting explicit dispatch") {
+		t.Fatalf("WorkerResults[0].Message = %q, want explicit dispatch guidance", workerResult.Message)
+	}
+
+	secondInput := fakePlanner.inputs[1]
+	if secondInput.CollectedContext == nil {
+		t.Fatal("second planner input missing collected_context summary")
+	}
+	if len(secondInput.CollectedContext.WorkerResults) != 1 {
+		t.Fatalf("second planner worker_results len = %d, want 1", len(secondInput.CollectedContext.WorkerResults))
+	}
+	if secondInput.CollectedContext.WorkerResults[0].Worker == nil {
+		t.Fatal("second planner worker result missing worker summary")
+	}
+	if secondInput.CollectedContext.WorkerResults[0].Worker.WorkerStatus != string(state.WorkerStatusIdle) {
+		t.Fatalf("second planner worker status = %q, want %q", secondInput.CollectedContext.WorkerResults[0].Worker.WorkerStatus, state.WorkerStatusIdle)
+	}
+	if !strings.Contains(secondInput.CollectedContext.WorkerResults[0].Message, "awaiting explicit dispatch") {
+		t.Fatalf("second planner worker result message = %q, want explicit dispatch guidance", secondInput.CollectedContext.WorkerResults[0].Message)
+	}
+
+	workers, err := store.ListWorkers(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("ListWorkers() error = %v", err)
+	}
+	if len(workers) != 1 {
+		t.Fatalf("workers len = %d, want 1", len(workers))
+	}
+	if workers[0].WorkerStatus != state.WorkerStatusIdle {
+		t.Fatalf("worker status = %q, want %q", workers[0].WorkerStatus, state.WorkerStatusIdle)
+	}
+	if strings.TrimSpace(workers[0].ExecutorThreadID) != "" || strings.TrimSpace(workers[0].ExecutorTurnID) != "" {
+		t.Fatalf("worker executor ids = (%q,%q), want empty for created-but-not-dispatched worker", workers[0].ExecutorThreadID, workers[0].ExecutorTurnID)
+	}
+
+	events, err := journalWriter.ReadRecent(run.ID, 12)
+	if err != nil {
+		t.Fatalf("ReadRecent() error = %v", err)
+	}
+	completedEvent := latestEventType(events, "context.collection.completed")
+	if completedEvent.ArtifactPath == "" {
+		t.Fatal("context.collection.completed missing run-scoped artifact path")
 	}
 }
 
@@ -2524,12 +2919,16 @@ type stubPlanner struct {
 	calls               int
 	inputs              []planner.InputEnvelope
 	previousResponseIDs []string
+	afterPlan           func(call int, input planner.InputEnvelope, previousResponseID string)
 }
 
 func (s *stubPlanner) Plan(_ context.Context, input planner.InputEnvelope, previousResponseID string) (planner.Result, error) {
 	s.calls++
 	s.inputs = append(s.inputs, input)
 	s.previousResponseIDs = append(s.previousResponseIDs, previousResponseID)
+	if s.afterPlan != nil {
+		s.afterPlan(s.calls, input, previousResponseID)
+	}
 	if s.err != nil {
 		return planner.Result{}, s.err
 	}

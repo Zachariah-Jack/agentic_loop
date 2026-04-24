@@ -11,8 +11,10 @@ import (
 	"sort"
 	"strings"
 
+	"orchestrator/internal/activity"
 	"orchestrator/internal/config"
 	"orchestrator/internal/logging"
+	"orchestrator/internal/runtimecfg"
 	"orchestrator/internal/state"
 )
 
@@ -45,6 +47,8 @@ type Invocation struct {
 	Args       []string
 	Config     config.Config
 	ConfigPath string
+	RuntimeCfg *runtimecfg.Manager
+	Events     *activity.Broker
 	Logger     *logging.Logger
 	RepoRoot   string
 	Layout     state.Layout
@@ -61,6 +65,7 @@ func NewApp(opts Options) *App {
 
 	app.commands = map[string]Command{
 		"auto":           newAutoCommand(),
+		"control":        newControlCommand(),
 		"continue":       newContinueCommand(),
 		"doctor":         newDoctorCommand(),
 		"executor":       newExecutorCommand(),
@@ -124,13 +129,16 @@ func (a *App) Execute(ctx context.Context, args []string) error {
 	repoRoot := resolveRepoRoot(wd)
 	layout := state.ResolveLayout(repoRoot)
 	logger := logging.New(a.stderr, cfg.LogLevel)
+	runtimeManager := runtimecfg.NewManager(cfgPath, cfg)
 	inv := Invocation{
 		Stdin:      a.stdin,
 		Stdout:     a.stdout,
 		Stderr:     a.stderr,
 		Args:       remainder[1:],
-		Config:     cfg,
+		Config:     runtimeManager.Snapshot(),
 		ConfigPath: cfgPath,
+		RuntimeCfg: runtimeManager,
+		Events:     activity.NewBroker(activity.DefaultHistoryLimit),
 		Logger:     logger,
 		RepoRoot:   repoRoot,
 		Layout:     layout,
@@ -179,7 +187,7 @@ func (a *App) printRootHelp() {
 	fmt.Fprintln(a.stdout, "  orchestrator [--config PATH] <command> [args]")
 	fmt.Fprintln(a.stdout, "")
 	fmt.Fprintln(a.stdout, "Typical flow:")
-	fmt.Fprintln(a.stdout, "  setup -> init -> run/auto start -> resume/continue/auto continue -> status/history/doctor")
+	fmt.Fprintln(a.stdout, "  setup -> init -> run -> continue/status/history/doctor")
 	fmt.Fprintln(a.stdout, "")
 	fmt.Fprintln(a.stdout, "Commands:")
 

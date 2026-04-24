@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
+	"orchestrator/internal/config"
 	"orchestrator/internal/orchestration"
 	"orchestrator/internal/planner"
 	"orchestrator/internal/state"
@@ -26,6 +28,7 @@ type commandReport struct {
 	CycleNumber                int
 	PlannerModel               string
 	Run                        state.Run
+	Continuous                 bool
 	StopReason                 string
 	LatestArtifactPath         string
 	FirstPlannerResult         planner.Result
@@ -35,13 +38,24 @@ type commandReport struct {
 	CycleError                 error
 }
 
+type operatorStatusSnapshot struct {
+	ContractVersion    string `json:"contract_version,omitempty"`
+	OperatorMessage    string `json:"operator_message,omitempty"`
+	CurrentFocus       string `json:"current_focus,omitempty"`
+	NextIntendedStep   string `json:"next_intended_step,omitempty"`
+	WhyThisStep        string `json:"why_this_step,omitempty"`
+	ProgressPercent    int    `json:"progress_percent"`
+	ProgressConfidence string `json:"progress_confidence,omitempty"`
+	ProgressBasis      string `json:"progress_basis,omitempty"`
+}
+
 func resolveOutputVerbosity(inv Invocation) outputVerbosity {
-	switch strings.ToLower(strings.TrimSpace(inv.Config.Verbosity)) {
-	case string(outputVerbosityQuiet):
+	switch currentConfig(inv).Verbosity {
+	case config.VerbosityQuiet:
 		return outputVerbosityQuiet
-	case string(outputVerbosityVerbose):
+	case config.VerbosityVerbose:
 		return outputVerbosityVerbose
-	case string(outputVerbosityTrace):
+	case config.VerbosityTrace:
 		return outputVerbosityTrace
 	default:
 		return outputVerbosityNormal
@@ -65,6 +79,7 @@ func writeCommandReport(stdout io.Writer, verbosity outputVerbosity, report comm
 		fmt.Fprintf(stdout, "cycle_number: %d\n", report.CycleNumber)
 	}
 	fmt.Fprintf(stdout, "status: %s\n", report.Run.Status)
+	fmt.Fprintf(stdout, "elapsed: %s\n", runElapsedLabel(report.Run, time.Now().UTC()))
 	fmt.Fprintf(stdout, "first_planner_outcome: %s\n", valueOrUnavailable(string(report.FirstPlannerResult.Output.Outcome)))
 	fmt.Fprintf(stdout, "second_planner_outcome: %s\n", valueOrUnavailable(secondPlannerOutcome(report.ReconsiderationPlannerTurn, report.SecondPlannerTurn)))
 	fmt.Fprintf(stdout, "executor_dispatched: %t\n", report.ExecutorDispatched)
@@ -78,16 +93,19 @@ func writeCommandReport(stdout io.Writer, verbosity outputVerbosity, report comm
 		fmt.Fprintf(stdout, "executor_thread_id: %s\n", valueOrUnavailable(report.Run.ExecutorThreadID))
 		fmt.Fprintf(stdout, "executor_turn_id: %s\n", valueOrUnavailable(report.Run.ExecutorTurnID))
 		fmt.Fprintf(stdout, "executor_turn_status: %s\n", valueOrUnavailable(report.Run.ExecutorTurnStatus))
+		fmt.Fprintf(stdout, "executor_failure_stage: %s\n", valueOrUnavailable(report.Run.ExecutorLastFailureStage))
+		fmt.Fprintf(stdout, "executor_last_error: %s\n", valueOrUnavailable(report.Run.ExecutorLastError))
 		fmt.Fprintf(stdout, "executor_approval_state: %s\n", valueOrUnavailable(executorApprovalStateValue(report.Run)))
 		fmt.Fprintf(stdout, "executor_approval_kind: %s\n", valueOrUnavailable(executorApprovalKindValue(report.Run)))
 		fmt.Fprintf(stdout, "executor_interruptible: %t\n", executorTurnInterruptible(report.Run))
 		fmt.Fprintf(stdout, "executor_steerable: %t\n", executorTurnSteerable(report.Run))
 		fmt.Fprintf(stdout, "executor_last_control_action: %s\n", valueOrUnavailable(executorLastControlActionValue(report.Run)))
 	}
-	fmt.Fprintf(stdout, "next_operator_action: %s\n", nextOperatorAction(report.Command, report.Run, report.StopReason, report.CycleError))
+	fmt.Fprintf(stdout, "next_operator_action: %s\n", nextOperatorAction(report.Command, report.Run, report.StopReason, report.CycleError, report.Continuous))
 	if report.CycleError != nil {
 		fmt.Fprintf(stdout, "cycle_error: %s\n", report.CycleError)
 	}
+	writeOperatorStatus(stdout, verbosity, "planner.", latestOperatorStatusForReport(report))
 
 	if !verbosity.verboseEnabled() {
 		return nil
@@ -132,7 +150,83 @@ func writeCommandReport(stdout io.Writer, verbosity outputVerbosity, report comm
 	return nil
 }
 
-func nextOperatorAction(command string, run state.Run, stopReason string, cycleErr error) string {
+func latestOperatorStatusForReport(report commandReport) *operatorStatusSnapshot {
+	for _, result := range []*planner.Result{
+		preferredSecondPlannerTurn(report.ReconsiderationPlannerTurn, report.SecondPlannerTurn),
+		&report.FirstPlannerResult,
+	} {
+		status := operatorStatusFromPlannerResult(result)
+		if status != nil {
+			return status
+		}
+	}
+	return operatorStatusFromState(report.Run.PlannerOperatorStatus)
+}
+
+func operatorStatusFromPlannerResult(result *planner.Result) *operatorStatusSnapshot {
+	if result == nil {
+		return nil
+	}
+	return operatorStatusFromPlanner(result.Output.ContractVersion, result.Output.OperatorStatus)
+}
+
+func operatorStatusFromPlanner(contractVersion string, status *planner.OperatorStatus) *operatorStatusSnapshot {
+	if status == nil {
+		return nil
+	}
+
+	return &operatorStatusSnapshot{
+		ContractVersion:    strings.TrimSpace(contractVersion),
+		OperatorMessage:    strings.TrimSpace(status.OperatorMessage),
+		CurrentFocus:       strings.TrimSpace(status.CurrentFocus),
+		NextIntendedStep:   strings.TrimSpace(status.NextIntendedStep),
+		WhyThisStep:        strings.TrimSpace(status.WhyThisStep),
+		ProgressPercent:    status.ProgressPercent,
+		ProgressConfidence: strings.TrimSpace(string(status.ProgressConfidence)),
+		ProgressBasis:      strings.TrimSpace(status.ProgressBasis),
+	}
+}
+
+func operatorStatusFromState(status *state.PlannerOperatorStatus) *operatorStatusSnapshot {
+	if status == nil {
+		return nil
+	}
+
+	return &operatorStatusSnapshot{
+		ContractVersion:    strings.TrimSpace(status.ContractVersion),
+		OperatorMessage:    strings.TrimSpace(status.OperatorMessage),
+		CurrentFocus:       strings.TrimSpace(status.CurrentFocus),
+		NextIntendedStep:   strings.TrimSpace(status.NextIntendedStep),
+		WhyThisStep:        strings.TrimSpace(status.WhyThisStep),
+		ProgressPercent:    status.ProgressPercent,
+		ProgressConfidence: strings.TrimSpace(status.ProgressConfidence),
+		ProgressBasis:      strings.TrimSpace(status.ProgressBasis),
+	}
+}
+
+func writeOperatorStatus(stdout io.Writer, verbosity outputVerbosity, prefix string, status *operatorStatusSnapshot) {
+	if stdout == nil || verbosity == outputVerbosityQuiet || status == nil {
+		return
+	}
+
+	fmt.Fprintf(stdout, "%soperator_message: %s\n", prefix, valueOrUnavailable(status.OperatorMessage))
+	fmt.Fprintf(stdout, "%sprogress_percent: %d\n", prefix, status.ProgressPercent)
+	if verbosity.verboseEnabled() {
+		fmt.Fprintf(stdout, "%scurrent_focus: %s\n", prefix, valueOrUnavailable(status.CurrentFocus))
+		fmt.Fprintf(stdout, "%snext_intended_step: %s\n", prefix, valueOrUnavailable(status.NextIntendedStep))
+		fmt.Fprintf(stdout, "%swhy_this_step: %s\n", prefix, valueOrUnavailable(status.WhyThisStep))
+	}
+	if verbosity.traceEnabled() {
+		fmt.Fprintf(stdout, "%scontract_version: %s\n", prefix, valueOrUnavailable(status.ContractVersion))
+		fmt.Fprintf(stdout, "%sprogress_confidence: %s\n", prefix, valueOrUnavailable(status.ProgressConfidence))
+		fmt.Fprintf(stdout, "%sprogress_basis: %s\n", prefix, valueOrUnavailable(status.ProgressBasis))
+		if encoded, err := json.MarshalIndent(status, "", "  "); err == nil {
+			fmt.Fprintf(stdout, "%sstatus_json: %s\n", prefix, string(encoded))
+		}
+	}
+}
+
+func nextOperatorAction(command string, run state.Run, stopReason string, cycleErr error, continuous bool) string {
 	switch {
 	case run.Status == state.StatusCompleted:
 		return "no_action_required_run_completed"
@@ -146,6 +240,8 @@ func nextOperatorAction(command string, run state.Run, stopReason string, cycleE
 		return "inspect_status"
 	case !isRunResumable(run):
 		return "run_new_goal"
+	case command == "run" && continuous:
+		return "continue_existing_run"
 	case command == "run":
 		return "resume_existing_run"
 	case command == "resume" || command == "continue" || strings.HasPrefix(command, "auto"):

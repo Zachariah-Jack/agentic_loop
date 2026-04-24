@@ -46,7 +46,7 @@ func TestRunCommandFirstTurnCompleteEndToEnd(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := runRun(context.Background(), Invocation{
-		Args:     []string{"--goal", "complete on the first planner turn"},
+		Args:     []string{"--goal", "complete on the first planner turn", "--bounded"},
 		Stdin:    strings.NewReader(""),
 		Stdout:   &stdout,
 		Stderr:   &bytes.Buffer{},
@@ -110,6 +110,91 @@ func TestRunCommandFirstTurnCompleteEndToEnd(t *testing.T) {
 	}
 }
 
+func TestRunCommandDefaultsToForegroundProgressUntilCompleteEndToEnd(t *testing.T) {
+	repoRoot := t.TempDir()
+	writeRepoMarkerFiles(t, repoRoot)
+	layout := state.ResolveLayout(repoRoot)
+
+	restoreRunner := stubBoundedCycleRunner(realCycleRunner(
+		&commandPlanner{
+			results: []planner.Result{
+				{
+					ResponseID: "resp_pause",
+					Output: planner.OutputEnvelope{
+						ContractVersion: planner.ContractVersionV1,
+						Outcome:         planner.OutcomePause,
+						Pause:           &planner.PauseOutcome{Reason: "keep going without operator babysitting"},
+					},
+				},
+				{
+					ResponseID: "resp_complete",
+					Output: planner.OutputEnvelope{
+						ContractVersion: planner.ContractVersionV1,
+						Outcome:         planner.OutcomeComplete,
+						Complete:        &planner.CompleteOutcome{Summary: "the unattended run completed the requested slice"},
+					},
+				},
+			},
+		},
+		nil,
+		nil,
+	))
+	defer restoreRunner()
+
+	var stdout bytes.Buffer
+	err := runRun(context.Background(), Invocation{
+		Args:     []string{"--goal", "keep advancing until the run really stops"},
+		Stdin:    strings.NewReader(""),
+		Stdout:   &stdout,
+		Stderr:   &bytes.Buffer{},
+		RepoRoot: repoRoot,
+		Layout:   layout,
+		Config:   config.Default(),
+		Version:  "test",
+	})
+	if err != nil {
+		t.Fatalf("runRun() error = %v", err)
+	}
+
+	for _, want := range []string{
+		"run.stop_flag_path: " + autoStopFlagPath(layout),
+		"command: run",
+		"cycle_number: 1",
+		"cycle_number: 2",
+		"status: completed",
+		"stop_reason: planner_complete",
+		"latest_checkpoint.label: planner_declared_complete",
+		"next_operator_action: no_action_required_run_completed",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q\n%s", want, stdout.String())
+		}
+	}
+
+	run := latestRunForLayout(t, layout)
+	if run.Status != state.StatusCompleted {
+		t.Fatalf("Run.Status = %q, want completed", run.Status)
+	}
+	if run.PreviousResponseID != "resp_complete" {
+		t.Fatalf("PreviousResponseID = %q, want resp_complete", run.PreviousResponseID)
+	}
+	if run.LatestStopReason != orchestration.StopReasonPlannerComplete {
+		t.Fatalf("LatestStopReason = %q, want %q", run.LatestStopReason, orchestration.StopReasonPlannerComplete)
+	}
+
+	events := readContinueEvents(t, layout, run.ID, 16)
+	if countJournalEvents(events, "run.started") != 1 {
+		t.Fatalf("run.started count = %d, want 1", countJournalEvents(events, "run.started"))
+	}
+	if countJournalEvents(events, "run.cycle.completed") != 2 {
+		t.Fatalf("run.cycle.completed count = %d, want 2", countJournalEvents(events, "run.cycle.completed"))
+	}
+	stopEvent := latestJournalEvent(events, "run.stopped")
+	if stopEvent.StopReason != orchestration.StopReasonPlannerComplete {
+		t.Fatalf("run.stopped stop reason = %q, want %q", stopEvent.StopReason, orchestration.StopReasonPlannerComplete)
+	}
+}
+
 func TestRunCommandNonExecuteOutcomeEndToEnd(t *testing.T) {
 	repoRoot := t.TempDir()
 	writeRepoMarkerFiles(t, repoRoot)
@@ -135,7 +220,7 @@ func TestRunCommandNonExecuteOutcomeEndToEnd(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := runRun(context.Background(), Invocation{
-		Args:     []string{"--goal", "persist one non-execute planner outcome"},
+		Args:     []string{"--goal", "persist one non-execute planner outcome", "--bounded"},
 		Stdin:    strings.NewReader(""),
 		Stdout:   &stdout,
 		Stderr:   &bytes.Buffer{},
@@ -212,7 +297,7 @@ func TestRunCommandCollectContextThenSecondPlannerTurnEndToEnd(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := runRun(context.Background(), Invocation{
-		Args:     []string{"--goal", "collect context once and stop"},
+		Args:     []string{"--goal", "collect context once and stop", "--bounded"},
 		Stdin:    strings.NewReader(""),
 		Stdout:   &stdout,
 		Stderr:   &bytes.Buffer{},
@@ -288,7 +373,7 @@ func TestRunCommandCollectContextThenCompleteEndToEnd(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := runRun(context.Background(), Invocation{
-		Args:     []string{"--goal", "collect context and complete"},
+		Args:     []string{"--goal", "collect context and complete", "--bounded"},
 		Stdin:    strings.NewReader(""),
 		Stdout:   &stdout,
 		Stderr:   &bytes.Buffer{},
@@ -387,7 +472,7 @@ func TestRunCommandAskHumanTerminalPathEndToEnd(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := runRun(context.Background(), Invocation{
-		Args:     []string{"--goal", "ask one human question and stop"},
+		Args:     []string{"--goal", "ask one human question and stop", "--bounded"},
 		Stdin:    strings.NewReader("raw terminal reply\n"),
 		Stdout:   &stdout,
 		Stderr:   &bytes.Buffer{},
@@ -477,7 +562,7 @@ func TestRunCommandExecuteThenCompleteEndToEnd(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := runRun(context.Background(), Invocation{
-		Args:     []string{"--goal", "execute once then complete"},
+		Args:     []string{"--goal", "execute once then complete", "--bounded"},
 		Stdin:    strings.NewReader(""),
 		Stdout:   &stdout,
 		Stderr:   &bytes.Buffer{},
@@ -733,7 +818,7 @@ func TestRunCommandFallsBackToTerminalWhenNTFYWaitFailsEndToEnd(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := runRun(context.Background(), Invocation{
-		Args:     []string{"--goal", "use terminal fallback when ntfy wait fails"},
+		Args:     []string{"--goal", "use terminal fallback when ntfy wait fails", "--bounded"},
 		Stdin:    strings.NewReader("fallback terminal reply\n"),
 		Stdout:   &stdout,
 		Stderr:   &bytes.Buffer{},
@@ -789,7 +874,7 @@ func TestRunCommandMissingPlannerAPIKeyPersistsMechanicalFailure(t *testing.T) {
 	cfg.Verbosity = "verbose"
 
 	err := runRun(context.Background(), Invocation{
-		Args:     []string{"--goal", "fail immediately without planner api key"},
+		Args:     []string{"--goal", "fail immediately without planner api key", "--bounded"},
 		Stdin:    strings.NewReader(""),
 		Stdout:   &stdout,
 		Stderr:   &bytes.Buffer{},
@@ -855,7 +940,7 @@ func TestRunCommandPlannerValidationFailurePersistsArtifactAndStopReason(t *test
 	cfg.Verbosity = "verbose"
 
 	err := runRun(context.Background(), Invocation{
-		Args:     []string{"--goal", "surface planner validation failures mechanically"},
+		Args:     []string{"--goal", "surface planner validation failures mechanically", "--bounded"},
 		Stdin:    strings.NewReader(""),
 		Stdout:   &stdout,
 		Stderr:   &bytes.Buffer{},
@@ -960,7 +1045,7 @@ func TestRunCommandExecutorFailurePersistsStopReasonWithoutSecondPlannerTurn(t *
 	cfg.Verbosity = "verbose"
 
 	err := runRun(context.Background(), Invocation{
-		Args:     []string{"--goal", "surface executor failures honestly"},
+		Args:     []string{"--goal", "surface executor failures honestly", "--bounded"},
 		Stdin:    strings.NewReader(""),
 		Stdout:   &stdout,
 		Stderr:   &bytes.Buffer{},
@@ -1062,7 +1147,7 @@ func TestRunCommandTerminalAskHumanReadFailurePersistsMechanicalFailure(t *testi
 	cfg.Verbosity = "verbose"
 
 	err := runRun(context.Background(), Invocation{
-		Args:     []string{"--goal", "surface terminal input failure honestly"},
+		Args:     []string{"--goal", "surface terminal input failure honestly", "--bounded"},
 		Stdin:    strings.NewReader(""),
 		Stdout:   &stdout,
 		Stderr:   &bytes.Buffer{},
@@ -1152,6 +1237,7 @@ func realCycleRunner(
 			Planner:         pl,
 			Executor:        ex,
 			HumanInteractor: human,
+			Events:          inv.Events,
 		}
 		return cycle.RunOnce(ctx, run)
 	}

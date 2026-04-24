@@ -1,0 +1,16 @@
+{
+  "name": "orchestrator-v2-shell",
+  "version": "0.1.0",
+  "private": true,
+  "productName": "Orchestrator Console",
+  "description": "Early V2 operator console shell for the orchestrator control protocol.",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "electron": "^41.3.0"
+  }
+}

@@ -3,7 +3,7 @@ package buildinfo
 import "strings"
 
 var (
-	Version   = "dev"
+	Version   = "v1.0.1-dev"
 	Revision  = "unknown"
 	BuildTime = "unknown"
 )

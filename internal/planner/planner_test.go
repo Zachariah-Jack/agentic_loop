@@ -1,6 +1,7 @@
 package planner
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,72 @@ func TestValidateOutputAcceptsExecute(t *testing.T) {
 			AcceptanceCriteria: []string{"events are written to JSONL", "tests pass"},
 			WriteScope:         []string{"internal/journal"},
 		},
+	}
+
+	if err := ValidateOutput(output); err != nil {
+		t.Fatalf("ValidateOutput returned error: %v", err)
+	}
+}
+
+func TestValidateOutputAcceptsPlannerV2OperatorStatus(t *testing.T) {
+	output := OutputEnvelope{
+		ContractVersion: ContractVersionV2,
+		Outcome:         OutcomeExecute,
+		OperatorStatus: &OperatorStatus{
+			OperatorMessage:    "Implementing the next bounded slice.",
+			CurrentFocus:       "runtime control protocol foundation",
+			NextIntendedStep:   "dispatch the bounded control-protocol engine slice",
+			WhyThisStep:        "V2 console work depends on a real engine seam first.",
+			ProgressPercent:    18,
+			ProgressConfidence: ProgressConfidenceMedium,
+			ProgressBasis:      "protocol skeleton and safe-point config reload are next; GUI is still deferred.",
+		},
+		Execute: &ExecuteOutcome{
+			Task:               "Implement the first V2 engine seam",
+			AcceptanceCriteria: []string{"tests cover the engine control slice"},
+		},
+	}
+
+	if err := ValidateOutput(output); err != nil {
+		t.Fatalf("ValidateOutput returned error: %v", err)
+	}
+}
+
+func TestValidateOutputAcceptsPlannerV1OperatorStatus(t *testing.T) {
+	output := OutputEnvelope{
+		ContractVersion: ContractVersionV1,
+		Outcome:         OutcomePause,
+		OperatorStatus: &OperatorStatus{
+			OperatorMessage:    "Collecting the current runtime view for the operator.",
+			CurrentFocus:       "operator-status live-path migration",
+			NextIntendedStep:   "persist the safe planner summary for CLI and protocol rendering",
+			WhyThisStep:        "operator-facing visibility needs durable planner-safe status data.",
+			ProgressPercent:    42,
+			ProgressConfidence: ProgressConfidenceMedium,
+			ProgressBasis:      "runtime and protocol plumbing exist; live planner rendering is being connected.",
+		},
+		Pause: &PauseOutcome{Reason: "waiting at a safe boundary"},
+	}
+
+	if err := ValidateOutput(output); err != nil {
+		t.Fatalf("ValidateOutput returned error: %v", err)
+	}
+}
+
+func TestValidateOutputAcceptsPlannerV1NullOperatorStatus(t *testing.T) {
+	var output OutputEnvelope
+	raw := []byte(`{
+		"contract_version": "planner.v1",
+		"outcome": "pause",
+		"operator_status": null,
+		"execute": null,
+		"ask_human": null,
+		"collect_context": null,
+		"pause": {"reason": "waiting at a safe boundary"},
+		"complete": null
+	}`)
+	if err := json.Unmarshal(raw, &output); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 
 	if err := ValidateOutput(output); err != nil {
@@ -63,6 +130,56 @@ func TestValidateOutputAcceptsCollectContextWithWorkerAction(t *testing.T) {
 
 	if err := ValidateOutput(output); err != nil {
 		t.Fatalf("ValidateOutput returned error: %v", err)
+	}
+}
+
+func TestValidateOutputRejectsDispatchWithoutTaskSummary(t *testing.T) {
+	output := OutputEnvelope{
+		ContractVersion: ContractVersionV1,
+		Outcome:         OutcomeCollectContext,
+		CollectContext: &CollectContextOutcome{
+			Focus: "Dispatch an isolated worker",
+			WorkerActions: []WorkerAction{
+				{
+					Action:         WorkerActionDispatch,
+					WorkerName:     "frontend-worker",
+					ExecutorPrompt: "Implement the isolated UI shell slice in this worker workspace only.",
+				},
+			},
+		},
+	}
+
+	err := ValidateOutput(output)
+	if err == nil {
+		t.Fatal("ValidateOutput unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "collect_context.worker_actions[0].task_summary is required for dispatch") {
+		t.Fatalf("expected dispatch task_summary validation error, got: %v", err)
+	}
+}
+
+func TestValidateOutputRejectsDispatchWithoutExecutorPrompt(t *testing.T) {
+	output := OutputEnvelope{
+		ContractVersion: ContractVersionV1,
+		Outcome:         OutcomeCollectContext,
+		CollectContext: &CollectContextOutcome{
+			Focus: "Dispatch an isolated worker",
+			WorkerActions: []WorkerAction{
+				{
+					Action:      WorkerActionDispatch,
+					WorkerName:  "frontend-worker",
+					TaskSummary: "Implement the isolated UI shell slice",
+				},
+			},
+		},
+	}
+
+	err := ValidateOutput(output)
+	if err == nil {
+		t.Fatal("ValidateOutput unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "collect_context.worker_actions[0].executor_prompt is required for dispatch") {
+		t.Fatalf("expected dispatch executor_prompt validation error, got: %v", err)
 	}
 }
 
@@ -212,6 +329,22 @@ func TestValidateOutputRejectsInvalidCollectContext(t *testing.T) {
 	}
 }
 
+func TestValidateOutputRejectsPlannerV2WithoutOperatorStatus(t *testing.T) {
+	output := OutputEnvelope{
+		ContractVersion: ContractVersionV2,
+		Outcome:         OutcomePause,
+		Pause:           &PauseOutcome{Reason: "waiting for a later slice"},
+	}
+
+	err := ValidateOutput(output)
+	if err == nil {
+		t.Fatal("ValidateOutput unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "operator_status is required when contract_version=planner.v2") {
+		t.Fatalf("expected operator_status validation error, got: %v", err)
+	}
+}
+
 func TestValidateOutputRejectsEmptyCompleteSummary(t *testing.T) {
 	output := OutputEnvelope{
 		ContractVersion: ContractVersionV1,
@@ -240,9 +373,20 @@ func TestRenderInstructionsIncludesContractRules(t *testing.T) {
 		`These instructions are resent every planner turn`,
 		`Set "contract_version" to "planner.v1".`,
 		`Set "outcome" to exactly one of: execute, ask_human, collect_context, pause, complete.`,
+		`Include every root payload key required by the schema; set non-matching outcome payloads to null.`,
 		`Plugin tools, when present, are callable only through collect_context.tool_calls.`,
 		`Worker actions, when used, are callable only through collect_context.worker_actions.`,
 		`Planner-owned multi-worker partitioning, when used, is callable only through collect_context.worker_plan.`,
+		`Use collect_context only when the missing information can still be gathered mechanically from the repo, artifacts, plugin tools, or worker actions available to you.`,
+		`Use ask_human only when you are blocked on information that only the human can provide, such as intent, preference, missing external facts, or approval.`,
+		`Use execute when the current state already contains enough information to choose the next highest-value bounded implementation step.`,
+		`Do not emit near-identical collect_context outcomes repeatedly.`,
+		`After repeated similar collect_context turns, either request one specific still-missing item with a concrete reason, transition to execute, or transition to ask_human.`,
+		`Distinguish understanding the repo or state from actually fulfilling the run goal.`,
+		`Use complete only when the requested objective for this run is truly satisfied, not merely because you now understand what should happen next.`,
+		`If the user goal explicitly includes implementation, execution, code changes, building, fixing, or "do the next step," do not emit complete merely because repo exploration or planning is now sufficient.`,
+		`For those execution-oriented goals, prefer execute for the next highest-value bounded task unless the requested work has actually been fulfilled.`,
+		`Inspection-only, explanation-only, or analysis-only goals may complete without execute, but only when that requested inspection, explanation, or analysis has actually been delivered.`,
 		`action="integrate" and explicit worker_ids.`,
 		`action="apply", an explicit apply_mode, and either artifact_path or worker_ids.`,
 		`If you need multiple isolated worker slices in one bounded turn, request collect_context.worker_plan`,
@@ -250,18 +394,109 @@ func TestRenderInstructionsIncludesContractRules(t *testing.T) {
 		`apply_mode="apply_non_conflicting" applies only files outside the recorded conflict candidates`,
 		`AGENTS.md, docs/ORCHESTRATOR_CLI_UPDATED_SPEC.md, docs/ORCHESTRATOR_NON_NEGOTIABLES.md, docs/CLI_ENGINE_EXECPLAN.md, .orchestrator/roadmap.md, .orchestrator/decisions.md`,
 		`Do not invent alternate path schemes such as "agents.md", "spec/", or ".agentic/".`,
+		`Once canonical repo contract files or repo structure have already been provided in the state packet or collected_context results, do not keep re-exploring them unless you need one specific new missing detail.`,
 		`When "raw_human_replies" is present in the input packet, treat it as raw terminal human input forwarded by the CLI without rewriting or summarization.`,
 		`When "executor_result" is present in the input packet`,
+		`latest_checkpoint.executor_turn tells you how many executor turns have already completed in this run.`,
+		`If latest_checkpoint.executor_turn is zero and the goal is execution-oriented, repo understanding alone is not enough for complete.`,
+		`If executor_result is present, use it to judge whether executor work has actually moved the run goal toward fulfillment.`,
 		`When "collected_context" is present in the input packet`,
 		`When "plugin_tools" is present in the input packet`,
 		`When "collected_context.tool_results" is present in the input packet`,
 		`Workers are isolated workspaces only. They do not share the main working tree, and they do not merge automatically.`,
+		`For action="create", provide worker_name and scope.`,
+		`For action="dispatch", provide worker_id or worker_name, plus both task_summary and executor_prompt.`,
+		`For action="list", provide only action="list" unless a specific worker filter is already part of the contract state.`,
+		`For action="remove", provide worker_id or worker_name.`,
+		`For action="integrate", provide explicit worker_ids.`,
+		`For action="apply", provide apply_mode and either artifact_path or worker_ids.`,
+		`Do not emit partially populated worker action objects that are guaranteed to fail validation.`,
+		`never emit action="dispatch" without task_summary and executor_prompt.`,
+		`dispatch.task_summary should summarize the bounded worker task`,
 		`When "collected_context.worker_results" is present in the input packet`,
 		`When "collected_context.worker_plan" is present in the input packet`,
 		`Integration artifacts are read-only decision input.`,
 		`Integration apply results are mechanical write results only.`,
 		`When "drift_review" is present in the input packet, treat it as reviewer critique data about roadmap or repo-contract alignment. It is not a control decision.`,
 		`Recent event summaries may mention artifact paths under .orchestrator/artifacts/`,
+	} {
+		if !strings.Contains(rendered, snippet) {
+			t.Fatalf("rendered template missing %q\n%s", snippet, rendered)
+		}
+	}
+}
+
+func TestRenderInstructionsHardensCollectContextProgression(t *testing.T) {
+	rendered, err := RenderInstructions()
+	if err != nil {
+		t.Fatalf("RenderInstructions returned error: %v", err)
+	}
+
+	for _, snippet := range []string{
+		`Use collect_context only when the missing information can still be gathered mechanically`,
+		`Use ask_human only when you are blocked on information that only the human can provide`,
+		`Use execute when the current state already contains enough information`,
+		`Do not emit near-identical collect_context outcomes repeatedly.`,
+		`After repeated similar collect_context turns, either request one specific still-missing item with a concrete reason, transition to execute, or transition to ask_human.`,
+		`If recent turns already gathered the relevant repo contract files, repo markers, path listings, or other requested context, treat that context as available instead of re-requesting it.`,
+	} {
+		if !strings.Contains(rendered, snippet) {
+			t.Fatalf("rendered template missing %q\n%s", snippet, rendered)
+		}
+	}
+}
+
+func TestRenderInstructionsHardensCompletionDiscipline(t *testing.T) {
+	rendered, err := RenderInstructions()
+	if err != nil {
+		t.Fatalf("RenderInstructions returned error: %v", err)
+	}
+
+	for _, snippet := range []string{
+		`Distinguish understanding the repo or state from actually fulfilling the run goal.`,
+		`Use complete only when the requested objective for this run is truly satisfied, not merely because you now understand what should happen next.`,
+		`If the user goal explicitly includes implementation, execution, code changes, building, fixing, or "do the next step," do not emit complete merely because repo exploration or planning is now sufficient.`,
+		`For those execution-oriented goals, prefer execute for the next highest-value bounded task unless the requested work has actually been fulfilled.`,
+		`Inspection-only, explanation-only, or analysis-only goals may complete without execute, but only when that requested inspection, explanation, or analysis has actually been delivered.`,
+		`latest_checkpoint.executor_turn tells you how many executor turns have already completed in this run.`,
+		`If latest_checkpoint.executor_turn is zero and the goal is execution-oriented, repo understanding alone is not enough for complete.`,
+		`If executor_result is present, use it to judge whether executor work has actually moved the run goal toward fulfillment.`,
+	} {
+		if !strings.Contains(rendered, snippet) {
+			t.Fatalf("rendered template missing %q\n%s", snippet, rendered)
+		}
+	}
+}
+
+func TestRenderInstructionsForContractV2IncludesOperatorStatusGuidance(t *testing.T) {
+	rendered, err := RenderInstructionsForContract(ContractVersionV2)
+	if err != nil {
+		t.Fatalf("RenderInstructionsForContract returned error: %v", err)
+	}
+
+	for _, snippet := range []string{
+		`Include operator_status as a safe operator-visible summary block on every turn.`,
+		`operator_status must not expose hidden chain-of-thought.`,
+		`operator_status.progress_percent must be an integer from 0 to 100.`,
+		`progress reaching 100 is not, by itself, completion.`,
+	} {
+		if !strings.Contains(rendered, snippet) {
+			t.Fatalf("rendered template missing %q\n%s", snippet, rendered)
+		}
+	}
+}
+
+func TestRenderInstructionsForContractV1RequiresNullableOperatorStatusGuidance(t *testing.T) {
+	rendered, err := RenderInstructionsForContract(ContractVersionV1)
+	if err != nil {
+		t.Fatalf("RenderInstructionsForContract returned error: %v", err)
+	}
+
+	for _, snippet := range []string{
+		`Include operator_status on every turn.`,
+		`operator_status must be either a populated safe operator-facing object or null when unavailable.`,
+		`operator_status must not expose hidden chain-of-thought.`,
+		`progress reaching 100 is not, by itself, completion.`,
 	} {
 		if !strings.Contains(rendered, snippet) {
 			t.Fatalf("rendered template missing %q\n%s", snippet, rendered)
@@ -409,6 +644,7 @@ func TestMarshalInputPacketIncludesState(t *testing.T) {
 		`"contract_version": "planner.v1"`,
 		`"run_id": "run_123"`,
 		`"goal": "stabilize the planner contract"`,
+		`"executor_turn": 0`,
 		`"executor_result": {`,
 		`"final_message": "Implemented the bounded slice."`,
 		`"collected_context": {`,
@@ -444,6 +680,24 @@ func TestMarshalInputPacketIncludesState(t *testing.T) {
 		if !strings.Contains(packet, snippet) {
 			t.Fatalf("input packet missing %q\n%s", snippet, packet)
 		}
+	}
+}
+
+func TestMarshalInputPacketExposesExecutorProgressWithoutExecutorResult(t *testing.T) {
+	input := validInputEnvelope()
+	input.Goal = "Implement the next bounded code change"
+	input.LatestCheckpoint.ExecutorTurn = 1
+
+	packet, err := MarshalInputPacket(input)
+	if err != nil {
+		t.Fatalf("MarshalInputPacket returned error: %v", err)
+	}
+
+	if !strings.Contains(packet, `"executor_turn": 1`) {
+		t.Fatalf("input packet missing executor_turn progress\n%s", packet)
+	}
+	if strings.Contains(packet, `"executor_result": {`) {
+		t.Fatalf("input packet unexpectedly included executor_result\n%s", packet)
 	}
 }
 

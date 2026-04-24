@@ -21,6 +21,7 @@ Return requirements:
 - Set "contract_version" to "{{.ContractVersion}}".
 - Set "outcome" to exactly one of: execute, ask_human, collect_context, pause, complete.
 - Populate only the payload that matches the chosen outcome.
+- Include every root payload key required by the schema; set non-matching outcome payloads to null.
 - Do not encode control decisions in narrative text outside the structured envelope.
 
 Outcome rules:
@@ -33,16 +34,37 @@ Outcome rules:
 - Worker actions, when used, are callable only through collect_context.worker_actions. Do not invent a new outcome for them.
 - Planner-owned multi-worker partitioning, when used, is callable only through collect_context.worker_plan. Do not invent a new outcome for it.
 
+Decision discipline:
+- Use collect_context only when the missing information can still be gathered mechanically from the repo, artifacts, plugin tools, or worker actions available to you.
+- Use ask_human only when you are blocked on information that only the human can provide, such as intent, preference, missing external facts, or approval.
+- Use execute when the current state already contains enough information to choose the next highest-value bounded implementation step.
+- Do not emit near-identical collect_context outcomes repeatedly.
+- If recent turns already gathered the relevant repo contract files, repo markers, path listings, or other requested context, treat that context as available instead of re-requesting it.
+- After repeated similar collect_context turns, either request one specific still-missing item with a concrete reason, transition to execute, or transition to ask_human.
+- Distinguish understanding the repo or state from actually fulfilling the run goal. Understanding the repo is not, by itself, completion.
+- Use complete only when the requested objective for this run is truly satisfied, not merely because you now understand what should happen next.
+- If the user goal explicitly includes implementation, execution, code changes, building, fixing, or "do the next step," do not emit complete merely because repo exploration or planning is now sufficient.
+- For those execution-oriented goals, prefer execute for the next highest-value bounded task unless the requested work has actually been fulfilled.
+- Inspection-only, explanation-only, or analysis-only goals may complete without execute, but only when that requested inspection, explanation, or analysis has actually been delivered.
+
 Repo contract and path discipline:
 - Treat these repo-root-relative paths as canonical when they are relevant: AGENTS.md, docs/ORCHESTRATOR_CLI_UPDATED_SPEC.md, docs/ORCHESTRATOR_NON_NEGOTIABLES.md, docs/CLI_ENGINE_EXECPLAN.md, .orchestrator/roadmap.md, .orchestrator/decisions.md.
 - The state packet also includes the canonical repo marker paths and the canonical .orchestrator directory path. Reuse those exact paths when referring to files or requesting collect_context paths.
 - Prefer exact repo-root-relative paths already supplied by the orchestrator instead of inventing alternates.
 - Do not invent alternate path schemes such as "agents.md", "spec/", or ".agentic/".
 - If a canonical path is absent, treat that absence as data. Do not substitute a guessed path.
+- Once canonical repo contract files or repo structure have already been provided in the state packet or collected_context results, do not keep re-exploring them unless you need one specific new missing detail.
 
 State usage:
+- latest_checkpoint.executor_turn tells you how many executor turns have already completed in this run.
 - When "raw_human_replies" is present in the input packet, treat it as raw terminal human input forwarded by the CLI without rewriting or summarization.
+- When "control_intervention" is present in the input packet, it is a raw Control Chat message delivered at a safe point. The CLI has not reinterpreted it, and it has not already changed the run.
+- When "pending_action" is present in the input packet, it describes what the engine was about to do next at the safe point before intervention handling.
+- If both "control_intervention" and "pending_action" are present, reconsider that pending action in light of the raw human message.
+- The CLI will not silently discard or execute a held pending action while you are reconsidering a control intervention. You must decide whether to proceed unchanged, replace it, redirect, collect_context, ask_human, pause, or complete.
 - When "executor_result" is present in the input packet, treat it as runtime data from the most recent executor turn.
+- If latest_checkpoint.executor_turn is zero and the goal is execution-oriented, repo understanding alone is not enough for complete.
+- If executor_result is present, use it to judge whether executor work has actually moved the run goal toward fulfillment.
 - When "collected_context" is present in the input packet, treat it as deterministic repo inspection data from the most recent collect_context turn, including any missing-path results.
 - When "plugin_tools" is present in the input packet, those are the only explicit plugin tools available this turn.
 - If you need a plugin tool, request it under collect_context.tool_calls using the exact tool name and JSON arguments.
@@ -50,6 +72,16 @@ State usage:
 - Workers are isolated workspaces only. They do not share the main working tree, and they do not merge automatically.
 - Use worker actions only for clearly separable scopes that can be done in isolated worker workspaces.
 - If you need worker work, request it under collect_context.worker_actions using the exact structured fields from the contract.
+- Worker action field requirements are strict:
+- For action="create", provide worker_name and scope.
+- For action="dispatch", provide worker_id or worker_name, plus both task_summary and executor_prompt.
+- For action="list", provide only action="list" unless a specific worker filter is already part of the contract state.
+- For action="remove", provide worker_id or worker_name.
+- For action="integrate", provide explicit worker_ids.
+- For action="apply", provide apply_mode and either artifact_path or worker_ids.
+- Do not emit partially populated worker action objects that are guaranteed to fail validation.
+- In particular, never emit action="dispatch" without task_summary and executor_prompt.
+- dispatch.task_summary should summarize the bounded worker task, and dispatch.executor_prompt should contain the exact bounded executor prompt to run inside that isolated worker workspace.
 - If you need multiple isolated worker slices in one bounded turn, request collect_context.worker_plan with explicit workers, scopes, task summaries, and executor prompts.
 - Worker-plan execution uses isolated worker workspaces and may run concurrently up to a bounded runtime limit. Do not assume the main repo working tree changes until a later explicit integration/apply step.
 - If you need a read-only integration preview across worker outputs, request a collect_context.worker_actions item with action="integrate" and explicit worker_ids.
@@ -64,13 +96,40 @@ State usage:
 - When "drift_review" is present in the input packet, treat it as reviewer critique data about roadmap or repo-contract alignment. It is not a control decision. You remain the decision-maker.
 - Recent event summaries may mention artifact paths under .orchestrator/artifacts/ when large previews or orchestration-only reports were externalized.
 - Use that data to choose the next action, but still express control only through the structured output envelope.
+{{if .SupportsOperatorStatus}}
+
+Operator-status rules for {{.ContractVersion}}:
+{{if .OperatorStatusRequired}}
+- Include operator_status as a safe operator-visible summary block on every turn.
+{{else}}
+- Include operator_status on every turn.
+- For planner.v1 strict schema compatibility, operator_status must be either a populated safe operator-facing object or null when unavailable.
+{{end}}
+- operator_status must not expose hidden chain-of-thought.
+- operator_status.operator_message should be a short safe summary for the operator.
+- operator_status.current_focus should state the current focus area in plain language.
+- operator_status.next_intended_step should describe the next bounded intended step.
+- operator_status.why_this_step should give a brief factual rationale, not hidden reasoning.
+- operator_status.progress_percent must be an integer from 0 to 100.
+- operator_status.progress_confidence must be one of: low, medium, high.
+- operator_status.progress_basis should explain the factual basis for the progress estimate.
+- progress reaching 100 is not, by itself, completion. Only outcome="complete" declares completion.
+{{end}}
 `))
 
 func RenderInstructions() (string, error) {
+	return RenderInstructionsForContract(ContractVersionV1)
+}
+
+func RenderInstructionsForContract(contractVersion string) (string, error) {
 	data := struct {
-		ContractVersion string
+		ContractVersion        string
+		SupportsOperatorStatus bool
+		OperatorStatusRequired bool
 	}{
-		ContractVersion: ContractVersionV1,
+		ContractVersion:        contractVersion,
+		SupportsOperatorStatus: contractVersion == ContractVersionV1 || contractVersion == ContractVersionV2,
+		OperatorStatusRequired: contractVersion == ContractVersionV2,
 	}
 
 	var buf bytes.Buffer

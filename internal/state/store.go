@@ -38,6 +38,7 @@ type Run struct {
 	PreviousResponseID       string
 	HumanReplies             []HumanReply
 	CollectedContext         *CollectedContextState
+	PlannerOperatorStatus    *PlannerOperatorStatus
 	ExecutorTransport        string
 	ExecutorThreadID         string
 	ExecutorThreadPath       string
@@ -117,12 +118,14 @@ type ExecutorControl struct {
 }
 
 type CollectedContextState struct {
-	Focus         string                   `json:"focus"`
-	Questions     []string                 `json:"questions,omitempty"`
-	Results       []CollectedContextResult `json:"results,omitempty"`
-	ToolResults   []PluginToolResult       `json:"tool_results,omitempty"`
-	WorkerResults []WorkerActionResult     `json:"worker_results,omitempty"`
-	WorkerPlan    *WorkerPlanResult        `json:"worker_plan,omitempty"`
+	ArtifactPath    string                   `json:"artifact_path,omitempty"`
+	ArtifactPreview string                   `json:"artifact_preview,omitempty"`
+	Focus           string                   `json:"focus"`
+	Questions       []string                 `json:"questions,omitempty"`
+	Results         []CollectedContextResult `json:"results,omitempty"`
+	ToolResults     []PluginToolResult       `json:"tool_results,omitempty"`
+	WorkerResults   []WorkerActionResult     `json:"worker_results,omitempty"`
+	WorkerPlan      *WorkerPlanResult        `json:"worker_plan,omitempty"`
 }
 
 type CollectedContextResult struct {
@@ -292,6 +295,7 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			previous_response_id TEXT NOT NULL DEFAULT '',
 			human_replies_json TEXT NOT NULL DEFAULT '',
 			collected_context_json TEXT NOT NULL DEFAULT '',
+			planner_operator_status_json TEXT NOT NULL DEFAULT '',
 			executor_transport TEXT NOT NULL DEFAULT '',
 			executor_thread_id TEXT NOT NULL DEFAULT '',
 			executor_thread_path TEXT NOT NULL DEFAULT '',
@@ -354,6 +358,54 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 			ON workers(worktree_path);`,
 		`CREATE INDEX IF NOT EXISTS idx_workers_run_updated_at
 			ON workers(run_id, updated_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS pending_actions (
+			run_id TEXT PRIMARY KEY,
+			action_json TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+		);`,
+		`CREATE TABLE IF NOT EXISTS control_messages (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			target_binding TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			raw_text TEXT NOT NULL,
+			status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			consumed_at TEXT NOT NULL DEFAULT '',
+			cancelled_at TEXT NOT NULL DEFAULT '',
+			FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_control_messages_run_status_created_at
+			ON control_messages(run_id, status, created_at ASC);`,
+		`CREATE TABLE IF NOT EXISTS side_chat_messages (
+			id TEXT PRIMARY KEY,
+			repo_path TEXT NOT NULL,
+			run_id TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL,
+			context_policy TEXT NOT NULL DEFAULT '',
+			raw_text TEXT NOT NULL,
+			status TEXT NOT NULL,
+			backend_state TEXT NOT NULL DEFAULT '',
+			response_message TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_side_chat_messages_repo_created_at
+			ON side_chat_messages(repo_path, created_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS dogfood_issues (
+			id TEXT PRIMARY KEY,
+			repo_path TEXT NOT NULL,
+			run_id TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL,
+			title TEXT NOT NULL,
+			note TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_dogfood_issues_repo_created_at
+			ON dogfood_issues(repo_path, created_at DESC);`,
 	}
 
 	for _, statement := range statements {
@@ -378,6 +430,9 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureRunsColumn(ctx, "collected_context_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureRunsColumn(ctx, "planner_operator_status_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureRunsColumn(ctx, "executor_transport", "TEXT NOT NULL DEFAULT ''"); err != nil {
@@ -465,7 +520,7 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		return err
 	}
 
-	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version = 15;"); err != nil {
+	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version = 19;"); err != nil {
 		return err
 	}
 
@@ -932,7 +987,7 @@ func (s *Store) SaveExecutorTurn(ctx context.Context, runID string, executorStat
 
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, bool, error) {
 	return s.querySingleRun(ctx,
-		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json,
+		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json, planner_operator_status_json,
 		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message, executor_approval_json, executor_last_control_json
 		 FROM runs
 		 WHERE id = ?
@@ -997,7 +1052,7 @@ func (s *Store) saveCheckpointAndResponseID(ctx context.Context, runID string, p
 
 func (s *Store) LatestResumableRun(ctx context.Context) (Run, bool, error) {
 	return s.querySingleRun(ctx,
-		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json,
+		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json, planner_operator_status_json,
 		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message, executor_approval_json, executor_last_control_json
 		 FROM runs
 		 WHERE status NOT IN (?, ?, ?)
@@ -1011,7 +1066,7 @@ func (s *Store) LatestResumableRun(ctx context.Context) (Run, bool, error) {
 
 func (s *Store) LatestRun(ctx context.Context) (Run, bool, error) {
 	return s.querySingleRun(ctx,
-		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json,
+		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json, planner_operator_status_json,
 		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message, executor_approval_json, executor_last_control_json
 		 FROM runs
 		 ORDER BY updated_at DESC, created_at DESC
@@ -1025,7 +1080,7 @@ func (s *Store) ListRuns(ctx context.Context, limit int) ([]Run, error) {
 	}
 
 	return s.queryRuns(ctx,
-		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json,
+		`SELECT id, repo_path, goal, status, created_at, updated_at, latest_checkpoint_json, latest_stop_reason, runtime_issue_reason, runtime_issue_message, previous_response_id, human_replies_json, collected_context_json, planner_operator_status_json,
 		        executor_transport, executor_thread_id, executor_thread_path, executor_turn_id, executor_turn_status, executor_last_success, executor_last_failure_stage, executor_last_error, executor_last_message, executor_approval_json, executor_last_control_json
 		 FROM runs
 		 ORDER BY updated_at DESC, created_at DESC
@@ -1174,28 +1229,29 @@ type rowScanner interface {
 
 func scanRun(scanner rowScanner) (Run, error) {
 	var (
-		run                      Run
-		status                   string
-		createdAtRaw             string
-		updatedAtRaw             string
-		checkpointJSON           string
-		latestStopReason         string
-		runtimeIssueReason       string
-		runtimeIssueMessage      string
-		previousResponseID       string
-		humanRepliesJSON         string
-		collectedContextJSON     string
-		executorTransport        string
-		executorThreadID         string
-		executorThreadPath       string
-		executorTurnID           string
-		executorTurnStatus       string
-		executorLastSuccess      sql.NullInt64
-		executorLastFailureStage string
-		executorLastError        string
-		executorLastMessage      string
-		executorApprovalJSON     string
-		executorLastControlJSON  string
+		run                       Run
+		status                    string
+		createdAtRaw              string
+		updatedAtRaw              string
+		checkpointJSON            string
+		latestStopReason          string
+		runtimeIssueReason        string
+		runtimeIssueMessage       string
+		previousResponseID        string
+		humanRepliesJSON          string
+		collectedContextJSON      string
+		plannerOperatorStatusJSON string
+		executorTransport         string
+		executorThreadID          string
+		executorThreadPath        string
+		executorTurnID            string
+		executorTurnStatus        string
+		executorLastSuccess       sql.NullInt64
+		executorLastFailureStage  string
+		executorLastError         string
+		executorLastMessage       string
+		executorApprovalJSON      string
+		executorLastControlJSON   string
 	)
 
 	if err := scanner.Scan(
@@ -1212,6 +1268,7 @@ func scanRun(scanner rowScanner) (Run, error) {
 		&previousResponseID,
 		&humanRepliesJSON,
 		&collectedContextJSON,
+		&plannerOperatorStatusJSON,
 		&executorTransport,
 		&executorThreadID,
 		&executorThreadPath,
@@ -1256,6 +1313,11 @@ func scanRun(scanner rowScanner) (Run, error) {
 		return Run{}, err
 	}
 	run.CollectedContext = collectedContext
+	plannerOperatorStatus, err := unmarshalPlannerOperatorStatus(plannerOperatorStatusJSON)
+	if err != nil {
+		return Run{}, err
+	}
+	run.PlannerOperatorStatus = plannerOperatorStatus
 	run.ExecutorTransport = executorTransport
 	run.ExecutorThreadID = executorThreadID
 	run.ExecutorThreadPath = executorThreadPath

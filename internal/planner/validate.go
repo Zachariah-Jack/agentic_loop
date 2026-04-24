@@ -9,8 +9,8 @@ import (
 func ValidateInput(input InputEnvelope) error {
 	var issues []string
 
-	if input.ContractVersion != ContractVersionV1 {
-		issues = append(issues, fmt.Sprintf("contract_version must be %q", ContractVersionV1))
+	if input.ContractVersion != ContractVersionV1 && input.ContractVersion != ContractVersionV2 {
+		issues = append(issues, fmt.Sprintf("contract_version must be %q or %q", ContractVersionV1, ContractVersionV2))
 	}
 	if strings.TrimSpace(input.RunID) == "" {
 		issues = append(issues, "run_id is required")
@@ -98,6 +98,43 @@ func ValidateInput(input InputEnvelope) error {
 		for i, path := range input.DriftReview.EvidencePaths {
 			if strings.TrimSpace(path) == "" {
 				issues = append(issues, fmt.Sprintf("drift_review.evidence_paths[%d] must be non-empty when set", i))
+			}
+		}
+	}
+
+	if input.PendingAction != nil {
+		if input.PendingAction.Present {
+			if strings.TrimSpace(input.PendingAction.TurnType) == "" {
+				issues = append(issues, "pending_action.turn_type is required when pending_action.present is true")
+			}
+			if strings.TrimSpace(input.PendingAction.PlannerOutcome) == "" {
+				issues = append(issues, "pending_action.planner_outcome is required when pending_action.present is true")
+			}
+			if strings.TrimSpace(input.PendingAction.PendingReason) == "" {
+				issues = append(issues, "pending_action.pending_reason is required when pending_action.present is true")
+			}
+			if input.PendingAction.PendingDispatchTarget != nil && strings.TrimSpace(input.PendingAction.PendingDispatchTarget.Kind) == "" {
+				issues = append(issues, "pending_action.pending_dispatch_target.kind is required when pending dispatch target is set")
+			}
+			if input.PendingAction.Held && strings.TrimSpace(input.PendingAction.HoldReason) == "" {
+				issues = append(issues, "pending_action.hold_reason is required when pending_action.held is true")
+			}
+		}
+	}
+
+	if input.ControlIntervention != nil {
+		if input.ControlIntervention.Present {
+			if strings.TrimSpace(input.ControlIntervention.RawMessage) == "" {
+				issues = append(issues, "control_intervention.raw_message is required when control_intervention.present is true")
+			}
+			if strings.TrimSpace(input.ControlIntervention.Source) == "" {
+				issues = append(issues, "control_intervention.source is required when control_intervention.present is true")
+			}
+			if strings.TrimSpace(input.ControlIntervention.PauseReason) == "" {
+				issues = append(issues, "control_intervention.pause_reason is required when control_intervention.present is true")
+			}
+			if input.ControlIntervention.QueuedAt.IsZero() {
+				issues = append(issues, "control_intervention.queued_at is required when control_intervention.present is true")
 			}
 		}
 	}
@@ -229,8 +266,8 @@ func ValidateInput(input InputEnvelope) error {
 func ValidateOutput(output OutputEnvelope) error {
 	var issues []string
 
-	if output.ContractVersion != ContractVersionV1 {
-		issues = append(issues, fmt.Sprintf("contract_version must be %q", ContractVersionV1))
+	if output.ContractVersion != ContractVersionV1 && output.ContractVersion != ContractVersionV2 {
+		issues = append(issues, fmt.Sprintf("contract_version must be %q or %q", ContractVersionV1, ContractVersionV2))
 	}
 
 	payloadCount := 0
@@ -397,11 +434,48 @@ func ValidateOutput(output OutputEnvelope) error {
 		issues = append(issues, "outcome must be one of execute, ask_human, collect_context, pause, complete")
 	}
 
+	if output.OperatorStatus != nil {
+		issues = append(issues, validateOperatorStatus(*output.OperatorStatus)...)
+	}
+	if output.ContractVersion == ContractVersionV2 && output.OperatorStatus == nil {
+		issues = append(issues, "operator_status is required when contract_version=planner.v2")
+	}
+
 	if len(issues) > 0 {
 		return errors.New(strings.Join(issues, "; "))
 	}
 
 	return nil
+}
+
+func validateOperatorStatus(status OperatorStatus) []string {
+	var issues []string
+
+	if strings.TrimSpace(status.OperatorMessage) == "" {
+		issues = append(issues, "operator_status.operator_message is required")
+	}
+	if strings.TrimSpace(status.CurrentFocus) == "" {
+		issues = append(issues, "operator_status.current_focus is required")
+	}
+	if strings.TrimSpace(status.NextIntendedStep) == "" {
+		issues = append(issues, "operator_status.next_intended_step is required")
+	}
+	if strings.TrimSpace(status.WhyThisStep) == "" {
+		issues = append(issues, "operator_status.why_this_step is required")
+	}
+	if status.ProgressPercent < 0 || status.ProgressPercent > 100 {
+		issues = append(issues, "operator_status.progress_percent must be between 0 and 100")
+	}
+	switch status.ProgressConfidence {
+	case ProgressConfidenceLow, ProgressConfidenceMedium, ProgressConfidenceHigh:
+	default:
+		issues = append(issues, "operator_status.progress_confidence must be low, medium, or high")
+	}
+	if strings.TrimSpace(status.ProgressBasis) == "" {
+		issues = append(issues, "operator_status.progress_basis is required")
+	}
+
+	return issues
 }
 
 func validateCheckpoint(prefix string, checkpoint Checkpoint) []string {

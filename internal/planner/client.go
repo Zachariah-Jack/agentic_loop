@@ -179,8 +179,8 @@ func (c *Client) buildCreateRequest(input InputEnvelope, previousResponseID stri
 		Text: textConfig{
 			Format: textFormat{
 				Type:   "json_schema",
-				Name:   OutputSchemaName,
-				Schema: OutputJSONSchema(),
+				Name:   OutputSchemaNameForContract(ContractVersionV1),
+				Schema: OutputJSONSchemaForContract(ContractVersionV1),
 				Strict: true,
 			},
 		},

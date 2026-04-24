@@ -30,3 +30,6 @@ go.work.sum
 .vscode/
 Thumbs.db
 Desktop.ini
+
+# V2 console shell dependencies
+console/v2-shell/node_modules/
