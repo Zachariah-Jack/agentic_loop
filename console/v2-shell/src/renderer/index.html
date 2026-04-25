@@ -65,6 +65,10 @@
           <div class="home-action-stack">
             <button id="home-primary-action" class="button button-primary">Connect</button>
             <button id="home-refresh-everything" class="button" title="Gets the latest run, connection, planner, worker, and approval state.">Update Dashboard</button>
+            <button id="home-open-live-output" class="button">Open Live Output</button>
+            <button id="home-copy-debug-bundle" class="button">Copy Debug Bundle</button>
+            <button id="home-recover-backend" class="button button-danger-soft">Recover Backend / Unlock Repo</button>
+            <button id="home-clear-stop-continue" class="button button-primary" hidden>Clear Stop and Continue</button>
             <button id="home-safe-stop" class="button button-danger-soft">Safe Stop</button>
           </div>
         </div>
@@ -84,12 +88,13 @@
               <span>Goal for a new run</span>
               <textarea id="home-goal" rows="4" placeholder="Build the next highest-value slice from the repo contract files."></textarea>
             </label>
-            <div class="button-row">
-              <button id="home-use-default-goal" class="button">Fill Starter Goal</button>
-              <button id="home-start-run" class="button button-primary">Start Build</button>
-              <button id="home-continue-run" class="button">Continue Build</button>
-            </div>
-            <details class="advanced-help">
+              <div class="button-row">
+                <button id="home-use-default-goal" class="button">Fill Starter Goal</button>
+                <button id="home-start-run" class="button button-primary">Start Build</button>
+                <button id="home-continue-run" class="button">Continue Build</button>
+              </div>
+              <p id="home-run-control-note" class="panel-note">Start and Continue use explicit engine protocol actions.</p>
+              <details class="advanced-help">
               <summary>Backup terminal commands</summary>
               <p class="panel-note">Use these only if protocol Start/Continue is unavailable or you are intentionally using the terminal.</p>
               <div class="button-row">
@@ -105,8 +110,8 @@
             <div id="home-repo-body" class="home-stack"></div>
           </article>
 
-          <article class="home-card">
-            <h3>Current Run</h3>
+          <article class="home-card home-card-wide">
+            <h3>What is happening right now?</h3>
             <div id="home-run-body" class="home-stack"></div>
           </article>
 
@@ -137,8 +142,8 @@
 
           <article class="home-card home-card-wide">
             <div class="panel-header">
-              <h3>Recent Activity Highlights</h3>
-              <div class="panel-meta">Real protocol events only.</div>
+              <h3>Live Output Highlights</h3>
+              <div class="panel-meta">This is where to watch planner, Codex, model, approval, worker, and shell activity. Verbose and Trace show more detail here.</div>
             </div>
             <div id="home-activity-body" class="home-activity-list"></div>
           </article>
@@ -148,6 +153,8 @@
             <div class="quick-button-grid">
               <button id="home-open-contracts" class="button">Open Contract Files</button>
               <button id="home-open-latest-artifact" class="button">Open Latest Artifact</button>
+              <button id="home-quick-live-output" class="button">Open Live Output</button>
+              <button id="home-quick-copy-debug-bundle" class="button">Copy Run Details for Support</button>
               <button id="home-add-dogfood-note" class="button">Add Dogfood Note</button>
               <button id="home-open-terminal" class="button">Open Operator Terminal</button>
             </div>
@@ -179,8 +186,77 @@
         <div class="button-row">
           <button id="test-planner-model" class="button">Test Planner Model</button>
           <button id="test-executor-model" class="button">Test Codex Config</button>
+          <button id="copy-model-health" class="button">Copy Model Health</button>
+          <button id="restart-backend" class="button button-quiet">Recover Backend / Unlock Repo</button>
         </div>
-        <p class="panel-note">Planner model comes from orchestrator config or <code>OPENAI_MODEL</code>. Codex executor model is controlled by external Codex configuration and may only be known when Codex reports it or fails.</p>
+        <p class="panel-note">Planner model must be <code>gpt-5.4</code> or newer. Codex executor runs are required to use <code>gpt-5.5</code>, <code>danger-full-access</code>, approval <code>never</code>, and effort <code>xhigh</code>. Test Codex Config verifies the exact Codex path this control server sees.</p>
+      </section>
+
+      <section id="runtime-settings-panel" class="panel panel-settings" data-pane="settings">
+        <div class="panel-header">
+          <h2>Runtime Timeouts &amp; Autonomy</h2>
+          <div class="panel-meta">Saved through <code>set_runtime_config</code>. Executor turn and human wait can be unlimited.</div>
+        </div>
+        <div class="detail-grid" id="runtime-settings-summary"></div>
+        <div class="settings-grid">
+          <label class="field">
+            <span>Timeout preset</span>
+            <select id="timeout-preset">
+              <option value="normal">Normal</option>
+              <option value="conservative">Conservative</option>
+              <option value="long_running">Long running</option>
+              <option value="unlimited">Unlimited / No time limit</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Permission profile</span>
+            <select id="permission-profile">
+              <option value="guided">Guided</option>
+              <option value="balanced">Balanced</option>
+              <option value="autonomous">Autonomous</option>
+              <option value="full_send">Full Send / Lab Mode</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Planner request timeout</span>
+            <input id="timeout-planner-request" type="text" placeholder="2m or unlimited" />
+          </label>
+          <label class="field">
+            <span>Executor turn timeout</span>
+            <input id="timeout-executor-turn" type="text" placeholder="unlimited" />
+          </label>
+          <label class="field">
+            <span>Shell command timeout</span>
+            <input id="timeout-shell-command" type="text" placeholder="30m" />
+          </label>
+          <label class="field">
+            <span>Install timeout</span>
+            <input id="timeout-install" type="text" placeholder="2h" />
+          </label>
+          <label class="field">
+            <span>Human wait timeout</span>
+            <input id="timeout-human-wait" type="text" placeholder="unlimited" />
+          </label>
+        </div>
+        <div class="button-row">
+          <button id="load-runtime-config" class="button">Load Runtime Config</button>
+          <button id="save-runtime-config" class="button button-primary">Save Runtime Settings</button>
+        </div>
+        <p id="runtime-settings-status" class="panel-note">Timeout values accept durations such as <code>30m</code>, <code>2h</code>, or <code>unlimited</code>.</p>
+      </section>
+
+      <section id="updates-panel" class="panel panel-updates" data-pane="settings">
+        <div class="panel-header">
+          <h2>Updates</h2>
+          <div class="panel-meta">GitHub release check/changelog foundation. Safe self-install is deferred until signed/checksummed Windows assets exist.</div>
+        </div>
+        <div id="update-status-body" class="detail-grid"></div>
+        <div class="button-row">
+          <button id="check-updates" class="button">Check for Updates</button>
+          <button id="copy-update-changelog" class="button">Copy Changelog</button>
+          <button id="install-update" class="button" disabled>Install Update</button>
+        </div>
       </section>
 
       <section class="panel panel-controls" data-pane="run">
@@ -217,11 +293,14 @@
 
       <section class="panel panel-side-chat" data-pane="chat">
         <div class="panel-header">
-          <h2>Side Chat - recorded only for now</h2>
-          <div class="panel-meta">This does not affect the run. Messages are stored through the protocol, but there is no AI conversation backend yet.</div>
+          <h2>Side Chat - context assistant</h2>
+          <div class="panel-meta">Real-time answers from visible runtime context. It does not affect the active run unless you explicitly promote something to Control Chat.</div>
+        </div>
+        <div class="non-interfering-banner">
+          Side Chat does not set stop flags, queue Control Chat, change pending actions, or alter planner/Codex flow. It answers from observable status/events/artifacts only.
         </div>
         <label class="field">
-          <span>Side chat message</span>
+          <span>Side note</span>
           <textarea id="side-chat-message" rows="4" placeholder="What still remains before release?"></textarea>
         </label>
         <div class="inline-control">
@@ -233,7 +312,7 @@
               <option value="none">none</option>
             </select>
           </label>
-          <button id="send-side-chat-message" class="button button-primary">Record Side Message</button>
+          <button id="send-side-chat-message" class="button button-primary">Ask Side Chat</button>
         </div>
         <div id="side-chat-body" class="side-chat-list"></div>
       </section>
@@ -270,7 +349,7 @@
       </section>
 
       <section class="panel panel-status" data-pane="run">
-        <h2>Status</h2>
+        <h2>Current Run Status</h2>
         <div id="status-body" class="status-grid"></div>
       </section>
 
@@ -285,7 +364,19 @@
           <div class="panel-meta">Shown when Codex or a worker needs the operator. Primary executor approve/deny is protocol-backed.</div>
         </div>
         <div id="approval-body" class="detail-grid"></div>
-        <div class="button-row">
+        <div id="ask-human-actions-row" class="ask-human-answer-shell" hidden>
+          <label class="field">
+            <span>Your answer to the planner</span>
+            <textarea id="ask-human-answer" rows="5" placeholder="Type the raw answer the planner needs. The shell will not reinterpret it."></textarea>
+          </label>
+          <div class="button-row">
+            <button id="send-answer-continue" class="button button-primary">Send Answer and Continue</button>
+            <button id="send-answer-only" class="button">Send Answer Only</button>
+            <button id="continue-queued-answer" class="button" disabled>Continue with Queued Answer</button>
+          </div>
+          <p id="ask-human-status" class="panel-note">Answers are queued through inject_control_message; Continue uses the explicit continue_run protocol action.</p>
+        </div>
+        <div id="approval-actions-row" class="button-row">
           <button id="approve-executor" class="button button-primary" disabled>Approve</button>
           <button id="deny-executor" class="button" disabled>Deny</button>
           <button id="copy-approval-details" class="button">Copy technical details</button>
@@ -293,7 +384,15 @@
       </section>
 
       <section class="panel panel-summary" data-pane="run">
-        <h2>What Happened?</h2>
+        <div class="panel-header">
+          <h2>What Happened?</h2>
+          <div class="panel-meta">Use Copy Debug Bundle when asking ChatGPT/Codex for help. It excludes secrets and full artifact bodies.</div>
+        </div>
+        <div class="button-row debug-action-row">
+          <button id="copy-debug-bundle" class="button button-primary">Copy Debug Bundle</button>
+          <button id="copy-latest-error" class="button">Copy Latest Error</button>
+          <button id="summary-open-live-output" class="button">Open Live Output</button>
+        </div>
         <div id="summary-body" class="summary-grid"></div>
       </section>
 

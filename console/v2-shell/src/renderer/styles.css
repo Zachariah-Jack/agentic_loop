@@ -11,6 +11,7 @@
   --danger: #8a1d2c;
   --info: #255f85;
   --shadow: 0 18px 48px rgba(31, 41, 34, 0.08);
+  --sticky-top-offset: 150px;
   font-family: "Segoe UI", "Trebuchet MS", sans-serif;
 }
 
@@ -97,7 +98,7 @@ h1 {
 .top-status-strip {
   position: sticky;
   top: 0;
-  z-index: 10;
+  z-index: 30;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
@@ -218,6 +219,7 @@ h1 {
   grid-template-columns: 210px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+  position: relative;
 }
 
 .workspace-shell .app-grid {
@@ -227,9 +229,14 @@ h1 {
 
 .side-nav {
   position: sticky;
-  top: 136px;
+  top: calc(var(--sticky-top-offset) + 12px);
+  align-self: start;
+  z-index: 5;
   display: grid;
   gap: 8px;
+  max-height: calc(100vh - var(--sticky-top-offset) - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 14px;
   border: 1px solid var(--panel-border);
   border-radius: 18px;
@@ -510,14 +517,17 @@ h1 {
 }
 
 .panel-progress {
-  grid-column: span 6;
+  grid-column: 1 / -1;
 }
 
 .panel-status,
-.panel-pending,
-.panel-approval,
 .panel-summary {
-  grid-column: span 3;
+  grid-column: span 6;
+}
+
+.panel-pending,
+.panel-approval {
+  grid-column: span 6;
 }
 
 .panel-workers {
@@ -582,6 +592,25 @@ textarea {
 
 .button:hover {
   border-color: var(--accent);
+}
+
+.button:disabled,
+.button[disabled] {
+  cursor: not-allowed;
+  opacity: 0.48;
+  color: var(--muted);
+}
+
+.button:disabled:hover,
+.button[disabled]:hover {
+  border-color: var(--panel-border);
+}
+
+.button-primary:disabled,
+.button-primary[disabled] {
+  background: #f3f7f3;
+  color: var(--muted);
+  border-color: var(--panel-border);
 }
 
 .button-primary {
@@ -677,12 +706,20 @@ textarea {
   gap: 10px;
 }
 
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  margin: 14px 0;
+}
+
 .status-row {
   display: grid;
-  grid-template-columns: 170px 1fr;
+  grid-template-columns: minmax(150px, 210px) minmax(0, 1fr);
   gap: 12px;
   padding: 10px 0;
   border-bottom: 1px solid #edf1ed;
+  min-width: 0;
 }
 
 .detail-row,
@@ -771,6 +808,88 @@ textarea {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 18px;
+}
+
+.progress-detail-sections {
+  display: grid;
+  gap: 10px;
+}
+
+.progress-detail-section {
+  border: 1px solid #e4ebe4;
+  border-radius: 14px;
+  background: #fbfdfb;
+  overflow: hidden;
+}
+
+.progress-detail-section summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  padding: 12px 14px;
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.progress-detail-section summary small {
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.progress-detail-body {
+  border-top: 1px solid #edf1ed;
+  padding: 12px 14px 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.progress-source-row {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+.what-happened-card {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid #dbe7dc;
+  border-radius: 16px;
+  background: #fbfdfb;
+}
+
+.what-happened-card strong,
+.what-happened-card p {
+  overflow-wrap: anywhere;
+}
+
+.what-happened-card p {
+  margin-top: 8px;
+  color: var(--muted);
+}
+
+.what-happened-card-danger {
+  background: #fff8f9;
+  border-color: #f0d7dc;
+}
+
+.what-happened-card-warning {
+  background: #fffdf8;
+  border-color: #ead9b8;
+}
+
+.what-happened-card-neutral,
+.what-happened-card-success {
+  background: #fbfdfb;
+}
+
+.debug-action-row {
+  margin-bottom: 12px;
 }
 
 .artifact-layout,
@@ -862,6 +981,38 @@ textarea {
 .attention-empty p {
   margin-top: 6px;
   color: var(--muted);
+}
+
+.attention-ask-human {
+  background: #fff8e8;
+  border-color: #ead4a3;
+}
+
+.attention-safe-stop,
+.non-interfering-banner,
+.side-chat-mode-note {
+  background: #eef7ff;
+  border: 1px solid #c9ddf4;
+  border-radius: 14px;
+  color: #244564;
+  line-height: 1.45;
+  padding: 12px 14px;
+}
+
+.side-chat-mode-note {
+  font-size: 12px;
+}
+
+.ask-human-answer-shell {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid #ead4a3;
+  border-radius: 16px;
+  background: #fffaf0;
+}
+
+.ask-human-answer-shell textarea {
+  min-height: 150px;
 }
 
 .terminal-tabs {
@@ -1177,6 +1328,30 @@ textarea {
   background: #fff8f9;
 }
 
+.pinned-error {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid #f0d7dc;
+  border-radius: 14px;
+  background: #fff8f9;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.pinned-error span {
+  color: var(--ink);
+  line-height: 1.45;
+}
+
+.pinned-error small {
+  color: var(--muted);
+}
+
+.pinned-error-large {
+  margin-bottom: 12px;
+}
+
 .button-mini {
   width: auto;
   padding: 6px 10px;
@@ -1289,7 +1464,9 @@ code {
   }
 
   .side-nav {
-    position: static;
+    position: sticky;
+    top: calc(var(--sticky-top-offset) + 8px);
+    max-height: calc(100vh - var(--sticky-top-offset) - 16px);
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1328,6 +1505,10 @@ code {
   .worker-layout,
   .progress-head {
     flex-direction: column;
+  }
+
+  .what-happened-card {
+    grid-template-columns: 1fr;
   }
 
   .worker-list-shell {

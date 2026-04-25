@@ -1,12 +1,16 @@
 const path = require("node:path");
 const { app, BrowserWindow, ipcMain } = require("electron");
 const { createTerminalManager } = require("./terminal-manager");
+const { shutdownWindowStateByKey, shutdownAllWindowStates } = require("./window-state-cleanup");
+const { restartOwnedBackend } = require("./backend-manager");
 
 const {
   normalizeControlBaseURL,
   getStatusSnapshot,
   startRun,
   continueRun,
+  getActiveRunGuard,
+  recoverStaleRun,
   testPlannerModel,
   testExecutorModel,
   approveExecutor,
@@ -29,6 +33,13 @@ const {
   dispatchWorker,
   removeWorker,
   integrateWorkers,
+  getRuntimeConfig,
+  setRuntimeConfig,
+  checkForUpdates,
+  getUpdateStatus,
+  installUpdate,
+  skipUpdate,
+  getUpdateChangelog,
   setVerbosity,
   setStopSafe,
   clearStopFlag,
@@ -36,6 +47,7 @@ const {
 } = require("../src/protocol/client");
 
 const defaultAddress = "http://127.0.0.1:44777";
+const expectedRepoPath = String(process.env.ORCHESTRATOR_V2_EXPECTED_REPO || "").trim();
 const windowState = new Map();
 
 app.setName("Orchestrator Console");
@@ -52,6 +64,7 @@ function stateForWindow(browserWindow) {
       connected: false,
       status: "disconnected",
       message: "not connected",
+      expectedRepoPath,
       abortController: null,
       lastEventSequence: 0,
       terminal: createTerminalManager(),
@@ -59,17 +72,24 @@ function stateForWindow(browserWindow) {
 
     const state = windowState.get(key);
     state.terminal.onState((snapshot) => {
-      if (!browserWindow.isDestroyed()) {
-        browserWindow.webContents.send("terminal:state", snapshot);
-      }
+      sendToWindow(browserWindow, "terminal:state", snapshot);
     });
     state.terminal.onData((payload) => {
-      if (!browserWindow.isDestroyed()) {
-        browserWindow.webContents.send("terminal:data", payload);
-      }
+      sendToWindow(browserWindow, "terminal:data", payload);
     });
   }
   return windowState.get(key);
+}
+
+function sendToWindow(browserWindow, channel, payload) {
+  if (!browserWindow || browserWindow.isDestroyed()) {
+    return false;
+  }
+  if (!browserWindow.webContents || browserWindow.webContents.isDestroyed()) {
+    return false;
+  }
+  browserWindow.webContents.send(channel, payload);
+  return true;
 }
 
 function connectionSnapshot(browserWindow) {
@@ -79,6 +99,7 @@ function connectionSnapshot(browserWindow) {
     status: state.status,
     address: state.address,
     message: state.message,
+    expectedRepoPath: state.expectedRepoPath || expectedRepoPath,
   };
 }
 
@@ -89,7 +110,7 @@ function emitConnectionState(browserWindow, overrides) {
 
   const state = stateForWindow(browserWindow);
   Object.assign(state, overrides);
-  browserWindow.webContents.send("protocol:connection-state", connectionSnapshot(browserWindow));
+  sendToWindow(browserWindow, "protocol:connection-state", connectionSnapshot(browserWindow));
 }
 
 function stopEventStream(browserWindow) {
@@ -118,9 +139,7 @@ async function startEventStream(browserWindow, address) {
       if (Number.isFinite(event && event.sequence)) {
         state.lastEventSequence = Math.max(state.lastEventSequence, event.sequence);
       }
-      if (!browserWindow.isDestroyed()) {
-        browserWindow.webContents.send("protocol:event", event);
-      }
+      sendToWindow(browserWindow, "protocol:event", event);
     },
     { signal: controller.signal },
   ).then(
@@ -181,6 +200,7 @@ async function connectWindow(browserWindow, rawAddress) {
   return {
     connection: connectionSnapshot(browserWindow),
     snapshot,
+    expectedRepoPath,
   };
 }
 
@@ -208,30 +228,23 @@ function createWindow() {
     },
   });
 
+  const windowKey = browserWindow.webContents.id;
   browserWindow.loadFile(path.join(__dirname, "..", "src", "renderer", "index.html"));
-  browserWindow.on("closed", () => {
-    stopEventStream(browserWindow);
-    const key = browserWindow.webContents.id;
-    const state = windowState.get(key);
-    if (state) {
-      state.terminal.shutdown();
+  browserWindow.on("close", () => {
+    const state = windowState.get(windowKey);
+    if (state && state.abortController) {
+      state.abortController.abort();
+      state.abortController = null;
     }
-    windowState.delete(key);
+  });
+  browserWindow.on("closed", () => {
+    shutdownWindowStateByKey(windowState, windowKey);
   });
   return browserWindow;
 }
 
 function shutdownOwnedWindowState() {
-  for (const state of windowState.values()) {
-    if (state.abortController) {
-      state.abortController.abort();
-      state.abortController = null;
-    }
-    if (state.terminal) {
-      state.terminal.shutdown();
-    }
-  }
-  windowState.clear();
+  shutdownAllWindowStates(windowState);
 }
 
 ipcMain.handle("protocol:connect", async (event, payload = {}) => {
@@ -240,6 +253,24 @@ ipcMain.handle("protocol:connect", async (event, payload = {}) => {
 
 ipcMain.handle("protocol:get-connection-state", async (event) => {
   return connectionSnapshot(browserWindowForEvent(event));
+});
+
+ipcMain.handle("shell:restart-backend", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  stopEventStream(browserWindow);
+  try {
+    stateForWindow(browserWindow).terminal.shutdown();
+  } catch (_error) {
+    // Recovery must still proceed if a terminal session has already exited.
+  }
+  emitConnectionState(browserWindow, {
+    connected: false,
+    status: "reconnecting",
+    message: "restarting owned backend",
+  });
+  return restartOwnedBackend({
+    address: payload.address || requireConnectedAddress(browserWindow, ""),
+  });
 });
 
 ipcMain.handle("protocol:get-status", async (event, payload = {}) => {
@@ -263,6 +294,20 @@ ipcMain.handle("protocol:continue-run", async (event, payload = {}) => {
     run_id: payload.runId || "",
     repo_path: payload.repoPath || "",
     mode: payload.mode || "",
+  });
+});
+
+ipcMain.handle("protocol:get-active-run-guard", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return getActiveRunGuard(requireConnectedAddress(browserWindow, payload.address));
+});
+
+ipcMain.handle("protocol:recover-stale-run", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return recoverStaleRun(requireConnectedAddress(browserWindow, payload.address), {
+    run_id: payload.runId || "",
+    reason: payload.reason || "operator_recovery",
+    force: payload.force === undefined ? true : Boolean(payload.force),
   });
 });
 
@@ -435,6 +480,50 @@ ipcMain.handle("protocol:integrate-workers", async (event, payload = {}) => {
   const browserWindow = browserWindowForEvent(event);
   return integrateWorkers(requireConnectedAddress(browserWindow, payload.address), {
     worker_ids: Array.isArray(payload.workerIds) ? payload.workerIds : [],
+  });
+});
+
+ipcMain.handle("protocol:get-runtime-config", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return getRuntimeConfig(requireConnectedAddress(browserWindow, payload.address));
+});
+
+ipcMain.handle("protocol:set-runtime-config", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  const { address, ...patch } = payload || {};
+  return setRuntimeConfig(requireConnectedAddress(browserWindow, address), patch);
+});
+
+ipcMain.handle("protocol:check-for-updates", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return checkForUpdates(requireConnectedAddress(browserWindow, payload.address), {
+    include_prereleases: payload.includePrereleases,
+  });
+});
+
+ipcMain.handle("protocol:get-update-status", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return getUpdateStatus(requireConnectedAddress(browserWindow, payload.address));
+});
+
+ipcMain.handle("protocol:install-update", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return installUpdate(requireConnectedAddress(browserWindow, payload.address), {
+    version: payload.version || "",
+  });
+});
+
+ipcMain.handle("protocol:skip-update", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return skipUpdate(requireConnectedAddress(browserWindow, payload.address), {
+    version: payload.version || "",
+  });
+});
+
+ipcMain.handle("protocol:get-update-changelog", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return getUpdateChangelog(requireConnectedAddress(browserWindow, payload.address), {
+    include_prereleases: payload.includePrereleases,
   });
 });
 

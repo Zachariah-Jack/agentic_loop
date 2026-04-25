@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -83,6 +84,53 @@ func TestLookupLatestGPT5ModelUsesModelsAPI(t *testing.T) {
 	}
 	if got != "gpt-5.5" {
 		t.Fatalf("lookupLatestGPT5Model() = %q, want gpt-5.5", got)
+	}
+}
+
+func TestProbePlannerModelWithResponsesUsesTinyResponsesCall(t *testing.T) {
+	var captured map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/responses" {
+			t.Fatalf("path = %s, want /responses", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
+			t.Fatalf("Authorization = %q, want bearer token", got)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_probe","model":"gpt-5.4"}`))
+	}))
+	defer server.Close()
+
+	restoreEndpoint := plannerProbeEndpoint
+	restoreClient := plannerProbeHTTPClient
+	plannerProbeEndpoint = server.URL + "/responses"
+	plannerProbeHTTPClient = server.Client()
+	defer func() {
+		plannerProbeEndpoint = restoreEndpoint
+		plannerProbeHTTPClient = restoreClient
+	}()
+
+	result, err := probePlannerModelWithResponses(context.Background(), "sk-test", "gpt-5.4")
+	if err != nil {
+		t.Fatalf("probePlannerModelWithResponses() error = %v", err)
+	}
+	if captured["model"] != "gpt-5.4" {
+		t.Fatalf("captured model = %#v, want gpt-5.4", captured["model"])
+	}
+	if captured["input"] != "Reply with only OK." {
+		t.Fatalf("captured input = %#v, want tiny probe prompt", captured["input"])
+	}
+	if captured["max_output_tokens"] != float64(16) {
+		t.Fatalf("captured max_output_tokens = %#v, want 16", captured["max_output_tokens"])
+	}
+	if result.VerifiedModel != "gpt-5.4" || result.ResponseID != "resp_probe" {
+		t.Fatalf("result = %#v, want verified gpt-5.4 response id", result)
 	}
 }
 

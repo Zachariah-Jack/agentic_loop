@@ -262,12 +262,62 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 
-	if _, err := store.db.Exec("PRAGMA foreign_keys = ON;"); err != nil {
-		_ = db.Close()
-		return nil, err
+	for _, statement := range []string{
+		"PRAGMA foreign_keys = ON;",
+		"PRAGMA busy_timeout = 5000;",
+		"PRAGMA journal_mode = WAL;",
+		"PRAGMA synchronous = NORMAL;",
+	} {
+		if _, err := store.db.Exec(statement); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 
 	return store, nil
+}
+
+func IsBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "sqlite_busy") ||
+		strings.Contains(text, "sqlite_locked") ||
+		strings.Contains(text, "database is locked") ||
+		strings.Contains(text, "database table is locked") ||
+		strings.Contains(text, "database schema is locked")
+}
+
+func WithBusyRetry(ctx context.Context, fn func() error) error {
+	if fn == nil {
+		return nil
+	}
+	delays := []time.Duration{
+		50 * time.Millisecond,
+		100 * time.Millisecond,
+		200 * time.Millisecond,
+		350 * time.Millisecond,
+		500 * time.Millisecond,
+	}
+	var err error
+	for attempt := 0; attempt <= len(delays); attempt++ {
+		err = fn()
+		if err == nil || !IsBusyError(err) {
+			return err
+		}
+		if attempt == len(delays) {
+			break
+		}
+		timer := time.NewTimer(delays[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return err
 }
 
 func (s *Store) Close() error {
@@ -406,6 +456,24 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_dogfood_issues_repo_created_at
 			ON dogfood_issues(repo_path, created_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS build_time (
+			repo_path TEXT PRIMARY KEY,
+			total_build_time_ms INTEGER NOT NULL DEFAULT 0,
+			current_active_session_started_at TEXT NOT NULL DEFAULT '',
+			last_active_session_ended_at TEXT NOT NULL DEFAULT '',
+			current_step_started_at TEXT NOT NULL DEFAULT '',
+			current_run_started_at TEXT NOT NULL DEFAULT '',
+			current_step_label TEXT NOT NULL DEFAULT '',
+			planner_active_duration_ms INTEGER NOT NULL DEFAULT 0,
+			executor_active_duration_ms INTEGER NOT NULL DEFAULT 0,
+			executor_thinking_duration_ms INTEGER NOT NULL DEFAULT 0,
+			command_active_duration_ms INTEGER NOT NULL DEFAULT 0,
+			install_active_duration_ms INTEGER NOT NULL DEFAULT 0,
+			test_active_duration_ms INTEGER NOT NULL DEFAULT 0,
+			human_wait_duration_ms INTEGER NOT NULL DEFAULT 0,
+			blocked_duration_ms INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL
+		);`,
 	}
 
 	for _, statement := range statements {
@@ -1160,6 +1228,46 @@ func (s *Store) SaveRuntimeIssue(ctx context.Context, runID string, reason strin
 		return fmt.Errorf("run %s not found", runID)
 	}
 
+	return nil
+}
+
+func (s *Store) MarkRunAbandoned(ctx context.Context, runID string, reason string, message string) error {
+	if strings.TrimSpace(runID) == "" {
+		return errors.New("run id is required")
+	}
+	if strings.TrimSpace(reason) == "" {
+		return errors.New("abandon reason is required")
+	}
+	if strings.TrimSpace(message) == "" {
+		return errors.New("abandon message is required")
+	}
+
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE runs
+		 SET updated_at = ?,
+		     status = ?,
+		     latest_stop_reason = ?,
+		     runtime_issue_reason = ?,
+		     runtime_issue_message = ?
+		 WHERE id = ?`,
+		formatTime(time.Now().UTC()),
+		string(StatusCancelled),
+		strings.TrimSpace(reason),
+		strings.TrimSpace(reason),
+		strings.TrimSpace(message),
+		runID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("run %s not found", runID)
+	}
 	return nil
 }
 

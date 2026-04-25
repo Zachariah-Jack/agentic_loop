@@ -86,6 +86,14 @@ async function continueRun(baseURL, payload = {}, options = {}) {
   return callControlAction(baseURL, "continue_run", payload, options);
 }
 
+async function getActiveRunGuard(baseURL, options = {}) {
+  return callControlAction(baseURL, "get_active_run_guard", {}, options);
+}
+
+async function recoverStaleRun(baseURL, payload = {}, options = {}) {
+  return callControlAction(baseURL, "recover_stale_run", payload, options);
+}
+
 async function testPlannerModel(baseURL, payload = {}, options = {}) {
   return callControlAction(baseURL, "test_planner_model", payload, options);
 }
@@ -172,6 +180,34 @@ async function removeWorker(baseURL, payload, options = {}) {
 
 async function integrateWorkers(baseURL, payload, options = {}) {
   return callControlAction(baseURL, "integrate_workers", payload, options);
+}
+
+async function getRuntimeConfig(baseURL, options = {}) {
+  return callControlAction(baseURL, "get_runtime_config", {}, options);
+}
+
+async function setRuntimeConfig(baseURL, payload, options = {}) {
+  return callControlAction(baseURL, "set_runtime_config", payload, options);
+}
+
+async function checkForUpdates(baseURL, payload = {}, options = {}) {
+  return callControlAction(baseURL, "check_for_updates", payload, options);
+}
+
+async function getUpdateStatus(baseURL, options = {}) {
+  return callControlAction(baseURL, "get_update_status", {}, options);
+}
+
+async function installUpdate(baseURL, payload = {}, options = {}) {
+  return callControlAction(baseURL, "install_update", payload, options);
+}
+
+async function skipUpdate(baseURL, payload = {}, options = {}) {
+  return callControlAction(baseURL, "skip_update", payload, options);
+}
+
+async function getUpdateChangelog(baseURL, payload = {}, options = {}) {
+  return callControlAction(baseURL, "get_update_changelog", payload, options);
 }
 
 async function setVerbosity(baseURL, verbosity, options = {}) {
@@ -275,6 +311,8 @@ module.exports = {
   getStatusSnapshot,
   startRun,
   continueRun,
+  getActiveRunGuard,
+  recoverStaleRun,
   testPlannerModel,
   testExecutorModel,
   approveExecutor,
@@ -297,6 +335,13 @@ module.exports = {
   dispatchWorker,
   removeWorker,
   integrateWorkers,
+  getRuntimeConfig,
+  setRuntimeConfig,
+  checkForUpdates,
+  getUpdateStatus,
+  installUpdate,
+  skipUpdate,
+  getUpdateChangelog,
   setVerbosity,
   setStopSafe,
   clearStopFlag,

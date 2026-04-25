@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
+	"orchestrator/internal/config"
 	"orchestrator/internal/executor"
 	"orchestrator/internal/executor/appserver"
 )
@@ -75,9 +77,10 @@ func runRun(ctx context.Context, inv Invocation) error {
 }
 
 type lazyExecutorClient struct {
-	version string
-	mu      sync.Mutex
-	client  *appserver.Client
+	version        string
+	executeTimeout time.Duration
+	mu             sync.Mutex
+	client         *appserver.Client
 }
 
 func (l *lazyExecutorClient) Execute(ctx context.Context, req executor.TurnRequest) (executor.TurnResult, error) {
@@ -88,10 +91,23 @@ func (l *lazyExecutorClient) Execute(ctx context.Context, req executor.TurnReque
 			l.mu.Unlock()
 			return executor.TurnResult{}, err
 		}
+		client.Timeout = l.executeTimeout
 		l.client = &client
 	}
 	client := l.client
 	l.mu.Unlock()
 
 	return client.Execute(ctx, req)
+}
+
+func newLazyExecutorClient(version string, cfg config.Config) lazyExecutorClient {
+	timeout, unlimited, err := config.ExecutorTurnTimeoutDuration(cfg)
+	if err != nil || unlimited {
+		timeout = 0
+	}
+	return lazyExecutorClient{version: version, executeTimeout: timeout}
+}
+
+func ptrLazyExecutorClient(client lazyExecutorClient) *lazyExecutorClient {
+	return &client
 }

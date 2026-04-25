@@ -83,6 +83,38 @@ func TestDefaultPlannerModelUsesLatestGPT5Alias(t *testing.T) {
 	}
 }
 
+func TestDefaultTimeoutsPreferUnlimitedExecutorAndHumanWait(t *testing.T) {
+	t.Parallel()
+
+	cfg := WithDefaults(Config{})
+	if cfg.Timeouts.ExecutorTurnTimeout != "unlimited" {
+		t.Fatalf("ExecutorTurnTimeout = %q, want unlimited", cfg.Timeouts.ExecutorTurnTimeout)
+	}
+	if cfg.Timeouts.HumanWaitTimeout != "unlimited" {
+		t.Fatalf("HumanWaitTimeout = %q, want unlimited", cfg.Timeouts.HumanWaitTimeout)
+	}
+	duration, unlimited, err := ExecutorTurnTimeoutDuration(cfg)
+	if err != nil {
+		t.Fatalf("ExecutorTurnTimeoutDuration() error = %v", err)
+	}
+	if !unlimited || duration != 0 {
+		t.Fatalf("ExecutorTurnTimeoutDuration() = %s, %t; want 0, true", duration, unlimited)
+	}
+}
+
+func TestValidateTimeoutValueAcceptsDurationAndUnlimited(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"30m", "2h", "unlimited", "no-limit", "null"} {
+		if err := ValidateTimeoutValue("executor_turn_timeout", value); err != nil {
+			t.Fatalf("ValidateTimeoutValue(%q) error = %v", value, err)
+		}
+	}
+	if err := ValidateTimeoutValue("executor_turn_timeout", "soon"); err == nil {
+		t.Fatal("ValidateTimeoutValue(soon) unexpectedly succeeded")
+	}
+}
+
 func TestNormalizeVerbosityAcceptsKnownLevels(t *testing.T) {
 	t.Parallel()
 

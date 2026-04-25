@@ -8,6 +8,8 @@ const {
   getStatusSnapshot,
   startRun,
   continueRun,
+  getActiveRunGuard,
+  recoverStaleRun,
   testPlannerModel,
   testExecutorModel,
   approveExecutor,
@@ -30,7 +32,14 @@ const {
   dispatchWorker,
   removeWorker,
   integrateWorkers,
+  getRuntimeConfig,
+  setRuntimeConfig,
+  checkForUpdates,
+  getUpdateStatus,
+  getUpdateChangelog,
   setVerbosity,
+  setStopSafe,
+  clearStopFlag,
   streamControlEvents,
 } = require("../src/protocol/client");
 const {
@@ -41,11 +50,17 @@ const {
   formatProtocolError,
 } = require("../src/renderer/shell-helpers");
 const {
+  shutdownWindowStateByKey,
+  shutdownAllWindowStates,
+} = require("../electron/window-state-cleanup");
+const {
   buildStatusViewModel,
   buildConnectionStatusViewModel,
+  buildRepoBindingViewModel,
   buildLoopStatusViewModel,
   buildVerbosityViewModel,
   buildRecommendedActionViewModel,
+  buildRunControlStateViewModel,
   buildTopStatusViewModel,
   buildHomeDashboardViewModel,
   translateStopReason,
@@ -53,11 +68,16 @@ const {
   buildActivityTimelineViewModel,
   buildTerminalTabsViewModel,
   buildPendingActionViewModel,
+  buildAskHumanViewModel,
   buildArtifactListViewModel,
   buildApprovalViewModel,
   buildRunSummaryViewModel,
   buildWhatHappenedViewModel,
+  buildLatestErrorViewModel,
+  buildDebugBundleText,
+  buildModelHealthBundleText,
   buildCodexReadinessViewModel,
+  normalizeModelHealthSnapshot,
   modelUnavailableFromText,
   buildSideChatViewModel,
   buildDogfoodIssuesViewModel,
@@ -67,6 +87,16 @@ const {
   classifyActivityCategory,
   formatEventSummary,
 } = require("../src/renderer/view-model");
+const {
+  loadBackendMetadata,
+  isOwnedBackend,
+  metadataMatchesAddress,
+  ownerMarker,
+  fileModifiedTime,
+  listenerMatchesOwnedMetadata,
+  clearOwnedBackendPort,
+  restartOwnedBackend,
+} = require("../electron/backend-manager");
 
 function memoryStorage(seed = {}) {
   const values = new Map(Object.entries(seed));
@@ -138,6 +168,57 @@ test("startRun and continueRun use real protocol actions", async () => {
   assert.match(requestBodies[1], /"run_id":"run_protocol"/);
 });
 
+test("clear-stop recovery uses explicit clear_stop_flag before continue_run", async () => {
+  const requestBodies = [];
+  const fetchImpl = async (_url, init) => {
+    requestBodies.push(init.body);
+    return new Response(JSON.stringify({
+      type: "response",
+      ok: true,
+      payload: { ok: true, run_id: "run_stop" },
+    }), { status: 200 });
+  };
+
+  await clearStopFlag("127.0.0.1:44777", "run_stop", { fetchImpl });
+  await continueRun("127.0.0.1:44777", {
+    run_id: "run_stop",
+    repo_path: "D:/repo",
+  }, { fetchImpl });
+
+  assert.match(requestBodies[0], /"action":"clear_stop_flag"/);
+  assert.match(requestBodies[0], /"run_id":"run_stop"/);
+  assert.match(requestBodies[1], /"action":"continue_run"/);
+});
+
+test("active-run recovery protocol helpers use explicit control actions", async () => {
+  const requestBodies = [];
+  const fetchImpl = async (_url, init) => {
+    requestBodies.push(init.body);
+    return new Response(JSON.stringify({
+      type: "response",
+      ok: true,
+      payload: {
+        present: true,
+        recovered: true,
+        active_guard_cleared: true,
+        run_id: "run_stale",
+      },
+    }), { status: 200 });
+  };
+
+  await getActiveRunGuard("127.0.0.1:44777", { fetchImpl });
+  await recoverStaleRun("127.0.0.1:44777", {
+    run_id: "run_stale",
+    reason: "operator_recovery",
+    force: true,
+  }, { fetchImpl });
+
+  assert.match(requestBodies[0], /"action":"get_active_run_guard"/);
+  assert.match(requestBodies[1], /"action":"recover_stale_run"/);
+  assert.match(requestBodies[1], /"run_id":"run_stale"/);
+  assert.match(requestBodies[1], /"force":true/);
+});
+
 test("model test protocol helpers use explicit model health actions", async () => {
   const requestBodies = [];
   const fetchImpl = async (_url, init) => {
@@ -158,6 +239,182 @@ test("model test protocol helpers use explicit model health actions", async () =
   assert.match(requestBodies[0], /"action":"test_planner_model"/);
   assert.match(requestBodies[0], /"model":"gpt-5-latest"/);
   assert.match(requestBodies[1], /"action":"test_executor_model"/);
+});
+
+test("runtime config and update helpers use explicit protocol actions", async () => {
+  const requestBodies = [];
+  const fetchImpl = async (_url, init) => {
+    requestBodies.push(init.body);
+    return new Response(JSON.stringify({
+      type: "response",
+      ok: true,
+      payload: { ok: true, latest_version: "v1.1.0" },
+    }), { status: 200 });
+  };
+
+  await getRuntimeConfig("127.0.0.1:44777", { fetchImpl });
+  await setRuntimeConfig("127.0.0.1:44777", {
+    timeouts: { executor_turn_timeout: "unlimited" },
+    permission_profile: "autonomous",
+  }, { fetchImpl });
+  await checkForUpdates("127.0.0.1:44777", {}, { fetchImpl });
+  await getUpdateStatus("127.0.0.1:44777", { fetchImpl });
+  await getUpdateChangelog("127.0.0.1:44777", {}, { fetchImpl });
+
+  assert.match(requestBodies[0], /"action":"get_runtime_config"/);
+  assert.match(requestBodies[1], /"action":"set_runtime_config"/);
+  assert.match(requestBodies[1], /"executor_turn_timeout":"unlimited"/);
+  assert.match(requestBodies[1], /"permission_profile":"autonomous"/);
+  assert.match(requestBodies[2], /"action":"check_for_updates"/);
+  assert.match(requestBodies[3], /"action":"get_update_status"/);
+  assert.match(requestBodies[4], /"action":"get_update_changelog"/);
+});
+
+test("normalizeModelHealthSnapshot lets newer successful tests clear stale Codex model errors", () => {
+  const snapshot = {
+    run: {
+      stopped_at: "2026-04-24T02:00:00Z",
+      executor_last_error: "The model `gpt-5.5` does not exist or you do not have access to it.",
+    },
+    model_health: {
+      planner: { component: "planner", configured_model: "gpt-5-latest", verification_state: "not_verified" },
+      executor: {
+        component: "executor",
+        configured_model: "gpt-5.5",
+        requested_model: "gpt-5.5",
+        verification_state: "invalid",
+        model_unavailable: true,
+        last_error: "The model `gpt-5.5` does not exist or you do not have access to it.",
+      },
+      needs_attention: true,
+      blocking: true,
+    },
+  };
+  const normalized = normalizeModelHealthSnapshot(snapshot, {
+    planner: {
+      planner: {
+        component: "planner",
+        configured_model: "gpt-5-latest",
+        requested_model: "gpt-5.4",
+        resolved_model: "gpt-5.4",
+        verified_model: "gpt-5.4-2026-03-05",
+        verification_state: "verified",
+        test_performed: true,
+        last_tested_at: "2026-04-24T02:05:00Z",
+      },
+    },
+    executor: {
+      executor: {
+        component: "executor",
+        configured_model: "gpt-5.5",
+        requested_model: "gpt-5.5",
+        verified_model: "gpt-5.5",
+        verification_state: "verified",
+        access_mode: "danger-full-access sandbox, approval never",
+        effort: "xhigh",
+        codex_model_verified: true,
+        codex_permission_mode_verified: true,
+        codex_executable_path: "C:/Users/me/AppData/Roaming/npm/codex.cmd",
+        codex_version: "codex-cli 0.124.0",
+        test_performed: true,
+        last_tested_at: "2026-04-24T02:06:00Z",
+      },
+    },
+  });
+
+  assert.equal(normalized.model_health.blocking, false);
+  assert.equal(normalized.model_health.needs_attention, false);
+  assert.equal(normalized.model_health.executor.verification_state, "verified");
+  assert.equal(normalized.model_health.executor.model_unavailable, false);
+  assert.equal(buildCodexReadinessViewModel(normalized).modelInvalid, false);
+  assert.equal(buildLatestErrorViewModel(normalized, []).present, false);
+});
+
+test("normalizeModelHealthSnapshot keeps newer failed test blocking after prior success", () => {
+  const normalized = normalizeModelHealthSnapshot({
+    run: { stopped_at: "2026-04-24T02:00:00Z" },
+    model_health: {
+      planner: {
+        component: "planner",
+        configured_model: "gpt-5.4",
+        verification_state: "verified",
+        verified_model: "gpt-5.4",
+      },
+      executor: {
+        component: "executor",
+        configured_model: "gpt-5.5",
+        verification_state: "verified",
+        verified_model: "gpt-5.5",
+        access_mode: "danger-full-access sandbox, approval never",
+        effort: "xhigh",
+        codex_model_verified: true,
+        codex_permission_mode_verified: true,
+        last_tested_at: "2026-04-24T02:01:00Z",
+      },
+    },
+  }, {
+    executor: {
+      executor: {
+        component: "executor",
+        configured_model: "gpt-5.5",
+        requested_model: "gpt-5.5",
+        verification_state: "invalid",
+        model_unavailable: true,
+        last_error: "The model `gpt-5.5` does not exist or you do not have access to it.",
+        test_performed: true,
+        last_tested_at: "2026-04-24T02:07:00Z",
+      },
+    },
+  });
+
+  assert.equal(normalized.model_health.blocking, true);
+  assert.equal(normalized.model_health.executor.verification_state, "invalid");
+});
+
+test("buildModelHealthBundleText includes backend identity and redacts secrets", () => {
+  const bundle = buildModelHealthBundleText({
+    runtime: { repo_root: "D:/repo" },
+    backend: {
+      pid: 1234,
+      started_at: "2026-04-24T02:00:00Z",
+      binary_path: "D:/Projects/agentic_loop/dist/orchestrator.exe",
+      binary_version: "v1.0.1-dev",
+      stale: false,
+    },
+    model_health: {
+      planner: {
+        configured_model: "gpt-5-latest",
+        verified_model: "gpt-5.4",
+        verification_state: "verified",
+      },
+      executor: {
+        configured_model: "gpt-5.5",
+        requested_model: "gpt-5.5",
+        verified_model: "gpt-5.5",
+        verification_state: "verified",
+        access_mode: "danger-full-access sandbox, approval never",
+        effort: "xhigh",
+        codex_model_verified: true,
+        codex_permission_mode_verified: true,
+        codex_executable_path: "C:/Users/me/AppData/Roaming/npm/codex.cmd",
+        codex_version: "codex-cli 0.124.0",
+        codex_config_source: "C:/Users/me/.codex/config.toml",
+        last_error: "api_key=sk-secretsecretsecret",
+      },
+      needs_attention: false,
+      blocking: false,
+      message: "Planner and Codex requirements verified.",
+    },
+  }, {
+    now: "2026-04-24T02:10:00Z",
+    address: "http://127.0.0.1:44777",
+  });
+
+  assert.match(bundle, /Backend PID: 1234/);
+  assert.match(bundle, /Planner verified: yes/);
+  assert.match(bundle, /Codex verified: yes/);
+  assert.doesNotMatch(bundle, /sk-secretsecretsecret/);
+  assert.match(bundle, /api_key: \[REDACTED\]/);
 });
 
 test("injectControlMessage surfaces control protocol errors truthfully", async () => {
@@ -319,7 +576,7 @@ test("side chat protocol helpers use the real control actions", async () => {
     return new Response(JSON.stringify({
       type: "response",
       ok: true,
-      payload: { available: false, stored: true },
+      payload: { available: true, stored: true },
     }), { status: 200 });
   };
 
@@ -425,6 +682,34 @@ test("buildProgressPanelViewModel normalizes roadmap-aware operator progress", (
   assert.equal(vm.roadmapPath, ".orchestrator/roadmap.md");
   assert.equal(vm.roadmapAlignmentText, "Current slice aligns with the orchestration-focused V2 shell work.");
   assert.equal(vm.roadmapModifiedAt, "2026-04-23T01:02:03Z");
+  assert.equal(vm.sections.length, 5);
+  assert.equal(vm.sections.find((section) => section.id === "roadmap_alignment").open, false);
+  assert.equal(vm.sections.find((section) => section.id === "progress_basis").label, "Progress Basis");
+});
+
+test("long roadmap and planner progress text is grouped into collapsible status sections", () => {
+  const longText = "Roadmap alignment ".repeat(40);
+  const vm = buildProgressPanelViewModel({
+    planner_status: {
+      present: true,
+      progress_basis: "The implementation is blocked by a long diagnostic explanation. ".repeat(8),
+      current_focus: "Status readability",
+      next_intended_step: "Make the status panel readable",
+      why_this_step: "Dogfooding showed narrow cards were hiding useful context.",
+    },
+    roadmap: {
+      present: true,
+      alignment_text: longText,
+    },
+  });
+
+  const roadmap = vm.sections.find((section) => section.id === "roadmap_alignment");
+  const basis = vm.sections.find((section) => section.id === "progress_basis");
+  assert.equal(roadmap.isLong, true);
+  assert.equal(roadmap.open, false);
+  assert.match(roadmap.preview, /\.\.\.$/);
+  assert.equal(basis.isLong, true);
+  assert.equal(basis.open, false);
 });
 
 test("buildRecommendedActionViewModel guides disconnected users to connect", () => {
@@ -469,6 +754,95 @@ test("buildRecommendedActionViewModel uses protocol start when a no-run goal is 
   assert.match(vm.detail, /start_run protocol action/);
 });
 
+test("stale active-run guard recommends mechanical recovery and blocks run controls", () => {
+  const snapshot = {
+    runtime: { repo_root: "D:/repo", repo_ready: true },
+    active_run_guard: {
+      present: true,
+      stale: true,
+      run_id: "run_stale",
+      backend_pid: 1234,
+      session_id: "session_old",
+      message: "This run was active under a previous backend process and may be stale.",
+    },
+    run: {
+      id: "run_stale",
+      status: "initialized",
+      completed: false,
+      resumable: false,
+    },
+  };
+
+  const recommended = buildRecommendedActionViewModel(snapshot, {
+    connection: { connected: true, status: "connected" },
+    goalEntered: true,
+  });
+  const approval = buildApprovalViewModel(snapshot);
+  const loop = buildLoopStatusViewModel(snapshot);
+  const controls = buildRunControlStateViewModel(snapshot, {
+    connection: { connected: true },
+    goalEntered: true,
+  });
+
+  assert.equal(recommended.state, "recovery_needed");
+  assert.equal(recommended.primaryAction.id, "recover_backend");
+  assert.equal(approval.needsAttention, true);
+  assert.equal(approval.badgeCount, 1);
+  assert.equal(approval.staleGuard.runID, "run_stale");
+  assert.equal(loop.state, "recovery_needed");
+  assert.equal(controls.startEnabled, false);
+  assert.equal(controls.continueEnabled, false);
+  assert.match(controls.note, /Recover Backend/);
+});
+
+test("cleared stale active-run guard re-enables continue for execute-ready runs", () => {
+  const snapshot = {
+    runtime: { repo_root: "D:/repo", repo_ready: true },
+    active_run_guard: {
+      present: false,
+      stale: false,
+      message: "no active run guard is currently recorded",
+    },
+    run: {
+      id: "run_recovered",
+      status: "initialized",
+      completed: false,
+      resumable: true,
+      next_operator_action: "continue_existing_run",
+      latest_planner_outcome: "execute",
+      execute_ready: true,
+      waiting_at_safe_point: true,
+      latest_checkpoint: {
+        stage: "planner",
+        label: "planner_turn_completed",
+        safe_pause: true,
+      },
+      executor_turn_status: "",
+      executor_thread_id: "",
+      executor_turn_id: "",
+    },
+  };
+
+  const recommended = buildRecommendedActionViewModel(snapshot, {
+    connection: { connected: true, status: "connected" },
+    goalEntered: true,
+  });
+  const loop = buildLoopStatusViewModel(snapshot);
+  const controls = buildRunControlStateViewModel(snapshot, {
+    connection: { connected: true },
+    goalEntered: true,
+  });
+  const bundle = buildDebugBundleText(snapshot, null, [], { now: "2026-04-24T12:00:00Z" });
+
+  assert.equal(recommended.state, "ready_to_continue");
+  assert.equal(recommended.primaryAction.id, "continue_run");
+  assert.equal(loop.state, "ready_to_continue");
+  assert.equal(controls.continueEnabled, true);
+  assert.equal(controls.continueLabel, "Continue Build / Dispatch Executor");
+  assert.match(bundle, /Active-run guard present: no/);
+  assert.match(bundle, /Continue enabled: true/);
+});
+
 test("buildRecommendedActionViewModel guides resumable runs to continue command", () => {
   const vm = buildRecommendedActionViewModel({
     run: {
@@ -499,6 +873,7 @@ test("buildRecommendedActionViewModel prioritizes approval-required state", () =
     approval: {
       present: true,
       state: "required",
+      kind: "command_execution",
       summary: "executor approval required for command: go test ./...",
     },
   }, {
@@ -508,6 +883,206 @@ test("buildRecommendedActionViewModel prioritizes approval-required state", () =
   assert.equal(vm.state, "approval_required");
   assert.equal(vm.title, "Review the action required.");
   assert.equal(vm.primaryAction.id, "review_approval");
+});
+
+test("ask_human status becomes Action Required and points to answer flow", () => {
+  const snapshot = {
+    run: {
+      id: "run_question",
+      status: "stopped",
+      completed: false,
+      resumable: true,
+      stop_reason: "planner_ask_human",
+      next_operator_action: "answer_human_question",
+      latest_planner_outcome: "ask_human",
+    },
+    ask_human: {
+      present: true,
+      run_id: "run_question",
+      question: "Did you verify that Codex gpt-5.5 access is fixed?",
+      blocker: "The planner paused because executor model access was previously failing.",
+      action_summary: "wait for human confirmation",
+      planner_outcome: "ask_human",
+      source: "human.question.presented",
+    },
+  };
+
+  const askHuman = buildAskHumanViewModel(snapshot);
+  const approval = buildApprovalViewModel(snapshot);
+  const recommended = buildRecommendedActionViewModel(snapshot, {
+    connection: { connected: true, status: "connected" },
+  });
+  const loop = buildLoopStatusViewModel(snapshot);
+
+  assert.equal(askHuman.present, true);
+  assert.match(askHuman.question, /gpt-5\.5 access/);
+  assert.equal(approval.needsAttention, true);
+  assert.equal(approval.badgeCount, 1);
+  assert.equal(approval.askHuman.present, true);
+  assert.equal(approval.canApprove, false);
+  assert.equal(approval.canDeny, false);
+  assert.equal(recommended.state, "ask_human");
+  assert.equal(recommended.primaryAction.id, "answer_ask_human");
+  assert.equal(recommended.primaryAction.target, "attention");
+  assert.equal(loop.state, "needs_you");
+});
+
+test("pending ask_human action is enough to show planner answer workflow", () => {
+  const snapshot = {
+    run: {
+      id: "run_pending_question",
+      status: "stopped",
+      completed: false,
+      resumable: true,
+    },
+    pending_action: {
+      available: true,
+      present: true,
+      held: true,
+      turn_type: "ask_human",
+      planner_outcome: "ask_human",
+      pending_action_summary: "Please confirm whether the model/access issue is fixed.",
+      pending_reason: "planner_selected_ask_human",
+    },
+  };
+
+  const askHuman = buildAskHumanViewModel(snapshot);
+  const approval = buildApprovalViewModel(snapshot);
+  const recommended = buildRecommendedActionViewModel(snapshot, {
+    connection: { connected: true, status: "connected" },
+  });
+
+  assert.equal(askHuman.present, true);
+  assert.match(askHuman.question, /model\/access issue/);
+  assert.equal(approval.needsAttention, true);
+  assert.equal(recommended.primaryAction.id, "answer_ask_human");
+});
+
+test("run control explains disabled continue while ask_human answer is pending", () => {
+  const vm = buildRunControlStateViewModel({
+    run: {
+      id: "run_waiting",
+      status: "stopped",
+      completed: false,
+      resumable: true,
+      stop_reason: "planner_ask_human",
+      next_operator_action: "answer_human_question",
+    },
+    ask_human: {
+      present: true,
+      question: "Is the model issue fixed?",
+    },
+  }, {
+    connection: { connected: true, status: "connected" },
+    goalEntered: true,
+  });
+
+  assert.equal(vm.askHuman.present, true);
+  assert.equal(vm.startEnabled, false);
+  assert.equal(vm.continueEnabled, false);
+  assert.match(vm.startDisabledReason, /unfinished run/i);
+  assert.match(vm.continueDisabledReason, /waiting for your answer/i);
+  assert.match(vm.note, /Action Required/i);
+});
+
+test("safe stop state becomes Action Required with clear-stop continue guidance", () => {
+  const snapshot = {
+    stop_flag: {
+      present: true,
+      path: "D:/repo/.orchestrator/state/auto.stop",
+      applies_at: "next_safe_point",
+      reason: "operator_requested_safe_stop_from_shell",
+    },
+    run: {
+      id: "run_safe_stop",
+      status: "stopped",
+      completed: false,
+      resumable: true,
+      stop_reason: "operator_stop_requested",
+    },
+  };
+
+  const approval = buildApprovalViewModel(snapshot);
+  const recommended = buildRecommendedActionViewModel(snapshot, {
+    connection: { connected: true, status: "connected" },
+    goalEntered: true,
+  });
+  const controls = buildRunControlStateViewModel(snapshot, {
+    connection: { connected: true },
+    goalEntered: true,
+  });
+  const loop = buildLoopStatusViewModel(snapshot);
+
+  assert.equal(approval.needsAttention, true);
+  assert.equal(approval.badgeCount, 1);
+  assert.equal(approval.safeStop.present, true);
+  assert.match(approval.summary, /Safe stop was requested/);
+  assert.equal(recommended.state, "safe_stop_requested");
+  assert.equal(recommended.primaryAction.id, "clear_stop_continue");
+  assert.equal(controls.continueEnabled, false);
+  assert.match(controls.continueDisabledReason, /safe stop was requested/i);
+  assert.equal(loop.state, "safe_stop_requested");
+});
+
+test("non-actionable approval metadata does not create Action Required state", () => {
+  const snapshot = {
+    run: {
+      id: "run_stale",
+      status: "stopped",
+      completed: false,
+      resumable: true,
+    },
+    approval: {
+      present: true,
+      state: "none",
+      kind: "Unavailable",
+      run_id: "run_stale",
+      executor_thread_id: "thread_old",
+      executor_turn_id: "turn_old",
+      available_actions: ["approve", "deny"],
+      worker_approval_required: 0,
+    },
+    workers: {
+      approval_required: 0,
+    },
+  };
+
+  const approval = buildApprovalViewModel(snapshot);
+  const recommended = buildRecommendedActionViewModel(snapshot, {
+    connection: { connected: true, status: "connected" },
+  });
+  const loop = buildLoopStatusViewModel(snapshot);
+
+  assert.equal(approval.present, false);
+  assert.equal(approval.reportedPresent, true);
+  assert.equal(approval.needsAttention, false);
+  assert.equal(approval.badgeCount, 0);
+  assert.equal(approval.canApprove, false);
+  assert.equal(approval.canDeny, false);
+  assert.deepEqual(approval.availableActions, []);
+  assert.equal(recommended.state, "resumable");
+  assert.notEqual(loop.state, "needs_you");
+});
+
+test("Unavailable approval kind and zero worker approvals are not actionable", () => {
+  const vm = buildApprovalViewModel({
+    approval: {
+      present: true,
+      state: "required",
+      kind: "Unavailable",
+      worker_approval_required: 0,
+      available_actions: ["approve", "deny"],
+    },
+    workers: {
+      approval_required: 0,
+    },
+  });
+
+  assert.equal(vm.present, false);
+  assert.equal(vm.needsAttention, false);
+  assert.equal(vm.badgeCount, 0);
+  assert.equal(vm.canApprove, false);
+  assert.equal(vm.canDeny, false);
 });
 
 test("buildRecommendedActionViewModel allows completed runs to open surfaced artifacts", () => {
@@ -566,6 +1141,121 @@ test("model unavailable state becomes action-required recommended action", () =>
   assert.equal(codex.needsAttention, true);
   assert.equal(what.stateLabel, "Model error");
   assert.match(what.stop.title, /gpt-5.5/);
+  assert.equal(what.primaryActions.some((action) => action.id === "test_model_health"), true);
+});
+
+test("debug bundle includes safe run diagnosis fields and excludes secrets", () => {
+  const snapshot = {
+    runtime: {
+      repo_root: "D:/repo",
+      version: "1.2.3-test",
+      verbosity: "verbose",
+    },
+    run: {
+      id: "run_debug",
+      goal: "Fix the failing build without exposing api_key=sk-secret123456",
+      status: "stopped",
+      stop_reason: "executor_failed",
+      completed: false,
+      resumable: true,
+      started_at: "2026-04-23T10:00:00Z",
+      stopped_at: "2026-04-23T10:12:00Z",
+      elapsed_label: "Stopped after 00:12:00",
+      latest_planner_outcome: "execute",
+      executor_status: "failed",
+      executor_thread_id: "thread_1",
+      executor_turn_id: "turn_1",
+      executor_last_error: "The model `gpt-5.5` does not exist or you do not have access to it. Authorization: Bearer abcdef123456",
+    },
+    planner_status: {
+      present: true,
+      operator_message: "Codex failed before code changes.",
+      progress_percent: 12,
+      progress_confidence: "low",
+      progress_basis: "No code changes were made.",
+      current_focus: "Model configuration",
+      next_intended_step: "Test model health",
+      why_this_step: "The executor could not start.",
+    },
+    model_health: {
+      planner: { configured_model: "gpt-5.4", verification_state: "verified" },
+      executor: {
+        requested_model: "gpt-5.5",
+        verification_state: "invalid",
+        effort: "xhigh",
+        access_mode: "danger-full-access sandbox, approval never",
+        codex_executable_path: "C:/Users/me/AppData/Roaming/npm/codex.cmd",
+        codex_version: "codex-cli 0.124.0",
+        model_unavailable: true,
+        last_error: "The model `gpt-5.5` does not exist or you do not have access to it.",
+      },
+      blocking: true,
+    },
+    pending_action: {
+      present: true,
+      held: true,
+      pending_action_summary: "dispatch executor prompt",
+    },
+    stop_flag: {
+      present: true,
+      reason: "operator_requested_safe_stop_from_shell",
+      path: "D:/repo/.orchestrator/state/auto.stop",
+      applies_at: "next_safe_point",
+    },
+    artifacts: {
+      latest_path: ".orchestrator/artifacts/executor/run_debug/error.json",
+    },
+  };
+
+  const bundle = buildDebugBundleText(snapshot, {
+    latest_path: ".orchestrator/artifacts/executor/run_debug/error.json",
+    items: [
+      { path: ".orchestrator/artifacts/executor/run_debug/error.json", category: "executor", source: "runtime", at: "2026-04-23T10:12:00Z" },
+    ],
+  }, [
+    { event: "executor_turn_failed", at: "2026-04-23T10:12:00Z", payload: { run_id: "run_debug", error_message: "The model `gpt-5.5` does not exist or you do not have access to it." } },
+    { event: "stop_flag_detected", at: "2026-04-23T10:11:00Z", payload: { run_id: "run_debug" } },
+  ], {
+    now: "2026-04-23T10:13:00Z",
+    sideChat: {
+      items: [
+        { created_at: "2026-04-23T10:10:00Z", raw_text: "note only" },
+      ],
+    },
+  });
+
+  assert.match(bundle, /Orchestrator V2 Run Debug Bundle/);
+  assert.match(bundle, /Run id: run_debug/);
+  assert.match(bundle, /Planner model: configured=gpt-5.4/);
+  assert.match(bundle, /Codex model\/access: model=gpt-5.5/);
+  assert.match(bundle, /Stop reason code: executor_failed/);
+  assert.match(bundle, /Plain-English stop reason/);
+  assert.match(bundle, /Executor thread id: thread_1/);
+  assert.match(bundle, /Progress basis: No code changes were made/);
+  assert.match(bundle, /Stop flag present: yes/);
+  assert.match(bundle, /Latest stop_flag_detected event: 2026-04-23T10:11:00Z/);
+  assert.match(bundle, /Side Chat affects active run: no/);
+  assert.match(bundle, /Last side-chat action timestamp: 2026-04-23T10:10:00Z/);
+  assert.match(bundle, /Secrets\/API keys\/auth tokens are intentionally excluded/);
+  assert.doesNotMatch(bundle, /sk-secret123456/);
+  assert.doesNotMatch(bundle, /Bearer abcdef123456/);
+});
+
+test("latest error view model finds model failures from status or live events", () => {
+  const fromStatus = buildLatestErrorViewModel({
+    run: {
+      executor_last_error: "The model `gpt-5.5` does not exist or you do not have access to it.",
+    },
+  }, []);
+  const fromEvent = buildLatestErrorViewModel({}, [
+    { event: "fault_recorded", payload: { message: "transport failed" } },
+  ]);
+
+  assert.equal(fromStatus.present, true);
+  assert.equal(fromStatus.modelRelated, true);
+  assert.match(fromStatus.recommendedAction, /Test model health/);
+  assert.equal(fromEvent.present, true);
+  assert.match(fromEvent.summary, /transport failed/);
 });
 
 test("buildTopStatusViewModel makes repo and run identity explicit", () => {
@@ -590,9 +1280,128 @@ test("buildTopStatusViewModel makes repo and run identity explicit", () => {
   assert.equal(vm.repoRoot, "D:/repo");
   assert.equal(vm.runID, "run_2");
   assert.equal(vm.runState, "stopped");
-  assert.equal(vm.blocker, "The planner needs information from you.");
+  assert.equal(vm.blocker, "The planner needs your answer before it can continue.");
   assert.equal(vm.verbosity, "verbose");
   assert.equal(vm.lastRefreshedAt, "2026-04-23T11:00:00Z");
+});
+
+test("repo binding mismatch blocks wrong-repo run state and recommends backend restart", () => {
+  const snapshot = {
+    runtime: {
+      repo_root: "D:/Projects/agentic_loop",
+      repo_ready: true,
+      verbosity: "normal",
+    },
+    backend: {
+      repo_root: "D:/Projects/agentic_loop",
+    },
+    run: {
+      id: "run_wrong_repo",
+      goal: "collect context bounded test",
+      status: "cancelled",
+      completed: false,
+      resumable: false,
+    },
+    approval: {
+      state: "none",
+      kind: "Unavailable",
+      worker_approval_required: 0,
+    },
+  };
+  const options = {
+    connection: { connected: true, status: "connected" },
+    expectedRepoPath: "D:/Projects/brick-breaker-android",
+    goalEntered: true,
+  };
+
+  const binding = buildRepoBindingViewModel(snapshot, options);
+  const top = buildTopStatusViewModel(snapshot, options);
+  const home = buildHomeDashboardViewModel(snapshot, {
+    ...options,
+    artifacts: { items: [] },
+    contractFiles: { files: [] },
+    events: [],
+  });
+  const recommendation = buildRecommendedActionViewModel(snapshot, options);
+  const controls = buildRunControlStateViewModel(snapshot, options);
+  const approval = buildApprovalViewModel(snapshot);
+
+  assert.equal(binding.mismatch, true);
+  assert.equal(binding.matches, false);
+  assert.match(binding.message, /Wrong Repo Backend/);
+  assert.equal(top.repoMismatch, true);
+  assert.match(top.blocker, /expected D:\/Projects\/brick-breaker-android/);
+  assert.equal(top.runID, "Hidden until repo matches");
+  assert.equal(home.status.runID, "Hidden until repo matches");
+  assert.match(home.status.goal, /Wrong repo backend/);
+  assert.equal(recommendation.state, "repo_mismatch");
+  assert.equal(recommendation.primaryAction.id, "recover_backend");
+  assert.equal(recommendation.primaryAction.label, "Restart Backend for Target Repo");
+  assert.equal(controls.startEnabled, false);
+  assert.equal(controls.continueEnabled, false);
+  assert.match(controls.startDisabledReason, /Wrong Repo Backend/);
+  assert.equal(approval.needsAttention, false);
+  assert.equal(approval.badgeCount, 0);
+});
+
+test("correct repo with cancelled non-resumable run allows starting fresh but not continue", () => {
+  const snapshot = {
+    runtime: {
+      repo_root: "D:/Projects/brick-breaker-android",
+      repo_ready: true,
+    },
+    run: {
+      id: "run_cancelled",
+      status: "cancelled",
+      completed: false,
+      resumable: false,
+      stop_reason: "operator_stop",
+    },
+  };
+  const options = {
+    connection: { connected: true, status: "connected" },
+    expectedRepoPath: "D:/Projects/brick-breaker-android",
+    goalEntered: true,
+  };
+
+  const binding = buildRepoBindingViewModel(snapshot, options);
+  const recommendation = buildRecommendedActionViewModel(snapshot, options);
+  const controls = buildRunControlStateViewModel(snapshot, options);
+
+  assert.equal(binding.mismatch, false);
+  assert.equal(recommendation.state, "fresh_run_available");
+  assert.equal(recommendation.primaryAction.id, "start_run");
+  assert.equal(controls.startEnabled, true);
+  assert.equal(controls.continueEnabled, false);
+  assert.match(controls.continueDisabledReason, /not marked resumable/);
+});
+
+test("correct repo with resumable run enables continue and blocks duplicate start", () => {
+  const snapshot = {
+    runtime: {
+      repo_root: "D:/Projects/brick-breaker-android",
+    },
+    run: {
+      id: "run_resumable",
+      status: "initialized",
+      completed: false,
+      resumable: true,
+      next_operator_action: "continue_existing_run",
+    },
+  };
+  const options = {
+    connection: { connected: true, status: "connected" },
+    expectedRepoPath: "D:/Projects/brick-breaker-android",
+    goalEntered: true,
+  };
+
+  const recommendation = buildRecommendedActionViewModel(snapshot, options);
+  const controls = buildRunControlStateViewModel(snapshot, options);
+
+  assert.equal(recommendation.state, "resumable");
+  assert.equal(recommendation.primaryAction.id, "continue_run");
+  assert.equal(controls.continueEnabled, true);
+  assert.equal(controls.startEnabled, false);
 });
 
 test("connection and loop status view models use plain operator language", () => {
@@ -607,6 +1416,7 @@ test("connection and loop status view models use plain operator language", () =>
     run: {
       id: "run_live",
       status: "running",
+      actively_processing: true,
       completed: false,
       latest_checkpoint: { sequence: 4, stage: "executor_turn" },
     },
@@ -615,6 +1425,171 @@ test("connection and loop status view models use plain operator language", () =>
   });
   assert.equal(loop.label, "Loop Status: Running");
   assert.equal(loop.stage, "executor_turn");
+});
+
+test("execute outcome at planner safe pause is ready to continue, not running", () => {
+  const snapshot = {
+    active_run_guard: {
+      present: true,
+      current_backend: true,
+      stale: false,
+      currently_processing: false,
+      waiting_at_safe_point: true,
+      run_id: "run_execute",
+    },
+    run: {
+      id: "run_execute",
+      status: "initialized",
+      completed: false,
+      resumable: true,
+      latest_planner_outcome: "execute",
+      next_operator_action: "continue_existing_run",
+      latest_checkpoint: {
+        sequence: 3,
+        stage: "planner",
+        label: "planner_turn_completed",
+        safe_pause: true,
+      },
+      executor_turn_status: "",
+      executor_thread_id: "",
+      executor_turn_id: "",
+    },
+  };
+
+  const loop = buildLoopStatusViewModel(snapshot);
+  const recommended = buildRecommendedActionViewModel(snapshot, {
+    connection: { connected: true, status: "connected" },
+  });
+  const controls = buildRunControlStateViewModel(snapshot, {
+    connection: { connected: true },
+    goalEntered: true,
+  });
+
+  assert.equal(loop.state, "ready_to_continue");
+  assert.equal(loop.label, "Loop Status: Ready to Continue");
+  assert.match(loop.detail, /Executor has not started/);
+  assert.equal(recommended.state, "ready_to_continue");
+  assert.equal(recommended.primaryAction.id, "continue_run");
+  assert.equal(recommended.primaryAction.label, "Continue Build / Dispatch Executor");
+  assert.equal(controls.continueEnabled, true);
+  assert.equal(controls.continueLabel, "Continue Build / Dispatch Executor");
+  assert.equal(controls.startEnabled, false);
+  assert.match(controls.note, /Continue Build \/ Dispatch Executor/);
+});
+
+test("active-run guard presence alone does not mean the backend is working", () => {
+  const snapshot = {
+    active_run_guard: {
+      present: true,
+      current_backend: true,
+      stale: false,
+      currently_processing: false,
+      waiting_at_safe_point: true,
+      run_id: "run_guard",
+    },
+    run: {
+      id: "run_guard",
+      status: "active",
+      completed: false,
+      resumable: true,
+      latest_planner_outcome: "collect_context",
+      next_operator_action: "continue_existing_run",
+      latest_checkpoint: {
+        sequence: 4,
+        stage: "planner",
+        label: "planner_turn_completed",
+        safe_pause: true,
+      },
+    },
+  };
+
+  const loop = buildLoopStatusViewModel(snapshot);
+
+  assert.equal(loop.state, "waiting_at_safe_point");
+  assert.notEqual(loop.label, "Loop Status: Running");
+});
+
+test("currently-processing active-run guard shows Running", () => {
+  const loop = buildLoopStatusViewModel({
+    active_run_guard: {
+      present: true,
+      current_backend: true,
+      stale: false,
+      currently_processing: true,
+      run_id: "run_live",
+    },
+    run: {
+      id: "run_live",
+      status: "active",
+      completed: false,
+      resumable: false,
+      latest_checkpoint: { sequence: 5, stage: "executor_turn", safe_pause: false },
+    },
+  });
+
+  assert.equal(loop.state, "running");
+  assert.equal(loop.label, "Loop Status: Running");
+});
+
+test("debug bundle renders normalized loop state and checkpoint JSON", () => {
+  const bundle = buildDebugBundleText({
+    active_run_guard: {
+      present: true,
+      current_backend: true,
+      stale: false,
+      currently_processing: false,
+      waiting_at_safe_point: true,
+      last_progress_at: "2026-04-24T12:00:00Z",
+    },
+    run: {
+      id: "run_execute",
+      goal: "Build the next slice",
+      status: "initialized",
+      completed: false,
+      resumable: true,
+      latest_planner_outcome: "execute",
+      next_operator_action: "continue_existing_run",
+      latest_checkpoint: {
+        sequence: 3,
+        stage: "planner",
+        label: "planner_turn_completed",
+        safe_pause: true,
+        planner_turn: 2,
+        executor_turn: 0,
+      },
+    },
+  }, null, [], { now: "2026-04-24T12:01:00Z" });
+
+  assert.match(bundle, /Normalized loop state: ready_to_continue/);
+  assert.match(bundle, /Actively processing: false/);
+  assert.match(bundle, /Waiting at safe point: true/);
+  assert.match(bundle, /Execute ready: true/);
+  assert.match(bundle, /Continue enabled: true/);
+  assert.match(bundle, /"stage":"planner"/);
+  assert.doesNotMatch(bundle, /\[object Object\]/);
+});
+
+test("debug bundle includes expected and actual repo binding details", () => {
+  const bundle = buildDebugBundleText({
+    runtime: {
+      repo_root: "D:/Projects/agentic_loop",
+      version: "dev",
+    },
+    run: {
+      id: "run_wrong_repo",
+      status: "cancelled",
+      completed: false,
+      resumable: false,
+    },
+  }, null, [], {
+    now: "2026-04-24T12:20:00Z",
+    expectedRepoPath: "D:/Projects/brick-breaker-android",
+  });
+
+  assert.match(bundle, /Expected repo path: D:\/Projects\/brick-breaker-android/);
+  assert.match(bundle, /Actual backend repo root: D:\/Projects\/agentic_loop/);
+  assert.match(bundle, /Repo match: no/);
+  assert.match(bundle, /GUI is connected to a backend serving the wrong repo/);
 });
 
 test("stop reason translation gives plain next actions without hiding technical code", () => {
@@ -655,8 +1630,10 @@ test("buildHomeDashboardViewModel exposes helpful empty state copy and refresh m
   assert.match(vm.emptyStates.noPendingAction, /not currently holding/);
   assert.equal(vm.homeError, "status refresh failed");
   assert.equal(vm.contractStatus.message, "Contract status has not been loaded yet. Connect or refresh everything to inspect canonical files.");
-  assert.equal(vm.codex.fullAccessReady, "No");
-  assert.match(vm.codex.recommendedAction, /doctor/);
+  assert.equal(vm.codex.fullAccessReady, "Not verified");
+  assert.match(vm.codex.recommendedAction, /Test Codex Config|Codex/);
+  assert.equal(vm.liveOutput.primaryAction.id, "open_live_output");
+  assert.match(vm.liveOutput.detail, /Verbose and Trace/);
 });
 
 test("approval view model explains action-required state in plain English", () => {
@@ -686,7 +1663,31 @@ test("codex readiness is truthful when full-access details are not verified", ()
 
   const missing = buildCodexReadinessViewModel({ runtime: { executor_ready: false } });
   assert.equal(missing.needsAttention, true);
-  assert.equal(missing.fullAccessReady, "No");
+  assert.equal(missing.fullAccessReady, "Not verified");
+});
+
+test("codex readiness shows verified gpt-5.5 full access details", () => {
+  const ready = buildCodexReadinessViewModel({
+    runtime: { executor_ready: true },
+    model_health: {
+      executor: {
+        requested_model: "gpt-5.5",
+        verification_state: "verified",
+        access_mode: "danger-full-access sandbox, approval never",
+        effort: "xhigh",
+        codex_executable_path: "C:/Users/me/AppData/Roaming/npm/codex.cmd",
+        codex_version: "codex-cli 0.124.0",
+        codex_config_source: "C:/Users/me/.codex/config.toml",
+        codex_model_verified: true,
+        codex_permission_mode_verified: true,
+      },
+    },
+  });
+
+  assert.equal(ready.title, "Codex Full Access: Verified");
+  assert.equal(ready.fullAccessReady, "Yes");
+  assert.equal(ready.needsAttention, false);
+  assert.match(ready.codexVersion, /0\.124\.0/);
 });
 
 test("verbosity view model documents auto-applied levels", () => {
@@ -775,16 +1776,192 @@ test("dogfood startup helper launches the control server and shell together", ()
   assert.match(script, /control serve --addr \$ControlAddr/);
   assert.match(script, /npm run dev/);
   assert.match(script, /ORCHESTRATOR_V2_SHELL_ADDR/);
+  assert.match(script, /ORCHESTRATOR_V2_BACKEND_META/);
+  assert.match(script, /ORCHESTRATOR_V2_EXPECTED_REPO/);
+  assert.match(script, /Wait-DogfoodBackendRepoMatch/);
+  assert.match(script, /expected_repo=\$resolvedRepoPath/);
+  assert.match(script, /dogfood-backend\.json/);
+  assert.match(script, /orchestrator-v2-dogfood/);
+  assert.match(script, /owner_session_id/);
+  assert.match(script, /binary_mtime_at_launch/);
+  assert.match(script, /Stop-StaleOwnedBackendIfPresent/);
+  assert.match(script, /Warn-IfUnknownProcessOwnsPort/);
+  assert.match(script, /Wait-PortClear/);
+  assert.match(script, /Clear-OwnedDogfoodPort/);
+  assert.match(script, /Format-DogfoodPortDiagnostic/);
+  assert.match(script, /taskkill \/PID \$ProcessId \/T \/F/);
+  assert.match(script, /It was not killed automatically/);
   assert.match(script, /http:\/\/\$ControlAddr/);
   assert.match(script, /\[switch\]\$SkipBuild/);
   assert.match(script, /\[switch\]\$SkipInstall/);
   assert.match(script, /\[switch\]\$DebugVisibleWindows/);
   assert.match(script, /-WindowStyle Hidden/);
+  assert.match(script, /Start-Process -FilePath \$binaryPath/);
+  assert.match(script, /-WorkingDirectory \$resolvedRepoPath/);
   assert.match(script, /Wait-Process -Id \$shellProcess\.Id/);
-  assert.match(script, /Stop-Process -Id \$controlProcess\.Id/);
+  assert.match(script, /Invoke-DogfoodTaskKill -ProcessId \$controlProcess\.Id/);
   assert.match(script, /Invoke-RestMethod/);
   assert.match(launcher, /WindowStyle Hidden/);
   assert.match(launcher, /start-v2-dogfood\.ps1/);
+});
+
+test("backend ownership helpers avoid killing unknown processes", () => {
+  assert.equal(isOwnedBackend({ owner: ownerMarker, pid: 1234 }), true);
+  assert.equal(isOwnedBackend({ owner: "someone-else", pid: 1234 }), false);
+  assert.equal(metadataMatchesAddress({ control_addr: "127.0.0.1:44777" }, "http://127.0.0.1:44777"), true);
+  assert.equal(metadataMatchesAddress({ control_addr: "127.0.0.1:44777" }, "http://127.0.0.1:44778"), false);
+  assert.equal(listenerMatchesOwnedMetadata({
+    pid: 111,
+    binary_path: "D:/Projects/agentic_loop/dist/orchestrator.exe",
+    control_addr: "127.0.0.1:44777",
+  }, {
+    pid: 222,
+    parent_pid: 0,
+    path: "D:\\Projects\\agentic_loop\\dist\\orchestrator.exe",
+    command_line: '"D:\\Projects\\agentic_loop\\dist\\orchestrator.exe" control serve --addr 127.0.0.1:44777',
+  }), true);
+  assert.equal(listenerMatchesOwnedMetadata({
+    pid: 111,
+    binary_path: "D:/Projects/agentic_loop/dist/orchestrator.exe",
+    control_addr: "127.0.0.1:44777",
+  }, {
+    pid: 333,
+    parent_pid: 0,
+    path: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    command_line: "powershell -NoExit",
+  }), false);
+  assert.equal(fileModifiedTime(path.join(__dirname, "does-not-exist.exe")), "");
+});
+
+test("backend metadata loader tolerates PowerShell UTF-8 BOM files", () => {
+  const tmpDir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "orchestrator-backend-bom-"));
+  const metaPath = path.join(tmpDir, "dogfood-backend.json");
+  fs.writeFileSync(metaPath, `\uFEFF${JSON.stringify({ owner: ownerMarker, pid: 1234 })}`, "utf8");
+  const metadata = loadBackendMetadata(metaPath);
+
+  assert.equal(metadata.owner, ownerMarker);
+  assert.equal(metadata.pid, 1234);
+});
+
+test("backend recovery clears owned port listeners with taskkill fallback", async () => {
+  let queryCount = 0;
+  const taskkillPIDs = [];
+  const execFileImpl = (command, args, _options, callback) => {
+    if (command === "powershell.exe") {
+      queryCount += 1;
+      const stdout = queryCount === 1 ? JSON.stringify({
+        pid: 2222,
+        path: "D:\\Projects\\agentic_loop\\dist\\orchestrator.exe",
+        command_line: '"D:\\Projects\\agentic_loop\\dist\\orchestrator.exe" control serve --addr 127.0.0.1:44777',
+        parent_pid: 1111,
+      }) : "";
+      callback(null, stdout, "");
+      return;
+    }
+    if (command === "taskkill") {
+      taskkillPIDs.push(args[1]);
+      callback(null, "SUCCESS", "");
+      return;
+    }
+    callback(new Error(`unexpected command ${command}`), "", "");
+  };
+
+  const result = await clearOwnedBackendPort({
+    pid: 1111,
+    binary_path: "D:/Projects/agentic_loop/dist/orchestrator.exe",
+    control_addr: "127.0.0.1:44777",
+  }, {
+    execFileImpl,
+    timeoutMs: 500,
+    pollMs: 1,
+  });
+
+  assert.equal(result.cleared, true);
+  assert.deepEqual(taskkillPIDs, ["2222"]);
+});
+
+test("backend recovery refuses to kill unknown port owners and reports diagnostics", async () => {
+  const taskkillPIDs = [];
+  const execFileImpl = (command, args, _options, callback) => {
+    if (command === "powershell.exe") {
+      callback(null, JSON.stringify({
+        pid: 3333,
+        path: "C:\\Tools\\other.exe",
+        command_line: "other.exe --listen 44777",
+        parent_pid: 0,
+      }), "");
+      return;
+    }
+    if (command === "taskkill") {
+      taskkillPIDs.push(args[1]);
+      callback(null, "SUCCESS", "");
+      return;
+    }
+    callback(new Error(`unexpected command ${command}`), "", "");
+  };
+
+  const result = await clearOwnedBackendPort({
+    pid: 1111,
+    binary_path: "D:/Projects/agentic_loop/dist/orchestrator.exe",
+    control_addr: "127.0.0.1:44777",
+  }, {
+    execFileImpl,
+    timeoutMs: 50,
+    pollMs: 1,
+  });
+
+  assert.equal(result.cleared, false);
+  assert.equal(taskkillPIDs.length, 0);
+  assert.match(result.message, /current port holders/);
+  assert.match(result.message, /matches_owned_metadata: false/);
+});
+
+test("restartOwnedBackend does not spawn when the port remains held by an unknown process", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "orchestrator-backend-"));
+  const metaPath = path.join(tmpDir, "dogfood-backend.json");
+  fs.writeFileSync(metaPath, JSON.stringify({
+    owner: ownerMarker,
+    pid: 1111,
+    repo_path: "D:/Projects/brick-breaker-android",
+    control_addr: "127.0.0.1:44777",
+    binary_path: "D:/Projects/agentic_loop/dist/orchestrator.exe",
+  }), "utf8");
+
+  let spawnCalled = false;
+  const execFileImpl = (command, _args, _options, callback) => {
+    if (command === "taskkill") {
+      callback(null, "SUCCESS", "");
+      return;
+    }
+    if (command === "powershell.exe") {
+      callback(null, JSON.stringify({
+        pid: 4444,
+        path: "C:\\Tools\\other.exe",
+        command_line: "other.exe --listen 44777",
+        parent_pid: 0,
+      }), "");
+      return;
+    }
+    callback(new Error(`unexpected command ${command}`), "", "");
+  };
+
+  const result = await restartOwnedBackend({
+    metaPath,
+    address: "http://127.0.0.1:44777",
+    execFileImpl,
+    spawnImpl: () => {
+      spawnCalled = true;
+      throw new Error("spawn should not be called while port is blocked");
+    },
+    portClearTimeoutMs: 50,
+    portClearPollMs: 1,
+  });
+
+  assert.equal(result.available, true);
+  assert.equal(result.restarted, false);
+  assert.equal(result.blocked, true);
+  assert.equal(spawnCalled, false);
+  assert.match(result.message, /did not clear/);
 });
 
 test("buildActivityTimelineViewModel filters by category, run, and search text", () => {
@@ -1041,7 +2218,28 @@ test("buildApprovalViewModel normalizes approval state for the shell", () => {
   assert.equal(vm.runID, "run_55");
   assert.equal(vm.executorTurnID, "turn_approval");
   assert.deepEqual(vm.availableActions, ["approve", "deny"]);
+  assert.equal(vm.canApprove, true);
+  assert.equal(vm.canDeny, true);
   assert.equal(vm.workerApprovalRequired, 1);
+});
+
+test("worker approval count alone creates a badge without enabling primary executor buttons", () => {
+  const vm = buildApprovalViewModel({
+    approval: {
+      present: false,
+      state: "none",
+      kind: "Unavailable",
+    },
+    workers: {
+      approval_required: 2,
+    },
+  });
+
+  assert.equal(vm.present, false);
+  assert.equal(vm.needsAttention, true);
+  assert.equal(vm.badgeCount, 2);
+  assert.equal(vm.canApprove, false);
+  assert.equal(vm.canDeny, false);
 });
 
 test("buildRunSummaryViewModel derives a compact return summary from real protocol data", () => {
@@ -1074,7 +2272,7 @@ test("buildRunSummaryViewModel derives a compact return summary from real protoc
   assert.equal(vm.operatorMessage, "Preparing the next shell improvement.");
   assert.equal(vm.progress, "57%");
   assert.equal(vm.pendingAction, "dispatch artifact viewer refinements");
-  assert.equal(vm.approval, "No approval is currently required");
+  assert.equal(vm.approval, "No approval needed.");
   assert.equal(vm.latestArtifact, ".orchestrator/artifacts/context/run_99/collected_context.json");
   assert.deepEqual(vm.recentEvents, [
     "Your control message was queued run=run_99.",
@@ -1092,8 +2290,8 @@ test("buildSideChatViewModel normalizes recorded side chat messages", () => {
         raw_text: "What remains before release?",
         source: "side_chat",
         status: "recorded",
-        backend_state: "unavailable",
-        response_message: "side chat backend is not implemented in this slice",
+        backend_state: "context_agent",
+        response_message: "Latest run: run_22. Side Chat did not alter the active run.",
         created_at: "2026-04-22T16:00:00Z",
         run_id: "run_22",
         context_policy: "repo_and_latest_run_summary",
@@ -1102,9 +2300,19 @@ test("buildSideChatViewModel normalizes recorded side chat messages", () => {
   });
 
   assert.equal(vm.count, 1);
+  assert.equal(vm.nonInterfering, true);
+  assert.match(vm.modeDescription, /does not queue Control Chat/);
+  assert.equal(vm.buttonLabel, "Ask Side Chat");
   assert.equal(vm.items[0].rawText, "What remains before release?");
-  assert.equal(vm.items[0].backendState, "unavailable");
+  assert.equal(vm.items[0].backendState, "context_agent");
   assert.equal(vm.items[0].runID, "run_22");
+});
+
+test("renderer recovery path uses the defined side-chat refresh helper", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/renderer/app.js"), "utf8");
+
+  assert.doesNotMatch(source, /refreshSideChatMessages/);
+  assert.match(source, /refreshSideChat\(\{ quiet: true \}\)/);
 });
 
 test("buildDogfoodIssuesViewModel normalizes captured dogfood notes", () => {
@@ -1239,10 +2447,57 @@ test("formatEventSummary keeps event stream rows readable", () => {
   });
 
   assert.equal(summary, "Your control message was queued run=run_88.");
+
+  assert.equal(formatEventSummary({
+    event: "planner_turn_completed",
+    payload: { run_id: "run_88", planner_outcome: "execute" },
+  }), "Planner selected an execute task. Waiting to dispatch Codex run=run_88.");
+  assert.equal(formatEventSummary({
+    event: "executor_dispatch_requested",
+    payload: { run_id: "run_88" },
+  }), "Dispatching Codex executor run=run_88.");
 });
 
 test("classifyActivityCategory keeps intervention and terminal events distinct", () => {
   assert.equal(classifyActivityCategory({ event: "control_message_queued" }), "intervention");
   assert.equal(classifyActivityCategory({ event: "terminal_session_started" }), "terminal");
   assert.equal(classifyActivityCategory({ event: "worker_dispatch_completed" }), "worker");
+});
+
+test("window state cleanup uses captured keys and is idempotent", () => {
+  const calls = [];
+  const stateByKey = new Map();
+  stateByKey.set(42, {
+    abortController: {
+      abort() {
+        calls.push("abort");
+      },
+    },
+    terminal: {
+      shutdown() {
+        calls.push("shutdown");
+      },
+    },
+  });
+
+  assert.equal(shutdownWindowStateByKey(stateByKey, 42), true);
+  assert.equal(shutdownWindowStateByKey(stateByKey, 42), false);
+  assert.deepEqual(calls, ["abort", "shutdown"]);
+  assert.equal(stateByKey.size, 0);
+
+  stateByKey.set(7, {
+    abortController: {
+      abort() {
+        calls.push("abort-7");
+      },
+    },
+    terminal: {
+      shutdown() {
+        calls.push("shutdown-7");
+      },
+    },
+  });
+  assert.equal(shutdownAllWindowStates(stateByKey), 1);
+  assert.equal(shutdownAllWindowStates(stateByKey), 0);
+  assert.equal(stateByKey.size, 0);
 });

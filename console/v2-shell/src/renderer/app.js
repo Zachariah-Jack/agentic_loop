@@ -4,6 +4,10 @@ const bootstrapAddress = window.orchestratorConsole.bootstrap
   && window.orchestratorConsole.bootstrap.defaultControlAddress.trim() !== ""
   ? window.orchestratorConsole.bootstrap.defaultControlAddress.trim()
   : "http://127.0.0.1:44777";
+const bootstrapExpectedRepoPath = window.orchestratorConsole.bootstrap
+  && typeof window.orchestratorConsole.bootstrap.expectedRepoPath === "string"
+  ? window.orchestratorConsole.bootstrap.expectedRepoPath.trim()
+  : "";
 const persistedShellSession = shellHelpers.loadShellSession(window.localStorage, {
   defaultAddress: bootstrapAddress,
 });
@@ -24,6 +28,7 @@ const softRefreshEvents = new Set([
   "model_health_tested",
   "model_health_failed",
   "verbosity_changed",
+  "runtime_config_changed",
   "pending_action_updated",
   "pending_action_cleared",
   "control_message_consumed",
@@ -31,6 +36,7 @@ const softRefreshEvents = new Set([
   "run_completed",
   "approval_cleared",
   "side_chat_message_recorded",
+  "side_chat_message_answered",
   "dogfood_issue_recorded",
   "contract_autofill_generated",
   "worker_created",
@@ -41,11 +47,13 @@ const softRefreshEvents = new Set([
 
 const state = {
   address: persistedShellSession.address || defaultAddress,
+  expectedRepoPath: bootstrapExpectedRepoPath,
   connection: {
     connected: false,
     status: "disconnected",
     address: defaultAddress,
     message: "not connected",
+    expectedRepoPath: bootstrapExpectedRepoPath,
   },
   snapshot: null,
   artifacts: { count: 0, latest_path: "", items: [], message: "No artifacts yet. Artifacts appear after planner/executor turns complete." },
@@ -116,12 +124,19 @@ const state = {
     message: "",
     error: "",
   },
+  actionRequired: {
+    inFlight: false,
+    status: "",
+    queuedAskHumanAnswer: null,
+  },
   modelTests: {
     planner: null,
     executor: null,
     inFlight: "",
     error: "",
   },
+  runtimeConfig: null,
+  updateStatus: null,
   reconnect: {
     enabled: persistedShellSession.autoReconnect !== false,
     timer: null,
@@ -153,6 +168,23 @@ function initializeRefs() {
   refs.modelHealthBody = document.getElementById("model-health-body");
   refs.testPlannerModelButton = document.getElementById("test-planner-model");
   refs.testExecutorModelButton = document.getElementById("test-executor-model");
+  refs.copyModelHealthButton = document.getElementById("copy-model-health");
+  refs.restartBackendButton = document.getElementById("restart-backend");
+  refs.runtimeSettingsSummary = document.getElementById("runtime-settings-summary");
+  refs.timeoutPreset = document.getElementById("timeout-preset");
+  refs.permissionProfile = document.getElementById("permission-profile");
+  refs.timeoutPlannerRequest = document.getElementById("timeout-planner-request");
+  refs.timeoutExecutorTurn = document.getElementById("timeout-executor-turn");
+  refs.timeoutShellCommand = document.getElementById("timeout-shell-command");
+  refs.timeoutInstall = document.getElementById("timeout-install");
+  refs.timeoutHumanWait = document.getElementById("timeout-human-wait");
+  refs.loadRuntimeConfigButton = document.getElementById("load-runtime-config");
+  refs.saveRuntimeConfigButton = document.getElementById("save-runtime-config");
+  refs.runtimeSettingsStatus = document.getElementById("runtime-settings-status");
+  refs.updateStatusBody = document.getElementById("update-status-body");
+  refs.checkUpdatesButton = document.getElementById("check-updates");
+  refs.copyUpdateChangelogButton = document.getElementById("copy-update-changelog");
+  refs.installUpdateButton = document.getElementById("install-update");
   refs.flash = document.getElementById("flash-message");
   refs.topStatusBar = document.getElementById("top-status-bar");
   refs.topRefreshButton = document.getElementById("top-refresh");
@@ -160,6 +192,10 @@ function initializeRefs() {
   refs.disconnectedBanner = document.getElementById("disconnected-banner");
   refs.homePrimaryAction = document.getElementById("home-primary-action");
   refs.homeRefreshEverything = document.getElementById("home-refresh-everything");
+  refs.homeOpenLiveOutput = document.getElementById("home-open-live-output");
+  refs.homeCopyDebugBundle = document.getElementById("home-copy-debug-bundle");
+  refs.homeRecoverBackend = document.getElementById("home-recover-backend");
+  refs.homeClearStopContinue = document.getElementById("home-clear-stop-continue");
   refs.homeSafeStop = document.getElementById("home-safe-stop");
   refs.homeRecommendationTitle = document.getElementById("home-recommendation-title");
   refs.homeRecommendationDetail = document.getElementById("home-recommendation-detail");
@@ -170,6 +206,7 @@ function initializeRefs() {
   refs.homeUseDefaultGoal = document.getElementById("home-use-default-goal");
   refs.homeStartRun = document.getElementById("home-start-run");
   refs.homeContinueRun = document.getElementById("home-continue-run");
+  refs.homeRunControlNote = document.getElementById("home-run-control-note");
   refs.homePrepareStartCommand = document.getElementById("home-prepare-start-command");
   refs.homePrepareContinueCommand = document.getElementById("home-prepare-continue-command");
   refs.homeCommandPreview = document.getElementById("home-command-preview");
@@ -183,6 +220,8 @@ function initializeRefs() {
   refs.homeActivityBody = document.getElementById("home-activity-body");
   refs.homeOpenContracts = document.getElementById("home-open-contracts");
   refs.homeOpenLatestArtifact = document.getElementById("home-open-latest-artifact");
+  refs.homeQuickLiveOutput = document.getElementById("home-quick-live-output");
+  refs.homeQuickCopyDebugBundle = document.getElementById("home-quick-copy-debug-bundle");
   refs.homeAddDogfoodNote = document.getElementById("home-add-dogfood-note");
   refs.homeOpenTerminal = document.getElementById("home-open-terminal");
   refs.sideNavItems = Array.from(document.querySelectorAll("[data-tab-target]"));
@@ -209,10 +248,20 @@ function initializeRefs() {
   refs.statusBody = document.getElementById("status-body");
   refs.pendingBody = document.getElementById("pending-body");
   refs.approvalBody = document.getElementById("approval-body");
+  refs.askHumanActionsRow = document.getElementById("ask-human-actions-row");
+  refs.askHumanAnswer = document.getElementById("ask-human-answer");
+  refs.sendAnswerContinueButton = document.getElementById("send-answer-continue");
+  refs.sendAnswerOnlyButton = document.getElementById("send-answer-only");
+  refs.continueQueuedAnswerButton = document.getElementById("continue-queued-answer");
+  refs.askHumanStatus = document.getElementById("ask-human-status");
+  refs.approvalActionsRow = document.getElementById("approval-actions-row");
   refs.approveButton = document.getElementById("approve-executor");
   refs.denyButton = document.getElementById("deny-executor");
   refs.copyApprovalDetailsButton = document.getElementById("copy-approval-details");
   refs.summaryBody = document.getElementById("summary-body");
+  refs.copyDebugBundleButton = document.getElementById("copy-debug-bundle");
+  refs.copyLatestErrorButton = document.getElementById("copy-latest-error");
+  refs.summaryOpenLiveOutputButton = document.getElementById("summary-open-live-output");
   refs.refreshWorkersButton = document.getElementById("refresh-workers");
   refs.workerCreateName = document.getElementById("worker-create-name");
   refs.workerCreateScope = document.getElementById("worker-create-scope");
@@ -281,6 +330,19 @@ function activeRepoPath() {
   return state.snapshot && state.snapshot.runtime ? state.snapshot.runtime.repo_root || "" : "";
 }
 
+function viewModelOptions(extra = {}) {
+  return {
+    ...extra,
+    expectedRepoPath: state.expectedRepoPath,
+  };
+}
+
+function currentRepoBinding() {
+  return window.OrchestratorViewModel.buildRepoBindingViewModel(state.snapshot, viewModelOptions({
+    connection: state.connection,
+  }));
+}
+
 function latestArtifactPath() {
   if (state.artifacts && typeof state.artifacts.latest_path === "string" && state.artifacts.latest_path.trim() !== "") {
     return state.artifacts.latest_path.trim();
@@ -291,6 +353,13 @@ function latestArtifactPath() {
   const items = state.artifacts && Array.isArray(state.artifacts.items) ? state.artifacts.items : [];
   const latest = items.find((item) => item.latest) || items[0];
   return latest && latest.path ? latest.path : "";
+}
+
+function applyModelHealthNormalization() {
+  if (!state.snapshot) {
+    return;
+  }
+  state.snapshot = window.OrchestratorViewModel.normalizeModelHealthSnapshot(state.snapshot, state.modelTests);
 }
 
 function setActiveTab(tabName, options = {}) {
@@ -369,6 +438,15 @@ async function prepareTerminalCommand(command) {
   renderHomeDashboard();
   scrollToSection("terminal-panel");
   setFlash("info", "Backup command copied when clipboard access was available and prepared in the Operator Terminal input.");
+}
+
+async function copyText(text, successMessage) {
+  try {
+    await navigator.clipboard.writeText(String(text || ""));
+    setFlash("success", successMessage || "Copied.");
+  } catch (error) {
+    reportIssue("clipboard", error, "Copying requires clipboard access.");
+  }
 }
 
 function currentRepoTreePath() {
@@ -582,11 +660,25 @@ function homeRow(label, value) {
   return `<div class="home-kv"><span>${escapeHTML(label)}</span><strong title="${escapeHTML(value)}">${escapeHTML(value)}</strong></div>`;
 }
 
+function renderProgressDetailSection(section) {
+  const openAttribute = section.open ? " open" : "";
+  const longLabel = section.isLong ? "Long text" : "Summary";
+  return `
+    <details class="progress-detail-section"${openAttribute}>
+      <summary>
+        <span>${escapeHTML(section.label)}</span>
+        <small>${escapeHTML(longLabel)}</small>
+      </summary>
+      <div class="progress-detail-body">${escapeHTML(section.value)}</div>
+    </details>
+  `;
+}
+
 function renderTopStatus() {
   if (!refs.topStatusBar) {
     return;
   }
-  const vm = window.OrchestratorViewModel.buildTopStatusViewModel(state.snapshot, {
+  const vm = window.OrchestratorViewModel.buildTopStatusViewModel(state.snapshot, viewModelOptions({
     connection: state.connection,
     address: state.address,
     reconnecting: state.reconnect.pending || state.connection.status === "connecting",
@@ -599,7 +691,7 @@ function renderTopStatus() {
     launching: state.runLaunch.inFlight,
     latestEvent: latestActivityEvent(),
     lastUpdateLabel: state.lastRefreshedAt ? new Date(state.lastRefreshedAt).toLocaleTimeString() : "",
-  });
+  }));
 
   refs.topStatusBar.innerHTML = `
     <div class="top-status-item top-status-hero ${escapeHTML(vm.connectionClass)}"><span>${escapeHTML(vm.connectionLabel)}</span><strong>${escapeHTML(vm.connectionDurationLabel)}</strong><small>${escapeHTML(vm.connectionDetail)}</small></div>
@@ -610,6 +702,16 @@ function renderTopStatus() {
     <div class="top-status-item top-status-wide"><span>Stop / Blocker</span><strong title="${escapeHTML(vm.blocker)}">${escapeHTML(vm.blocker)}</strong></div>
     <div class="top-status-item"><span>Verbosity</span><strong>${escapeHTML(vm.verbosity)}</strong></div>
   `;
+  updateStickyLayoutOffset();
+}
+
+function updateStickyLayoutOffset() {
+  const strip = refs.topStatusBar && refs.topStatusBar.closest(".top-status-strip");
+  if (!strip || !document.documentElement) {
+    return;
+  }
+  const height = Math.max(96, Math.ceil(strip.getBoundingClientRect().height));
+  document.documentElement.style.setProperty("--sticky-top-offset", `${height}px`);
 }
 
 function renderDisconnectedBanner() {
@@ -624,8 +726,8 @@ function renderAttentionBadge() {
     return;
   }
   const vm = window.OrchestratorViewModel.buildApprovalViewModel(state.snapshot);
-  const codex = window.OrchestratorViewModel.buildCodexReadinessViewModel(state.snapshot);
-  const count = (vm.badgeCount || 0) + (codex.needsAttention ? 1 : 0);
+  const modelBlocking = Boolean(state.snapshot && state.snapshot.model_health && state.snapshot.model_health.blocking);
+  const count = (vm.badgeCount || 0) + (modelBlocking ? 1 : 0);
   refs.attentionBadge.textContent = String(count);
   refs.attentionBadge.hidden = count === 0;
 }
@@ -635,23 +737,17 @@ function renderVerbosityHelp() {
     return;
   }
   const vm = window.OrchestratorViewModel.buildVerbosityViewModel(refs.verbositySelect.value);
-  refs.verbosityHelp.textContent = `${vm.label}: ${vm.description} Changes apply immediately through the engine protocol.`;
+  refs.verbosityHelp.textContent = `${vm.label}: ${vm.description} This controls what appears in Live Output. Changes apply immediately through the engine protocol.`;
 }
 
 function maybeFocusActionRequired(options = {}) {
   const approval = window.OrchestratorViewModel.buildApprovalViewModel(state.snapshot);
-  const codex = window.OrchestratorViewModel.buildCodexReadinessViewModel(state.snapshot);
-  const askHuman = state.snapshot && state.snapshot.run
-    ? window.OrchestratorViewModel.buildRecommendedActionViewModel(state.snapshot, {
-      connection: state.connection,
-      goalEntered: refs.homeGoal && refs.homeGoal.value.trim() !== "",
-    }).state === "ask_human"
-    : false;
-  if (!approval.needsAttention && !codex.needsAttention && !askHuman) {
+  const modelBlocking = Boolean(state.snapshot && state.snapshot.model_health && state.snapshot.model_health.blocking);
+  if (!approval.needsAttention && !modelBlocking) {
     return;
   }
   if (options.force || state.activeTab === "home" || state.activeTab === "run") {
-    setActiveTab((approval.needsAttention || codex.needsAttention) ? "attention" : "chat", { noScroll: false });
+    setActiveTab("attention", { noScroll: false });
   }
 }
 
@@ -659,7 +755,7 @@ function renderHomeDashboard() {
   if (!refs.homeRecommendationTitle) {
     return;
   }
-  const vm = window.OrchestratorViewModel.buildHomeDashboardViewModel(state.snapshot, {
+  const vm = window.OrchestratorViewModel.buildHomeDashboardViewModel(state.snapshot, viewModelOptions({
     connection: state.connection,
     address: state.address,
     reconnecting: state.reconnect.pending || state.connection.status === "connecting",
@@ -670,15 +766,16 @@ function renderHomeDashboard() {
     homeError: state.homeError,
     preparedCommand: state.preparedCommand,
     goalEntered: refs.homeGoal && refs.homeGoal.value.trim() !== "",
-  });
+  }));
   const action = vm.recommendation.primaryAction || {};
   const progressLabel = vm.progress.progressPercent === null ? "Unavailable" : `${vm.progress.progressPercent}%`;
   const artifactUnavailable = vm.latestArtifactPath === "Unavailable" || vm.latestArtifactPath === "";
   const codex = vm.codex;
-  const attentionText = vm.approval.present
+  const modelBlocking = Boolean(state.snapshot && state.snapshot.model_health && state.snapshot.model_health.blocking);
+  const attentionText = vm.approval.needsAttention
     ? vm.approval.summary
-    : (codex.needsAttention
-      ? "Codex readiness needs attention before a serious autonomous build."
+    : (modelBlocking
+      ? "Model or Codex configuration is blocking autonomous work. Open Settings and run the model checks."
       : (vm.pending.present ? `Pending: ${vm.pending.summary}` : "No approval or held pending action needs attention."));
   const contractRows = vm.contractStatus.loaded
     ? vm.contractStatus.files
@@ -691,18 +788,28 @@ function renderHomeDashboard() {
   refs.homeRefreshMeta.textContent = `Last refreshed: ${vm.refreshedLabel}`;
   const startGoal = refs.homeGoal ? refs.homeGoal.value.trim() : "";
   const currentRun = state.snapshot && state.snapshot.run ? state.snapshot.run : null;
-  const canStartRun = state.connection.connected && !state.runLaunch.inFlight && startGoal !== "";
-  const canContinueRun = state.connection.connected
-    && !state.runLaunch.inFlight
-    && Boolean(currentRun && !currentRun.completed && currentRun.resumable !== false);
+  const runControl = window.OrchestratorViewModel.buildRunControlStateViewModel(state.snapshot, viewModelOptions({
+    connection: state.connection,
+    connected: state.connection.connected,
+    goalEntered: startGoal !== "",
+    launchInFlight: state.runLaunch.inFlight,
+    modelHealthChecking: Boolean(state.modelTests.inFlight),
+  }));
+  const canStartRun = runControl.startEnabled;
+  const canContinueRun = runControl.continueEnabled;
   const actionBlockedByRunLaunch = (action.id === "start_run" && !canStartRun)
     || (action.id === "continue_run" && !canContinueRun);
 
   refs.homePrimaryAction.textContent = state.runLaunch.inFlight ? "Launching run..." : (action.label || "Update Dashboard");
   refs.homePrimaryAction.disabled = action.enabled === false || state.runLaunch.inFlight || actionBlockedByRunLaunch;
   refs.homePrimaryAction.dataset.action = action.id || "refresh_status";
+  refs.homeStartRun.textContent = runControl.startLabel || "Start Build";
+  refs.homeContinueRun.textContent = runControl.continueLabel || "Continue Build";
   refs.homeStartRun.disabled = !canStartRun;
+  refs.homeStartRun.title = runControl.startDisabledReason;
   refs.homeContinueRun.disabled = !canContinueRun;
+  refs.homeContinueRun.title = runControl.continueDisabledReason;
+  refs.homeRunControlNote.textContent = runControl.note;
   refs.homeCommandPreview.textContent = [
     state.runLaunch.inFlight ? "Protocol run action is being submitted..." : "",
     state.runLaunch.message,
@@ -710,26 +817,43 @@ function renderHomeDashboard() {
     state.preparedCommand ? `Terminal backup prepared: ${state.preparedCommand}` : "Terminal backup: no command prepared.",
   ].filter(Boolean).join("\n");
   refs.homeOpenLatestArtifact.disabled = artifactUnavailable;
+  refs.homeCopyDebugBundle.disabled = !state.snapshot;
+  refs.homeQuickCopyDebugBundle.disabled = !state.snapshot;
+  if (refs.homeClearStopContinue) {
+    refs.homeClearStopContinue.hidden = !(vm.approval.safeStop && vm.approval.safeStop.present);
+    refs.homeClearStopContinue.disabled = state.runLaunch.inFlight;
+  }
 
-  if (vm.homeError) {
+  const visibleHomeError = vm.repo && vm.repo.mismatch ? vm.repo.message : vm.homeError;
+  if (visibleHomeError) {
     refs.homeError.hidden = false;
-    refs.homeErrorBody.textContent = vm.homeError;
+    refs.homeErrorBody.textContent = visibleHomeError;
   } else {
     refs.homeError.hidden = true;
     refs.homeErrorBody.textContent = "";
   }
 
   refs.homeRepoBody.innerHTML = [
+    vm.repo.expected ? homeRow("Expected Repo", vm.repo.expected) : "",
     homeRow("Repo Root", vm.repo.root),
+    vm.repo.expected ? homeRow("Repo Match", vm.repo.matches ? "yes" : "no") : "",
     homeRow("Contract Status", vm.repo.message),
     `<div class="contract-pill-row">${contractRows || `<span class="panel-note">${escapeHTML(vm.contractStatus.message)}</span>`}</div>`,
   ].join("");
 
   refs.homeRunBody.innerHTML = [
+    homeRow("Loop State", vm.topStatus.loopLabel),
+    homeRow("What It Means", vm.topStatus.loopDetail),
     homeRow("Run ID", vm.status.runID),
     homeRow("Goal", vm.status.goal),
     homeRow("Run State", vm.status.completed ? "completed" : vm.status.stopReason),
+    homeRow("Checkpoint", `${vm.status.checkpointStage} / ${vm.status.checkpointLabel} / safe_pause=${vm.status.checkpointSafePause ? "true" : "false"}`),
+    homeRow("Planner Outcome", vm.status.latestPlannerOutcome),
+    homeRow("Executor Status", vm.status.executorTurnStatus),
+    homeRow("Next Operator Action", vm.status.nextOperatorAction),
     homeRow("Elapsed", vm.status.elapsedLabel),
+    homeRow("What Happened", vm.whatHappened.stop.title),
+    homeRow("Next Action", vm.whatHappened.stop.nextAction),
     homeRow("Pending Held", vm.status.pendingHeld ? "true" : "false"),
     vm.status.executorLastError !== "None" ? homeRow("Executor Error", vm.status.executorLastError) : "",
   ].join("");
@@ -740,14 +864,14 @@ function renderHomeDashboard() {
       <strong>${escapeHTML(progressLabel)}</strong>
       <span>${escapeHTML(vm.progress.progressConfidence)} confidence</span>
     </div>
-    <p>${escapeHTML(vm.progress.progressBasis)}</p>
-    ${homeRow("Current Focus", vm.progress.currentFocus)}
-    ${homeRow("Next Step", vm.progress.nextIntendedStep)}
+    <p>${escapeHTML(vm.progress.progressBasisPreview)}</p>
+    ${homeRow("Current Focus", vm.progress.currentFocusPreview)}
+    ${homeRow("Next Step", vm.progress.nextIntendedStepPreview)}
   `;
 
   refs.homePlannerBody.innerHTML = `
     <p class="home-large-text">${escapeHTML(vm.latestPlannerMessage)}</p>
-    ${homeRow("Why This Step", vm.progress.whyThisStep)}
+    ${homeRow("Why This Step", vm.progress.whyThisStepPreview)}
   `;
 
   refs.homeAttentionBody.innerHTML = [
@@ -761,6 +885,8 @@ function renderHomeDashboard() {
     homeRow("Verification", codex.verificationState),
     homeRow("Full Access Ready", codex.fullAccessReady),
     homeRow("Model / Effort", `${codex.model} / ${codex.effort}`),
+    homeRow("Codex Binary", codex.codexPath),
+    homeRow("Codex Version", codex.codexVersion),
     codex.lastError !== "None" ? homeRow("Last Error", codex.lastError) : "",
     `<p class="panel-note">${escapeHTML(codex.recommendedAction)}</p>`,
   ].join("");
@@ -772,21 +898,30 @@ function renderHomeDashboard() {
       `<button class="button" data-home-open-artifact="${escapeHTML(vm.latestArtifactPath)}">Open Latest Artifact</button>`,
     ].join("");
 
-  refs.homeActivityBody.innerHTML = vm.recentActivity.length === 0
-    ? `<div class="event-empty">No recent activity yet. Events appear here after the shell connects and the engine emits protocol events.</div>`
-    : vm.recentActivity.map((event) => `
+  refs.homeActivityBody.innerHTML = vm.recentActivity.length === 0 && !vm.liveOutput.latestError.present
+    ? `<div class="event-empty">No recent activity yet. Open Live Output after starting or continuing a run; planner/Codex/model errors appear there as soon as events arrive.</div>`
+    : [
+      vm.liveOutput.latestError.present ? `
+        <div class="pinned-error">
+          <strong>Latest error</strong>
+          <span>${escapeHTML(vm.liveOutput.latestError.summary)}</span>
+        </div>
+      ` : "",
+      ...(vm.recentActivity.length === 0 ? [`<div class="event-empty">No recent activity events are loaded yet, but the latest status snapshot includes the error above.</div>`] : vm.recentActivity.map((event) => `
       <div class="home-activity-item">
         <div class="event-chip event-chip-${escapeHTML(event.category)}">${escapeHTML(event.categoryLabel)}</div>
         <strong>${escapeHTML(event.summary)}</strong>
         <span>${escapeHTML(event.timestampLabel)}</span>
       </div>
-    `).join("");
+    `)),
+      `<p class="panel-note">${escapeHTML(vm.liveOutput.detail)}</p>`,
+    ].join("");
 }
 
 function renderConnection() {
   refs.addressInput.value = state.address;
   refs.autoReconnect.checked = state.reconnect.enabled;
-  const vm = window.OrchestratorViewModel.buildConnectionStatusViewModel(state.snapshot, {
+  const vm = window.OrchestratorViewModel.buildConnectionStatusViewModel(state.snapshot, viewModelOptions({
     connection: state.connection,
     address: state.address,
     reconnecting: state.reconnect.pending,
@@ -795,7 +930,7 @@ function renderConnection() {
         ? state.connectionTiming.connectedAt
         : (state.connection.status === "connecting" ? state.connectionTiming.connectingAt : state.connectionTiming.disconnectedAt),
     ),
-  });
+  }));
   refs.connectionBadge.className = `badge ${vm.className}`;
   refs.connectionBadge.textContent = `${vm.label} | ${vm.durationLabel}`;
   refs.connectionDetails.textContent = shellHelpers.buildConnectionDetails(state.connection, state.reconnect);
@@ -809,7 +944,7 @@ function renderConnectionTimers() {
   if (!refs.connectionBadge) {
     return;
   }
-  const vm = window.OrchestratorViewModel.buildConnectionStatusViewModel(state.snapshot, {
+  const vm = window.OrchestratorViewModel.buildConnectionStatusViewModel(state.snapshot, viewModelOptions({
     connection: state.connection,
     address: state.address,
     reconnecting: state.reconnect.pending,
@@ -818,7 +953,7 @@ function renderConnectionTimers() {
         ? state.connectionTiming.connectedAt
         : (state.connection.status === "connecting" ? state.connectionTiming.connectingAt : state.connectionTiming.disconnectedAt),
     ),
-  });
+  }));
   refs.connectionBadge.className = `badge ${vm.className}`;
   refs.connectionBadge.textContent = `${vm.label} | ${vm.durationLabel}`;
   renderTopStatus();
@@ -843,30 +978,13 @@ function renderProgressPanel() {
       <div class="progress-bar-track">
         <div class="progress-bar-fill" style="width:${escapeHTML(vm.progressBarWidth)}"></div>
       </div>
-      <div class="progress-grid">
-        <div class="detail-row">
-          <div class="detail-label">Progress Basis</div>
-          <div class="detail-value">${escapeHTML(vm.progressBasis)}</div>
-        </div>
-        <div class="detail-row">
-          <div class="detail-label">Current Focus</div>
-          <div class="detail-value">${escapeHTML(vm.currentFocus)}</div>
-        </div>
-        <div class="detail-row">
-          <div class="detail-label">Next Intended Step</div>
-          <div class="detail-value">${escapeHTML(vm.nextIntendedStep)}</div>
-        </div>
-        <div class="detail-row">
-          <div class="detail-label">Why This Step</div>
-          <div class="detail-value">${escapeHTML(vm.whyThisStep)}</div>
-        </div>
+      <div class="progress-detail-sections">
+        ${vm.sections.map(renderProgressDetailSection).join("")}
+      </div>
+      <div class="progress-source-row">
         <div class="detail-row">
           <div class="detail-label">Roadmap Source</div>
           <div class="detail-value">${escapeHTML(vm.roadmapPath)} | ${escapeHTML(vm.roadmapModifiedAt)}</div>
-        </div>
-        <div class="detail-row">
-          <div class="detail-label">Roadmap Alignment / Context</div>
-          <div class="detail-value">${escapeHTML(vm.roadmapAlignmentText)}</div>
         </div>
       </div>
     </div>
@@ -883,6 +1001,9 @@ function renderStatus() {
     ["Elapsed", vm.elapsedLabel],
     ["Started At", vm.startedAt],
     ["Stopped / Last Updated", vm.stoppedAt],
+    ["Total Build Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.total_build_time_label || "Unavailable" : "Unavailable"],
+    ["Current Step", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_step_label || "Unavailable" : "Unavailable"],
+    ["Current Step Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_step_time_label || "Unavailable" : "Unavailable"],
     ["Completed", vm.completed ? "true" : "false"],
     ["Verbosity", vm.verbosity],
     ["Planner Model", `${vm.plannerModelConfigured} (${vm.plannerModelVerification})`],
@@ -907,6 +1028,7 @@ function renderModelHealth() {
   const health = state.snapshot && state.snapshot.model_health ? state.snapshot.model_health : {};
   const planner = health.planner || {};
   const executor = health.executor || {};
+  const backend = state.snapshot && state.snapshot.backend ? state.snapshot.backend : {};
   const plannerTest = state.modelTests.planner || null;
   const executorTest = state.modelTests.executor || null;
   const rows = [
@@ -922,8 +1044,17 @@ function renderModelHealth() {
     ["Codex Verification", executor.verification_state || "not_verified"],
     ["Codex Access Mode", executor.access_mode || "Not reported"],
     ["Codex Effort", executor.effort || "Not reported"],
+    ["Codex Binary", executor.codex_executable_path || "Not detected"],
+    ["Codex Version", executor.codex_version || "Not detected"],
+    ["Codex Config", executor.codex_config_source || "Not detected"],
+    ["Codex Model Verified", executor.codex_model_verified ? "yes" : "no"],
+    ["Codex Full Access Verified", executor.codex_permission_mode_verified ? "yes" : "no"],
     ["Codex Last Error", executor.last_error || "None"],
     ["Codex Last Test", executorTest ? JSON.stringify(executorTest.executor || executorTest, null, 2) : "Not tested from this shell session."],
+    ["Backend PID", backend.pid || "Unavailable"],
+    ["Backend Started", backend.started_at || "Unavailable"],
+    ["Backend Binary", backend.binary_path || "Unavailable"],
+    ["Backend Stale", backend.stale ? `yes: ${backend.stale_reason || "restart recommended"}` : "no"],
     ["Recommended Action", executor.recommended_action || planner.recommended_action || "Use the test buttons before long unattended runs."],
   ];
   refs.modelHealthBody.innerHTML = rows
@@ -931,6 +1062,61 @@ function renderModelHealth() {
     .join("");
   refs.testPlannerModelButton.disabled = state.modelTests.inFlight !== "";
   refs.testExecutorModelButton.disabled = state.modelTests.inFlight !== "";
+  refs.copyModelHealthButton.disabled = !state.snapshot;
+  refs.restartBackendButton.disabled = state.modelTests.inFlight !== "";
+}
+
+function renderRuntimeSettings() {
+  const cfg = state.runtimeConfig || {};
+  const timeouts = (cfg.timeouts || (state.snapshot && state.snapshot.timeouts)) || {};
+  const permissions = (cfg.permissions || (state.snapshot && state.snapshot.permissions)) || {};
+  const timeoutValue = (name, fallback = "") => {
+    const entry = timeouts[name] || {};
+    return entry.value || fallback;
+  };
+  if (refs.timeoutPlannerRequest) refs.timeoutPlannerRequest.value = timeoutValue("planner_request_timeout", refs.timeoutPlannerRequest.value || "2m");
+  if (refs.timeoutExecutorTurn) refs.timeoutExecutorTurn.value = timeoutValue("executor_turn_timeout", refs.timeoutExecutorTurn.value || "unlimited");
+  if (refs.timeoutShellCommand) refs.timeoutShellCommand.value = timeoutValue("shell_command_timeout", refs.timeoutShellCommand.value || "30m");
+  if (refs.timeoutInstall) refs.timeoutInstall.value = timeoutValue("install_timeout", refs.timeoutInstall.value || "2h");
+  if (refs.timeoutHumanWait) refs.timeoutHumanWait.value = timeoutValue("human_wait_timeout", refs.timeoutHumanWait.value || "unlimited");
+  if (refs.permissionProfile && permissions.profile) {
+    refs.permissionProfile.value = permissions.profile;
+  }
+  if (refs.runtimeSettingsSummary) {
+    const rows = [
+      ["Executor turn timeout", timeoutValue("executor_turn_timeout", "unlimited")],
+      ["Human wait timeout", timeoutValue("human_wait_timeout", "unlimited")],
+      ["Install timeout", timeoutValue("install_timeout", "2h")],
+      ["Permission profile", permissions.profile || "balanced"],
+      ["Applies", timeouts.message || "Saved settings apply to future operations; active transports use changes where technically possible."],
+    ];
+    refs.runtimeSettingsSummary.innerHTML = rows
+      .map(([label, value]) => `<div class="detail-row"><div class="detail-label">${escapeHTML(label)}</div><div class="detail-value">${escapeHTML(value)}</div></div>`)
+      .join("");
+  }
+}
+
+function renderUpdateStatus() {
+  const status = state.updateStatus || (state.snapshot && state.snapshot.update_status) || {};
+  if (!refs.updateStatusBody) {
+    return;
+  }
+  const rows = [
+    ["Current Version", status.current_version || "Unavailable"],
+    ["Latest Version", status.latest_version || "Not checked"],
+    ["Update Available", status.update_available ? "yes" : "no"],
+    ["Channel", status.channel || (status.settings && status.settings.update_channel) || "stable"],
+    ["Release URL", status.release_url || "Unavailable"],
+    ["Install Supported", status.install_supported ? "yes" : "no"],
+    ["Install Message", status.install_message || "Install is deferred until signed/checksummed Windows assets exist."],
+    ["Last Error", status.error || "None"],
+  ];
+  refs.updateStatusBody.innerHTML = rows
+    .map(([label, value]) => `<div class="detail-row"><div class="detail-label">${escapeHTML(label)}</div><div class="detail-value">${escapeHTML(value)}</div></div>`)
+    .join("");
+  if (refs.installUpdateButton) {
+    refs.installUpdateButton.disabled = !status.install_supported;
+  }
 }
 
 function renderPendingAction() {
@@ -966,19 +1152,78 @@ function renderPendingAction() {
 function renderApproval() {
   const vm = window.OrchestratorViewModel.buildApprovalViewModel(state.snapshot);
   const codex = window.OrchestratorViewModel.buildCodexReadinessViewModel(state.snapshot);
-  if (!vm.needsAttention && !codex.needsAttention) {
+  const modelBlocking = Boolean(state.snapshot && state.snapshot.model_health && state.snapshot.model_health.blocking);
+  const askHuman = vm.askHuman || { present: false };
+  const safeStop = vm.safeStop || { present: false };
+  if (!vm.needsAttention && !modelBlocking) {
     refs.approvalBody.innerHTML = `
       <div class="attention-empty">
-        <strong>No action required right now.</strong>
-        <p>The latest status snapshot does not show a Codex approval, planner question, or worker approval waiting for you.</p>
+        <strong>No approval needed.</strong>
+        <p>The latest status snapshot does not show an actionable Codex approval, planner question, blocking model issue, or worker approval waiting for you.</p>
       </div>
     `;
-  } else if (!vm.needsAttention && codex.needsAttention) {
+  } else if (askHuman.present) {
+    const rows = [
+      ["Planner Question / Blocker", askHuman.question],
+      ["Context", askHuman.blocker],
+      ["Action Summary", askHuman.actionSummary],
+      ["Run ID", askHuman.runID],
+      ["Planner Outcome", askHuman.plannerOutcome],
+      ["Response ID", askHuman.responseID],
+      ["Source", askHuman.source],
+      ["Updated At", askHuman.updatedAt],
+    ];
+    refs.approvalBody.innerHTML = `
+      <div class="attention-empty attention-ask-human">
+        <strong>Planner needs your answer.</strong>
+        <p>${escapeHTML(askHuman.message)}</p>
+      </div>
+      ${rows
+        .map(([label, value]) => `<div class="detail-row"><div class="detail-label">${escapeHTML(label)}</div><div class="detail-value">${escapeHTML(value)}</div></div>`)
+        .join("")}
+    `;
+  } else if (safeStop.present) {
+    const rows = [
+      ["What happened?", "Safe stop was requested."],
+      ["Recommended Action", "Use Clear Stop and Continue when you are ready to resume."],
+      ["Run ID", safeStop.runID],
+      ["Stop Flag Present", safeStop.flagPresent ? "yes" : "no"],
+      ["Reason", safeStop.reason],
+      ["Applies At", safeStop.appliesAt],
+      ["Stop Flag Path", safeStop.path],
+    ];
+    refs.approvalBody.innerHTML = `
+      <div class="attention-empty attention-safe-stop">
+        <strong>Safe stop was requested.</strong>
+        <p>${escapeHTML(safeStop.message)}</p>
+      </div>
+      ${rows
+        .map(([label, value]) => `<div class="detail-row"><div class="detail-label">${escapeHTML(label)}</div><div class="detail-value">${escapeHTML(value)}</div></div>`)
+        .join("")}
+      <div class="button-row"><button class="button button-primary" data-summary-action="clear_stop_continue">Clear Stop and Continue</button></div>
+    `;
+  } else if (vm.staleGuard && vm.staleGuard.present) {
+    refs.approvalBody.innerHTML = `
+      <div class="attention-empty attention-stale-run">
+        <strong>Recovery needed.</strong>
+        <p>${escapeHTML(vm.staleGuard.message)}</p>
+      </div>
+      <div class="detail-row"><div class="detail-label">Recommended Action</div><div class="detail-value">Use Recover Backend / Unlock Repo. It mechanically clears stale active-run state without deleting history or artifacts, and only restarts dogfood-owned backend processes when needed.</div></div>
+      <div class="detail-row"><div class="detail-label">Run ID</div><div class="detail-value">${escapeHTML(vm.staleGuard.runID)}</div></div>
+      <div class="detail-row"><div class="detail-label">Stale Backend PID</div><div class="detail-value">${escapeHTML(vm.staleGuard.backendPID)}</div></div>
+      <div class="detail-row"><div class="detail-label">Session ID</div><div class="detail-value">${escapeHTML(vm.staleGuard.sessionID)}</div></div>
+      <div class="detail-row"><div class="detail-label">Why</div><div class="detail-value">${escapeHTML(vm.staleGuard.reason)}</div></div>
+      <div class="button-row"><button class="button button-danger-soft" data-summary-action="recover_backend">Recover Backend / Unlock Repo</button></div>
+    `;
+  } else if (!vm.needsAttention && modelBlocking) {
     refs.approvalBody.innerHTML = `
       <div class="detail-row"><div class="detail-label">Action Required</div><div class="detail-value">${escapeHTML(codex.title)}</div></div>
       <div class="detail-row"><div class="detail-label">Access Mode</div><div class="detail-value">${escapeHTML(codex.accessMode)}</div></div>
       <div class="detail-row"><div class="detail-label">Model / Effort</div><div class="detail-value">${escapeHTML(codex.model)} / ${escapeHTML(codex.effort)}</div></div>
       <div class="detail-row"><div class="detail-label">Verification</div><div class="detail-value">${escapeHTML(codex.verificationState)}</div></div>
+      <div class="detail-row"><div class="detail-label">Codex Binary</div><div class="detail-value">${escapeHTML(codex.codexPath)}</div></div>
+      <div class="detail-row"><div class="detail-label">Codex Version</div><div class="detail-value">${escapeHTML(codex.codexVersion)}</div></div>
+      <div class="detail-row"><div class="detail-label">Config Source</div><div class="detail-value">${escapeHTML(codex.codexConfigSource)}</div></div>
       <div class="detail-row"><div class="detail-label">Plain-English Issue</div><div class="detail-value">${escapeHTML(codex.plainEnglish)}</div></div>
       <div class="detail-row"><div class="detail-label">Last Model Error</div><div class="detail-value">${escapeHTML(codex.lastError)}</div></div>
       <div class="detail-row"><div class="detail-label">Full Access Ready</div><div class="detail-value">${escapeHTML(codex.fullAccessReady)}</div></div>
@@ -1008,15 +1253,42 @@ function renderApproval() {
       .join("");
   }
 
-  const canApprove = vm.availableActions.includes("approve");
-  const canDeny = vm.availableActions.includes("deny");
+  if (refs.askHumanActionsRow) {
+    refs.askHumanActionsRow.hidden = !askHuman.present;
+  }
+  if (refs.askHumanStatus) {
+    refs.askHumanStatus.textContent = state.actionRequired.status || (askHuman.present
+      ? "Type the raw answer, then Send Answer and Continue. The shell queues it with inject_control_message and resumes with continue_run."
+      : "No planner answer is waiting.");
+  }
+  if (refs.sendAnswerContinueButton) {
+    refs.sendAnswerContinueButton.disabled = !askHuman.present || state.actionRequired.inFlight;
+  }
+  if (refs.sendAnswerOnlyButton) {
+    refs.sendAnswerOnlyButton.disabled = !askHuman.present || state.actionRequired.inFlight;
+  }
+  if (refs.continueQueuedAnswerButton) {
+    refs.continueQueuedAnswerButton.disabled = !askHuman.present || state.actionRequired.inFlight || !state.actionRequired.queuedAskHumanAnswer;
+  }
+
+  const canApprove = vm.canApprove;
+  const canDeny = vm.canDeny;
   refs.approveButton.disabled = !canApprove;
   refs.denyButton.disabled = !canDeny;
+  refs.approveButton.hidden = !vm.present;
+  refs.denyButton.hidden = !vm.present;
+  refs.copyApprovalDetailsButton.hidden = !vm.needsAttention || askHuman.present;
+  if (refs.approvalActionsRow) {
+    refs.approvalActionsRow.hidden = !vm.needsAttention || askHuman.present;
+  }
   renderAttentionBadge();
 }
 
 function renderRunSummary() {
   const vm = window.OrchestratorViewModel.buildRunSummaryViewModel(state.snapshot, state.artifacts, state.events);
+  const actionButtons = (vm.primaryActions || [])
+    .map((action) => `<button class="button button-mini summary-action" data-summary-action="${escapeHTML(action.id)}">${escapeHTML(action.label)}</button>`)
+    .join("");
   const rows = [
     ["Run State", vm.runState],
       ["Why It Stopped", vm.stopExplanation],
@@ -1028,22 +1300,35 @@ function renderRunSummary() {
     ["Approval", vm.approval],
     ["Workers", vm.workerSummary],
     ["Latest Artifact", vm.latestArtifact],
+    ["Latest Error", vm.latestError],
     ["Recent Events", vm.recentEvents.join(" | ")],
   ];
 
-  refs.summaryBody.innerHTML = rows
+  refs.copyLatestErrorButton.disabled = vm.latestError === "No latest error is available.";
+  refs.summaryBody.innerHTML = `
+    <div class="what-happened-card what-happened-card-${escapeHTML(vm.stopSeverity || "neutral")}">
+      <div>
+        <div class="summary-label">Stopped-run diagnosis</div>
+        <strong>${escapeHTML(vm.stopExplanation)}</strong>
+        <p>${escapeHTML(vm.nextAction)}</p>
+      </div>
+      <div class="button-row">${actionButtons}</div>
+    </div>
+    ${rows
     .map(([label, value]) => `<div class="summary-row"><div class="summary-label">${escapeHTML(label)}</div><div class="summary-value">${escapeHTML(value)}</div></div>`)
-    .join("");
+    .join("")}
+  `;
 }
 
 function renderSideChat() {
   const vm = window.OrchestratorViewModel.buildSideChatViewModel(state.sideChat);
+  const banner = `<div class="side-chat-mode-note">${escapeHTML(vm.modeDescription)}</div>`;
   if (vm.items.length === 0) {
-    refs.sideChatBody.innerHTML = `<div class="event-empty">${escapeHTML(vm.message)}</div>`;
+    refs.sideChatBody.innerHTML = `${banner}<div class="event-empty">${escapeHTML(vm.message)}</div>`;
     return;
   }
 
-  refs.sideChatBody.innerHTML = vm.items
+  refs.sideChatBody.innerHTML = banner + vm.items
     .map((item) => `
       <div class="side-chat-item">
         <div class="side-chat-header">
@@ -1169,14 +1454,22 @@ function renderEvents() {
     verbosity: refs.verbositySelect ? refs.verbositySelect.value : "normal",
   });
 
-  refs.eventsMeta.textContent = `${vm.filteredCount} shown / ${vm.totalCount} total | verbosity: ${vm.verbosity} | current run filter: ${vm.currentRunOnly ? "on" : "off"} | run: ${vm.currentRunID}`;
+  refs.eventsMeta.textContent = `${vm.filteredCount} shown / ${vm.totalCount} total | verbosity: ${vm.verbosity} controls this output | current run filter: ${vm.currentRunOnly ? "on" : "off"} | run: ${vm.currentRunID}`;
+  const latestStatusError = window.OrchestratorViewModel.buildLatestErrorViewModel(state.snapshot, state.events);
+  const pinnedError = latestStatusError.present ? `
+    <div class="pinned-error pinned-error-large">
+      <strong>Latest error</strong>
+      <span>${escapeHTML(latestStatusError.summary)}</span>
+      <small>Copy Debug Bundle from Home or What Happened when asking for help.</small>
+    </div>
+  ` : "";
 
   if (vm.items.length === 0) {
-    refs.eventsBody.innerHTML = `<div class="event-empty">${escapeHTML(vm.emptyMessage)}</div>`;
+    refs.eventsBody.innerHTML = `${pinnedError}<div class="event-empty">${escapeHTML(vm.emptyMessage)}</div>`;
     return;
   }
 
-  refs.eventsBody.innerHTML = vm.items
+  refs.eventsBody.innerHTML = pinnedError + vm.items
     .map((event, index) => `
       <div class="event-card event-card-${escapeHTML(event.severity)}">
         <div class="event-rail event-rail-${escapeHTML(event.category)}"></div>
@@ -1391,6 +1684,8 @@ function renderAll() {
   renderProgressPanel();
   renderStatus();
   renderModelHealth();
+  renderRuntimeSettings();
+  renderUpdateStatus();
   renderPendingAction();
   renderApproval();
   renderRunSummary();
@@ -1420,8 +1715,10 @@ async function connect(options = {}) {
     setFlash("info", options.automatic ? `Reconnecting to ${state.address} ...` : `Connecting to ${state.address} ...`);
     const response = await window.orchestratorConsole.connect(state.address);
     state.connection = response.connection;
+    state.expectedRepoPath = response.expectedRepoPath || (response.connection && response.connection.expectedRepoPath) || state.expectedRepoPath;
     state.connectionTiming.connectedAt = new Date().toISOString();
     state.snapshot = response.snapshot;
+    applyModelHealthNormalization();
     state.lastRefreshedAt = new Date().toISOString();
     await hydrateProtocolBackedPanels(true);
     clearReconnectTimer();
@@ -1430,6 +1727,7 @@ async function connect(options = {}) {
     renderAll();
     maybeFocusActionRequired();
     setFlash("success", options.automatic ? "Reconnected to the control server." : "Connected to the control server.");
+    void autoTestModelHealth("connect");
   } catch (error) {
     state.connection = {
       connected: false,
@@ -1454,11 +1752,13 @@ async function hydrateProtocolBackedPanels(refreshContracts = false) {
   }
 
   const runID = activeRunID();
-  const [artifactsResult, sideChatResult, dogfoodResult, workersResult] = await Promise.allSettled([
+  const [artifactsResult, sideChatResult, dogfoodResult, workersResult, runtimeConfigResult, updateStatusResult] = await Promise.allSettled([
     window.orchestratorConsole.listRecentArtifacts(runID, "", 12, state.address),
     window.orchestratorConsole.listSideChatMessages(activeRepoPath(), 20, state.address),
     window.orchestratorConsole.listDogfoodIssues(activeRepoPath(), 20, state.address),
     window.orchestratorConsole.listWorkers(runID, 20, state.address),
+    window.orchestratorConsole.getRuntimeConfig(state.address),
+    window.orchestratorConsole.getUpdateStatus(state.address),
   ]);
   if (artifactsResult.status === "fulfilled") {
     state.artifacts = artifactsResult.value;
@@ -1479,6 +1779,16 @@ async function hydrateProtocolBackedPanels(refreshContracts = false) {
     state.workers = workersResult.value;
   } else {
     reportIssue("workers", workersResult.reason, "Worker visibility could not be refreshed.");
+  }
+  if (runtimeConfigResult.status === "fulfilled") {
+    state.runtimeConfig = runtimeConfigResult.value;
+  } else {
+    reportIssue("runtime config", runtimeConfigResult.reason, "Runtime settings could not be refreshed.");
+  }
+  if (updateStatusResult.status === "fulfilled") {
+    state.updateStatus = updateStatusResult.value;
+  } else {
+    reportIssue("updates", updateStatusResult.reason, "Update status could not be refreshed.");
   }
   ensureSelectedWorker();
   ensureSelectedDogfoodIssue();
@@ -1587,9 +1897,111 @@ async function refreshWorkers(options = {}) {
   }
 }
 
+async function loadRuntimeConfig(options = {}) {
+  try {
+    state.runtimeConfig = await window.orchestratorConsole.getRuntimeConfig(state.address);
+    renderRuntimeSettings();
+    if (!options.quiet) {
+      setFlash("success", "Runtime config loaded.");
+    }
+  } catch (error) {
+    reportIssue("runtime config", error, "Runtime settings could not be loaded.");
+  }
+}
+
+function timeoutPresetPatch(preset) {
+  switch (String(preset || "normal")) {
+    case "conservative":
+      return {
+        planner_request_timeout: "2m",
+        executor_idle_timeout: "10m",
+        executor_turn_timeout: "30m",
+        subagent_timeout: "30m",
+        shell_command_timeout: "10m",
+        install_timeout: "45m",
+        human_wait_timeout: "unlimited",
+      };
+    case "long_running":
+      return {
+        planner_request_timeout: "5m",
+        executor_idle_timeout: "unlimited",
+        executor_turn_timeout: "4h",
+        subagent_timeout: "2h",
+        shell_command_timeout: "1h",
+        install_timeout: "4h",
+        human_wait_timeout: "unlimited",
+      };
+    case "unlimited":
+      return {
+        planner_request_timeout: "unlimited",
+        executor_idle_timeout: "unlimited",
+        executor_turn_timeout: "unlimited",
+        subagent_timeout: "unlimited",
+        shell_command_timeout: "unlimited",
+        install_timeout: "unlimited",
+        human_wait_timeout: "unlimited",
+      };
+    default:
+      return {
+        planner_request_timeout: "2m",
+        executor_idle_timeout: "unlimited",
+        executor_turn_timeout: "unlimited",
+        subagent_timeout: "unlimited",
+        shell_command_timeout: "30m",
+        install_timeout: "2h",
+        human_wait_timeout: "unlimited",
+      };
+  }
+}
+
+async function saveRuntimeConfig() {
+  try {
+    const preset = refs.timeoutPreset ? refs.timeoutPreset.value : "custom";
+    const presetTimeouts = preset === "custom" ? {} : timeoutPresetPatch(preset);
+    const patch = {
+      address: state.address,
+      permission_profile: refs.permissionProfile ? refs.permissionProfile.value : "balanced",
+      timeouts: {
+        ...presetTimeouts,
+        planner_request_timeout: refs.timeoutPlannerRequest ? refs.timeoutPlannerRequest.value : presetTimeouts.planner_request_timeout,
+        executor_turn_timeout: refs.timeoutExecutorTurn ? refs.timeoutExecutorTurn.value : presetTimeouts.executor_turn_timeout,
+        shell_command_timeout: refs.timeoutShellCommand ? refs.timeoutShellCommand.value : presetTimeouts.shell_command_timeout,
+        install_timeout: refs.timeoutInstall ? refs.timeoutInstall.value : presetTimeouts.install_timeout,
+        human_wait_timeout: refs.timeoutHumanWait ? refs.timeoutHumanWait.value : presetTimeouts.human_wait_timeout,
+      },
+    };
+    state.runtimeConfig = await window.orchestratorConsole.setRuntimeConfig(patch);
+    if (state.snapshot) {
+      state.snapshot.timeouts = state.runtimeConfig.timeouts;
+      state.snapshot.permissions = state.runtimeConfig.permissions;
+    }
+    renderRuntimeSettings();
+    setFlash("success", "Runtime settings saved. Timeout changes apply to future operations or the next safe boundary where needed.");
+  } catch (error) {
+    reportIssue("runtime config", error, "Runtime settings could not be saved.");
+  }
+}
+
+async function checkForUpdates() {
+  try {
+    state.updateStatus = await window.orchestratorConsole.checkForUpdates(false, state.address);
+    renderUpdateStatus();
+    setFlash(state.updateStatus.update_available ? "success" : "info", state.updateStatus.update_available ? `Update available: ${state.updateStatus.latest_version}` : "No update found for the selected channel.");
+  } catch (error) {
+    reportIssue("updates", error, "Update check failed.");
+  }
+}
+
+async function copyUpdateChangelog() {
+  const status = state.updateStatus || {};
+  const text = status.changelog || "No update changelog has been loaded yet. Click Check for Updates first.";
+  await copyText(text, "Update changelog copied.");
+}
+
 async function refreshStatus(options = {}) {
   try {
     state.snapshot = await window.orchestratorConsole.getStatusSnapshot("", state.address);
+    applyModelHealthNormalization();
     state.lastRefreshedAt = new Date().toISOString();
     await hydrateProtocolBackedPanels(Boolean(options.refreshContracts));
     renderAll();
@@ -1667,7 +2079,10 @@ async function testPlannerModelFromSettings() {
     const result = await window.orchestratorConsole.testPlannerModel("", state.address);
     state.modelTests.planner = result;
     recordLocalActivity("model_health_tested", { component: "planner" }, "Planner model health was tested.");
-    state.snapshot = { ...(state.snapshot || {}), model_health: result };
+    if (!state.snapshot) {
+      state.snapshot = { model_health: result };
+    }
+    applyModelHealthNormalization();
     renderAll();
     setFlash("success", "Planner model test completed.");
   } catch (error) {
@@ -1688,7 +2103,10 @@ async function testExecutorModelFromSettings() {
     const result = await window.orchestratorConsole.testExecutorModel("", state.address);
     state.modelTests.executor = result;
     recordLocalActivity("model_health_tested", { component: "executor" }, "Codex configuration health was tested.");
-    state.snapshot = { ...(state.snapshot || {}), model_health: result };
+    if (!state.snapshot) {
+      state.snapshot = { model_health: result };
+    }
+    applyModelHealthNormalization();
     renderAll();
     setFlash("success", "Codex configuration test completed.");
   } catch (error) {
@@ -1698,6 +2116,49 @@ async function testExecutorModelFromSettings() {
   } finally {
     state.modelTests.inFlight = "";
     renderModelHealth();
+  }
+}
+
+async function autoTestModelHealth(trigger = "connect") {
+  if (!state.connection.connected || state.modelTests.inFlight !== "") {
+    return;
+  }
+  state.modelTests.inFlight = "auto";
+  state.modelTests.error = "";
+  recordLocalActivity("model_health_check_started", { trigger }, "Checking planner model and Codex access...");
+  renderModelHealth();
+  renderHomeDashboard();
+
+  const [plannerResult, executorResult] = await Promise.allSettled([
+    window.orchestratorConsole.testPlannerModel("", state.address),
+    window.orchestratorConsole.testExecutorModel("", state.address),
+  ]);
+
+  if (plannerResult.status === "fulfilled") {
+    state.modelTests.planner = plannerResult.value;
+    recordLocalActivity("model_health_tested", { component: "planner", trigger }, "Planner model health was tested automatically.");
+  } else {
+    state.modelTests.error = plannerResult.reason && plannerResult.reason.message ? plannerResult.reason.message : String(plannerResult.reason || "planner model test failed");
+    recordLocalActivity("model_health_failed", { component: "planner", error: state.modelTests.error, trigger }, `Planner model health check failed: ${state.modelTests.error}`);
+  }
+
+  if (executorResult.status === "fulfilled") {
+    state.modelTests.executor = executorResult.value;
+    recordLocalActivity("model_health_tested", { component: "executor", trigger }, "Codex configuration health was tested automatically.");
+  } else {
+    const message = executorResult.reason && executorResult.reason.message ? executorResult.reason.message : String(executorResult.reason || "Codex config test failed");
+    state.modelTests.error = state.modelTests.error ? `${state.modelTests.error}; ${message}` : message;
+    recordLocalActivity("model_health_failed", { component: "executor", error: message, trigger }, `Codex configuration health check failed: ${message}`);
+  }
+
+  applyModelHealthNormalization();
+  state.modelTests.inFlight = "";
+  renderAll();
+  if (state.modelTests.error) {
+    setFlash("error", `Model health check needs attention: ${state.modelTests.error}`);
+    maybeFocusActionRequired();
+  } else {
+    setFlash("success", "Planner and Codex model checks completed.");
   }
 }
 
@@ -1721,6 +2182,110 @@ async function clearStop() {
   }
 }
 
+async function clearStopAndContinue() {
+  try {
+    state.actionRequired.status = "Clearing safe stop and preparing to continue...";
+    renderApproval();
+    await window.orchestratorConsole.clearStop(activeRunID(), state.address);
+    await refreshStatus({ quiet: true });
+    state.actionRequired.status = "Safe stop cleared. Continuing the run...";
+    setFlash("success", "Safe stop cleared. Continuing through the engine protocol...");
+    await continueRunFromHome({ skipAskHumanGuard: false });
+  } catch (error) {
+    state.actionRequired.status = `Clear Stop and Continue failed: ${error.message}`;
+    reportIssue("clear stop and continue", error);
+  } finally {
+    renderApproval();
+  }
+}
+
+function currentAskHumanViewModel() {
+  return window.OrchestratorViewModel.buildAskHumanViewModel(state.snapshot);
+}
+
+async function queueAskHumanAnswer(message, source = "action_required_answer") {
+  const trimmed = String(message || "").trim();
+  if (trimmed === "") {
+    throw new Error("Type an answer before sending.");
+  }
+  const queued = await window.orchestratorConsole.injectControlMessage({
+    runId: activeRunID(),
+    message: trimmed,
+    source,
+    reason: "ask_human_answer",
+    address: state.address,
+  });
+  state.actionRequired.queuedAskHumanAnswer = {
+    id: queued && queued.id ? queued.id : "",
+    runID: activeRunID(),
+    queuedAt: new Date().toISOString(),
+  };
+  recordLocalActivity("control_message_queued", {
+    run_id: activeRunID(),
+    source,
+    reason: "ask_human_answer",
+  }, "Planner answer queued for the next safe point.");
+  return queued;
+}
+
+async function sendAskHumanAnswer(options = {}) {
+  const continueAfter = Boolean(options.continueAfter);
+  const askHuman = currentAskHumanViewModel();
+  if (!askHuman.present) {
+    setFlash("info", "No planner question is waiting for an answer right now.");
+    return;
+  }
+  const message = refs.askHumanAnswer.value.trim();
+  if (message === "") {
+    setFlash("error", "Type an answer before sending.");
+    refs.askHumanAnswer.focus();
+    return;
+  }
+
+  state.actionRequired.inFlight = true;
+  state.actionRequired.status = continueAfter ? "Queueing answer, then continuing the run..." : "Queueing answer...";
+  renderApproval();
+  try {
+    const queued = await queueAskHumanAnswer(message, "action_required_answer");
+    refs.askHumanAnswer.value = "";
+    state.actionRequired.status = queued && queued.id
+      ? `Answer queued as ${queued.id}.`
+      : "Answer queued.";
+    await refreshStatus({ quiet: true });
+    if (continueAfter) {
+      state.actionRequired.status = "Answer queued. Continuing run...";
+      renderApproval();
+      await continueRunFromHome({ skipAskHumanGuard: true });
+    } else {
+      setFlash("success", `${state.actionRequired.status} Click Continue with Queued Answer when you are ready.`);
+    }
+  } catch (error) {
+    state.actionRequired.status = `Failed: ${error.message || error}`;
+    reportIssue("ask_human answer", error);
+  } finally {
+    state.actionRequired.inFlight = false;
+    renderApproval();
+    renderHomeDashboard();
+  }
+}
+
+async function continueQueuedAskHumanAnswer() {
+  const askHuman = currentAskHumanViewModel();
+  if (!askHuman.present || !state.actionRequired.queuedAskHumanAnswer) {
+    setFlash("info", "No queued planner answer is ready to continue.");
+    return;
+  }
+  state.actionRequired.status = "Continuing run with queued answer...";
+  renderApproval();
+  try {
+    await continueRunFromHome({ skipAskHumanGuard: true });
+  } catch (error) {
+    state.actionRequired.status = `Continue failed: ${error.message || error}`;
+    reportIssue("continue queued ask_human answer", error);
+    renderApproval();
+  }
+}
+
 async function sendControlMessage() {
   const message = refs.controlMessageInput.value.trim();
   if (message === "") {
@@ -1728,17 +2293,29 @@ async function sendControlMessage() {
     return;
   }
 
+  const askHuman = currentAskHumanViewModel();
   try {
-    const queued = await window.orchestratorConsole.injectControlMessage({
-      runId: activeRunID(),
-      message,
-      source: "control_chat",
-      reason: "operator_intervention_from_shell",
-      address: state.address,
-    });
+    const queued = askHuman.present
+      ? await queueAskHumanAnswer(message, "control_chat")
+      : await window.orchestratorConsole.injectControlMessage({
+        runId: activeRunID(),
+        message,
+        source: "control_chat",
+        reason: "operator_intervention_from_shell",
+        address: state.address,
+      });
     refs.controlMessageInput.value = "";
     await refreshStatus({ quiet: true });
-    setFlash("success", `Queued control message ${queued.id || ""}`.trim());
+    if (askHuman.present) {
+      state.actionRequired.status = queued && queued.id
+        ? `Control Chat answer queued as ${queued.id}. Click Continue with Queued Answer in Action Required.`
+        : "Control Chat answer queued. Click Continue with Queued Answer in Action Required.";
+      setActiveTab("attention");
+      renderApproval();
+      setFlash("success", state.actionRequired.status);
+    } else {
+      setFlash("success", `Queued control message ${queued.id || ""}`.trim());
+    }
   } catch (error) {
     reportIssue("control chat", error);
   }
@@ -1760,7 +2337,7 @@ async function sendSideChatMessage() {
     });
     refs.sideChatMessageInput.value = "";
     await refreshSideChat({ quiet: true });
-    setFlash("info", response.message || "Side chat backend is not implemented in this slice.");
+    setFlash("info", response.message || "Side note recorded. It did not affect the active run.");
   } catch (error) {
     reportIssue("side chat", error);
   }
@@ -1893,6 +2470,11 @@ async function integrateWorkers() {
 }
 
 async function approveExecutor() {
+  const vm = window.OrchestratorViewModel.buildApprovalViewModel(state.snapshot);
+  if (!vm.canApprove) {
+    setFlash("info", "No actionable executor approval is waiting right now.");
+    return;
+  }
   try {
     const result = await window.orchestratorConsole.approveExecutor(activeRunID(), state.address);
     await refreshStatus({ quiet: true });
@@ -1903,6 +2485,11 @@ async function approveExecutor() {
 }
 
 async function denyExecutor() {
+  const vm = window.OrchestratorViewModel.buildApprovalViewModel(state.snapshot);
+  if (!vm.canDeny) {
+    setFlash("info", "No actionable executor approval is waiting right now.");
+    return;
+  }
   try {
     const result = await window.orchestratorConsole.denyExecutor(activeRunID(), state.address);
     await refreshStatus({ quiet: true });
@@ -1931,6 +2518,193 @@ async function copyApprovalDetails() {
     setFlash("success", "Copied approval technical details.");
   } catch (error) {
     reportIssue("approval details", error, "Copying details requires clipboard access.");
+  }
+}
+
+async function copyDebugBundle() {
+  try {
+    const text = window.OrchestratorViewModel.buildDebugBundleText(state.snapshot, state.artifacts, state.events, {
+      now: new Date().toISOString(),
+      connection: state.connection,
+      address: state.address,
+      expectedRepoPath: state.expectedRepoPath,
+      sideChat: state.sideChat,
+    });
+    await navigator.clipboard.writeText(text);
+    setFlash("success", "Copied safe run debug bundle. Secrets and full artifacts are excluded.");
+    recordLocalActivity("debug_bundle_copied", { run_id: activeRunID() }, "Debug bundle copied for support.");
+  } catch (error) {
+    reportIssue("debug bundle", error, "Copying the debug bundle requires clipboard access.");
+  }
+}
+
+async function copyModelHealth() {
+  try {
+    applyModelHealthNormalization();
+    const text = window.OrchestratorViewModel.buildModelHealthBundleText(state.snapshot, {
+      now: new Date().toISOString(),
+      address: state.address,
+      expectedRepoPath: state.expectedRepoPath,
+    });
+    await navigator.clipboard.writeText(text);
+    setFlash("success", "Copied safe model-health bundle. Secrets are excluded.");
+    recordLocalActivity("model_health_bundle_copied", { run_id: activeRunID() }, "Model health bundle copied for support.");
+  } catch (error) {
+    reportIssue("model health bundle", error, "Copying model health requires clipboard access.");
+  }
+}
+
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function staleActiveRunGuard() {
+  const guard = state.snapshot && state.snapshot.active_run_guard ? state.snapshot.active_run_guard : null;
+  if (!guard || guard.present !== true || guard.stale !== true) {
+    return null;
+  }
+  return guard;
+}
+
+async function refreshAfterRecovery() {
+  await refreshStatus({ quiet: true, refreshContracts: true });
+  await Promise.allSettled([
+    refreshArtifacts({ quiet: true }),
+    refreshWorkers({ quiet: true }),
+    refreshDogfoodIssues({ quiet: true }),
+    refreshSideChat({ quiet: true }),
+    autoTestModelHealth("backend_recovery"),
+  ]);
+}
+
+async function recoverStaleRunGuard(reason = "operator_recovery") {
+  const guard = staleActiveRunGuard();
+  const runID = (guard && (guard.run_id || guard.runID)) || activeRunID() || "";
+  const recovery = await window.orchestratorConsole.recoverStaleRun(runID, reason, true, state.address);
+  recordLocalActivity(
+    "stale_run_recovered",
+    recovery,
+    recovery && recovery.message ? recovery.message : "Stale active-run guard recovery completed.",
+  );
+  if (!recovery || recovery.active_guard_cleared !== true) {
+    throw new Error(recovery && recovery.message ? recovery.message : "recover_stale_run completed, but the active-run guard was not cleared.");
+  }
+  return recovery;
+}
+
+async function restartBackend() {
+  try {
+    const guardBefore = staleActiveRunGuard();
+    const backend = state.snapshot && state.snapshot.backend ? state.snapshot.backend : {};
+    if (guardBefore && backend.stale !== true) {
+      setFlash("info", "Clearing stale active-run guard...");
+      const recovery = await recoverStaleRunGuard("operator_recovery");
+      await refreshAfterRecovery();
+      if (staleActiveRunGuard()) {
+        setFlash("error", "recover_stale_run finished, but the stale active-run guard is still present. Check Live Output for details.");
+        return;
+      }
+      setFlash("success", recovery.message || "Recovered stale active run guard. Continue Build is now available.");
+      return;
+    }
+
+    setFlash("info", "Recovering backend and unlocking repo...");
+    const result = await window.orchestratorConsole.restartBackend(state.address);
+    if (!result || result.restarted !== true) {
+      if (guardBefore) {
+        try {
+          const recovery = await recoverStaleRunGuard("operator_recovery");
+          await refreshAfterRecovery();
+          setFlash("success", recovery.message || "Recovered stale active run guard. Continue Build is now available.");
+          return;
+        } catch (recoveryError) {
+          setFlash("error", `Backend restart was unavailable, and recover_stale_run failed: ${recoveryError.message}`);
+          return;
+        }
+      }
+      setFlash("error", result && result.message ? result.message : "Backend restart is unavailable in this launch mode.");
+      return;
+    }
+    state.connection = {
+      connected: false,
+      status: "reconnecting",
+      address: state.address,
+      message: result.message || "backend restarted",
+    };
+    renderConnection();
+    recordLocalActivity("backend_recovery_started", { pid: result.pid }, result.message || "Owned backend restarted for recovery.");
+    await wait(1200);
+    await connect({ quiet: true, automatic: true, trigger: "backend_recovered" });
+    let recovery = null;
+    if (staleActiveRunGuard()) {
+      try {
+        recovery = await recoverStaleRunGuard("operator_recovery");
+      } catch (recoveryError) {
+        recordLocalActivity("stale_run_recovery_failed", { error: recoveryError.message }, "Backend restarted, but stale active-run recovery failed.");
+        throw recoveryError;
+      }
+    }
+    await refreshAfterRecovery();
+    if (staleActiveRunGuard()) {
+      setFlash("error", "Backend restarted, but the stale active-run guard is still present. recover_stale_run did not clear it.");
+      return;
+    }
+    setFlash("success", recovery && recovery.message ? recovery.message : "Backend recovered and dashboard refreshed.");
+  } catch (error) {
+    reportIssue("recover backend", error, "Recover Backend is only available for a dogfood-owned backend process. Unknown processes are never killed automatically.");
+  }
+}
+
+async function copyLatestError() {
+  const latest = window.OrchestratorViewModel.buildLatestErrorViewModel(state.snapshot, state.events);
+  if (!latest.present) {
+    setFlash("info", "No latest error is available to copy.");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(latest.message);
+    setFlash("success", "Copied latest error.");
+  } catch (error) {
+    reportIssue("latest error", error, "Copying the latest error requires clipboard access.");
+  }
+}
+
+function openLiveOutput() {
+  setActiveTab("activity");
+}
+
+function handleSummaryAction(action) {
+  switch (action) {
+    case "copy_debug_bundle":
+      void copyDebugBundle();
+      return;
+    case "test_model_health":
+      setActiveTab("settings");
+      void testExecutorModelFromSettings();
+      return;
+    case "continue_run":
+      void continueRunFromHome();
+      return;
+    case "open_latest_artifact":
+      void openLatestArtifactFromHome();
+      return;
+    case "open_live_output":
+      openLiveOutput();
+      return;
+    case "recover_backend":
+      void restartBackend();
+      return;
+    case "clear_stop_continue":
+      void clearStopAndContinue();
+      return;
+    case "start_run":
+      setActiveTab("home");
+      if (refs.homeGoal) {
+        refs.homeGoal.focus();
+      }
+      return;
+    default:
+      setFlash("info", "That summary action is not wired yet.");
   }
 }
 
@@ -2225,27 +2999,69 @@ function prepareContinueRunCommand() {
 }
 
 function knownBlockingModelIssue() {
+  applyModelHealthNormalization();
+  const health = state.snapshot && state.snapshot.model_health ? state.snapshot.model_health : {};
+  const planner = health.planner || {};
+  const executor = health.executor || {};
   const codex = window.OrchestratorViewModel.buildCodexReadinessViewModel(state.snapshot);
+  const latestPlannerTest = state.modelTests.planner && state.modelTests.planner.planner
+    ? state.modelTests.planner.planner
+    : null;
   const latestExecutorTest = state.modelTests.executor && state.modelTests.executor.executor
     ? state.modelTests.executor.executor
     : null;
-  if (latestExecutorTest && latestExecutorTest.verification_state && latestExecutorTest.verification_state !== "invalid" && latestExecutorTest.verification_state !== "unavailable") {
-    return "";
+  const plannerVerified = (latestPlannerTest && latestPlannerTest.verification_state === "verified")
+    || planner.verification_state === "verified";
+  const executorVerified = (latestExecutorTest && latestExecutorTest.verification_state === "verified")
+    || executor.verification_state === "verified";
+  const fullAccessVerified = Boolean((latestExecutorTest && latestExecutorTest.codex_permission_mode_verified)
+    || executor.codex_permission_mode_verified);
+
+  if (health.blocking) {
+    return health.message || "Model or Codex requirements are blocking this run. Open Settings and run the model health checks.";
+  }
+  if (planner.verification_state === "invalid") {
+    return "Planner model is below the required gpt-5.4 minimum or unavailable. Set a valid planner model and run Test Planner Model before starting or continuing.";
+  }
+  if (!plannerVerified) {
+    return "Planner model has not been verified in this shell session. Run Test Planner Model before starting or continuing a serious autonomous build.";
   }
   if (!codex.modelInvalid) {
+    if (!executorVerified || !fullAccessVerified) {
+      return "Codex gpt-5.5 full-access mode has not been verified in this shell session. Run Test Codex Config before starting or continuing.";
+    }
     return "";
   }
   return "Configured Codex model is unavailable. Change or test the configured Codex model before starting or continuing; the engine will not silently fall back to a weaker model.";
 }
 
+async function ensureModelHealthPreflight() {
+  const before = knownBlockingModelIssue();
+  if (!before) {
+    return "";
+  }
+  state.runLaunch = { inFlight: true, message: "Checking planner model and Codex access before launching...", error: "" };
+  renderHomeDashboard();
+  await autoTestModelHealth("preflight");
+  state.runLaunch = { inFlight: false, message: "", error: "" };
+  return knownBlockingModelIssue();
+}
+
 async function startRunFromHome() {
   const goal = refs.homeGoal.value.trim();
+  const repoBinding = currentRepoBinding();
+  if (repoBinding.mismatch) {
+    state.runLaunch = { inFlight: false, message: "", error: repoBinding.message };
+    renderHomeDashboard();
+    setFlash("error", "Wrong repo backend. Restart Backend for Target Repo before starting a run.");
+    return;
+  }
   if (goal === "") {
     setFlash("error", "Enter a goal before starting a protocol-backed run.");
     renderHomeDashboard();
     return;
   }
-  const modelBlocker = knownBlockingModelIssue();
+  const modelBlocker = await ensureModelHealthPreflight();
   if (modelBlocker) {
     state.runLaunch = { inFlight: false, message: "", error: modelBlocker };
     setActiveTab("settings");
@@ -2267,6 +3083,8 @@ async function startRunFromHome() {
       message: `Loop running${result && result.run_id ? ` for ${result.run_id}` : ""}. Watch progress in Live Activity.`,
       error: "",
     };
+    state.actionRequired.queuedAskHumanAnswer = null;
+    state.actionRequired.status = "";
     recordLocalActivity("run_launch_requested", {
       action: "start_run",
       run_id: result && result.run_id ? result.run_id : "",
@@ -2282,9 +3100,29 @@ async function startRunFromHome() {
   }
 }
 
-async function continueRunFromHome() {
+async function continueRunFromHome(options = {}) {
   const runID = activeRunID();
-  const modelBlocker = knownBlockingModelIssue();
+  const repoBinding = currentRepoBinding();
+  if (repoBinding.mismatch) {
+    state.runLaunch = { inFlight: false, message: "", error: repoBinding.message };
+    renderHomeDashboard();
+    setFlash("error", "Wrong repo backend. Restart Backend for Target Repo before continuing a run.");
+    return;
+  }
+  const askHuman = currentAskHumanViewModel();
+  if (askHuman.present && !options.skipAskHumanGuard) {
+    state.runLaunch = {
+      inFlight: false,
+      message: "",
+      error: "The planner is waiting for your answer. Use Action Required to send the answer and continue.",
+    };
+    setActiveTab("attention");
+    renderHomeDashboard();
+    refs.askHumanAnswer.focus();
+    setFlash("info", "This run is waiting for your answer. Use Send Answer and Continue.");
+    return;
+  }
+  const modelBlocker = await ensureModelHealthPreflight();
   if (modelBlocker) {
     state.runLaunch = { inFlight: false, message: "", error: modelBlocker };
     setActiveTab("settings");
@@ -2293,6 +3131,10 @@ async function continueRunFromHome() {
     return;
   }
   state.runLaunch = { inFlight: true, message: "Continuing run through the engine protocol...", error: "" };
+  recordLocalActivity("executor_dispatch_requested", {
+    action: "continue_run",
+    run_id: runID,
+  }, "Dispatching Codex executor...");
   renderHomeDashboard();
   try {
     const result = await window.orchestratorConsole.continueRun({
@@ -2305,6 +3147,8 @@ async function continueRunFromHome() {
       message: `Loop running${result && result.run_id ? ` for ${result.run_id}` : ""}. Watch progress in Live Activity.`,
       error: "",
     };
+    state.actionRequired.queuedAskHumanAnswer = null;
+    state.actionRequired.status = "";
     recordLocalActivity("run_launch_requested", {
       action: "continue_run",
       run_id: result && result.run_id ? result.run_id : runID,
@@ -2335,6 +3179,12 @@ function handleHomePrimaryAction() {
     case "review_approval":
       scrollToSection("approval-panel");
       return;
+    case "answer_ask_human":
+      setActiveTab("attention");
+      if (refs.askHumanAnswer) {
+        refs.askHumanAnswer.focus();
+      }
+      return;
     case "open_control_chat":
       scrollToSection("control-chat-panel");
       refs.controlMessageInput.focus();
@@ -2344,6 +3194,12 @@ function handleHomePrimaryAction() {
       return;
     case "open_settings":
       setActiveTab("settings");
+      return;
+    case "recover_backend":
+      void restartBackend();
+      return;
+    case "clear_stop_continue":
+      void clearStopAndContinue();
       return;
     case "refresh_status":
     default:
@@ -2358,7 +3214,7 @@ function handleIncomingEvent(event) {
   if (payload.artifact_path || softRefreshEvents.has(event.event)) {
     scheduleSoftRefresh();
   }
-  if (event && (event.event === "executor_approval_required" || event.event === "approval_required" || event.event === "worker_approval_required" || event.event === "executor_turn_failed" || event.event === "fault_recorded")) {
+  if (event && (event.event === "executor_approval_required" || event.event === "approval_required" || event.event === "worker_approval_required" || event.event === "executor_turn_failed" || event.event === "fault_recorded" || event.event === "stop_flag_detected" || event.event === "human.question.presented" || (event.event === "planner_turn_completed" && payload.planner_outcome === "ask_human"))) {
     maybeFocusActionRequired({ force: true });
   }
 }
@@ -2366,6 +3222,9 @@ function handleIncomingEvent(event) {
 function handleConnectionState(connection) {
   const previouslyConnected = state.connection.connected;
   const wasConnecting = state.connection.status === "connecting";
+  if (connection && connection.expectedRepoPath) {
+    state.expectedRepoPath = connection.expectedRepoPath;
+  }
   state.connection = connection;
   if (connection.connected) {
     if (!previouslyConnected || !state.connectionTiming.connectedAt) {
@@ -2449,6 +3308,10 @@ function wireEvents() {
   refs.topRefreshButton.addEventListener("click", () => void refreshStatus({ refreshContracts: true }));
   refs.homePrimaryAction.addEventListener("click", handleHomePrimaryAction);
   refs.homeRefreshEverything.addEventListener("click", () => void refreshStatus({ refreshContracts: true }));
+  refs.homeOpenLiveOutput.addEventListener("click", openLiveOutput);
+  refs.homeCopyDebugBundle.addEventListener("click", () => void copyDebugBundle());
+  refs.homeRecoverBackend.addEventListener("click", () => void restartBackend());
+  refs.homeClearStopContinue.addEventListener("click", () => void clearStopAndContinue());
   refs.homeSafeStop.addEventListener("click", () => void safeStop());
   refs.homeUseDefaultGoal.addEventListener("click", fillSuggestedGoal);
   refs.homeStartRun.addEventListener("click", () => void startRunFromHome());
@@ -2458,6 +3321,8 @@ function wireEvents() {
   refs.homeGoal.addEventListener("input", () => renderHomeDashboard());
   refs.homeOpenContracts.addEventListener("click", () => scrollToSection("contracts-panel"));
   refs.homeOpenLatestArtifact.addEventListener("click", () => void openLatestArtifactFromHome());
+  refs.homeQuickLiveOutput.addEventListener("click", openLiveOutput);
+  refs.homeQuickCopyDebugBundle.addEventListener("click", () => void copyDebugBundle());
   refs.homeAddDogfoodNote.addEventListener("click", () => {
     scrollToSection("dogfood-panel");
     refs.dogfoodTitleInput.focus();
@@ -2506,15 +3371,41 @@ function wireEvents() {
   });
   refs.testPlannerModelButton.addEventListener("click", () => void testPlannerModelFromSettings());
   refs.testExecutorModelButton.addEventListener("click", () => void testExecutorModelFromSettings());
+  refs.copyModelHealthButton.addEventListener("click", () => void copyModelHealth());
+  refs.restartBackendButton.addEventListener("click", () => void restartBackend());
+  refs.loadRuntimeConfigButton.addEventListener("click", () => void loadRuntimeConfig());
+  refs.saveRuntimeConfigButton.addEventListener("click", () => void saveRuntimeConfig());
+  refs.timeoutPreset.addEventListener("change", () => {
+    const patch = timeoutPresetPatch(refs.timeoutPreset.value);
+    refs.timeoutPlannerRequest.value = patch.planner_request_timeout;
+    refs.timeoutExecutorTurn.value = patch.executor_turn_timeout;
+    refs.timeoutShellCommand.value = patch.shell_command_timeout;
+    refs.timeoutInstall.value = patch.install_timeout;
+    refs.timeoutHumanWait.value = patch.human_wait_timeout;
+  });
+  refs.checkUpdatesButton.addEventListener("click", () => void checkForUpdates());
+  refs.copyUpdateChangelogButton.addEventListener("click", () => void copyUpdateChangelog());
   refs.safeStopButton.addEventListener("click", () => void safeStop());
   refs.clearStopButton.addEventListener("click", () => void clearStop());
   refs.sendControlMessageButton.addEventListener("click", () => void sendControlMessage());
   refs.sendSideChatMessageButton.addEventListener("click", () => void sendSideChatMessage());
   refs.captureDogfoodIssueButton.addEventListener("click", () => void captureDogfoodIssue());
   refs.sideChatContextPolicy.addEventListener("change", () => persistShellSession());
+  refs.sendAnswerContinueButton.addEventListener("click", () => void sendAskHumanAnswer({ continueAfter: true }));
+  refs.sendAnswerOnlyButton.addEventListener("click", () => void sendAskHumanAnswer({ continueAfter: false }));
+  refs.continueQueuedAnswerButton.addEventListener("click", () => void continueQueuedAskHumanAnswer());
   refs.approveButton.addEventListener("click", () => void approveExecutor());
   refs.denyButton.addEventListener("click", () => void denyExecutor());
   refs.copyApprovalDetailsButton.addEventListener("click", () => void copyApprovalDetails());
+  refs.approvalBody.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-summary-action]");
+    if (button) {
+      handleSummaryAction(button.getAttribute("data-summary-action") || "");
+    }
+  });
+  refs.copyDebugBundleButton.addEventListener("click", () => void copyDebugBundle());
+  refs.copyLatestErrorButton.addEventListener("click", () => void copyLatestError());
+  refs.summaryOpenLiveOutputButton.addEventListener("click", openLiveOutput);
   refs.refreshWorkersButton.addEventListener("click", () => void refreshWorkers());
   refs.workerCreateButton.addEventListener("click", () => void createWorker());
   refs.workerDispatchButton.addEventListener("click", () => void dispatchWorker());
@@ -2624,6 +3515,13 @@ function wireEvents() {
     }
   });
 
+  refs.summaryBody.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-summary-action]");
+    if (button) {
+      handleSummaryAction(button.getAttribute("data-summary-action") || "");
+    }
+  });
+
   refs.eventsFilterText.addEventListener("input", () => {
     rememberActivityFiltersFromUI();
     renderEvents();
@@ -2642,6 +3540,7 @@ function wireEvents() {
       renderEvents();
     });
   });
+  window.addEventListener("resize", updateStickyLayoutOffset);
 
   window.orchestratorConsole.onEvent(handleIncomingEvent);
   window.orchestratorConsole.onConnectionState(handleConnectionState);

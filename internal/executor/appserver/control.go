@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"orchestrator/internal/config"
 	"orchestrator/internal/executor"
 )
 
@@ -232,7 +233,7 @@ func (s *controlSession) resumeThread(ctx context.Context, req executor.TurnRequ
 	if err := sendMessage(s.sender, map[string]any{
 		"method": "thread/resume",
 		"id":     threadResumeControlRequestID,
-		"params": buildThreadResumeParams(req.ThreadID, req.RepoPath, "workspace-write", executeInstructions, "on-request"),
+		"params": buildThreadResumeParams(req.ThreadID, req.RepoPath, config.RequiredCodexSandboxMode, executeInstructions, config.RequiredCodexApprovalPolicy, config.RequiredCodexExecutorModel),
 	}); err != nil {
 		return err
 	}

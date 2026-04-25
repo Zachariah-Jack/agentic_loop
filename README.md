@@ -52,7 +52,11 @@ What exists now in the engine:
 - safe-point runtime verbosity reload (`quiet`, `normal`, `verbose`, `trace`) without restarting the process
 - a durable control-message queue and safe-point intervention path that feeds raw operator messages plus pending action context back into the planner
 - planner-safe operator-status/progress fields now live additively on the current `planner.v1` runtime path, while `planner.v2` remains the future stricter contract
-- a truthful side-chat protocol-backed stub that records side-chat messages without affecting the active run and clearly reports that the backend is not implemented yet
+- a non-interfering Side Chat context-agent foundation: messages are persisted raw and answered from observable runtime context only; Side Chat does not queue control messages, set stop flags, alter pending actions, or change planner/executor flow unless the operator explicitly promotes a message through Control Chat
+- runtime-configurable timeout settings for planner requests, executor idle waits, executor turns, subagents, shell commands, installs, and human waits; executor turns and human waits default to `unlimited`
+- durable active-only `Total Build Time` tracking for control-server-launched Start/Continue loops
+- permission/autonomy profile settings (`guided`, `balanced`, `autonomous`, `full_send`) surfaced in status/runtime config
+- GitHub Releases update check/changelog foundation through CLI and control protocol; safe self-install remains deferred until signed/checksummed Windows assets exist
 
 What now exists in the first desktop shell:
 
@@ -72,14 +76,23 @@ What now exists in the first desktop shell:
 - an AI autofill wizard pane that drafts selected canonical contract files through the real engine protocol and previews them before any save
 - a read-only repo browser pane that lists one directory at a time and opens repo files through explicit protocol actions
 - embedded operator terminal tabs for local shell sessions, kept separate from engine run authority
-- an Action Required pane that surfaces primary executor approval-required state in plain English and can approve or deny through explicit protocol actions
-- a Codex/model readiness card that truthfully shows planner model health, executor/Codex model health, unavailable-model errors, access-mode facts the engine can detect, and `Not verified` when the protocol cannot prove details
-- a Side Chat pane skeleton that records non-interfering side-chat messages through the real protocol and shows the truthful backend-unavailable response
+- an Action Required pane that surfaces primary executor approval-required state and planner `ask_human` pauses in plain English; executor approve/deny and planner answer-and-continue both go through explicit protocol actions
+- a Codex/model readiness card that truthfully shows planner model health, the exact Codex executable path/version/config source the engine sees, required `gpt-5.5` executor model status, full-access verification, and unavailable-model errors without silent fallback
+- automatic model-health checks on GUI connect/reconnect and before Start Build / Continue Build, with fresh successful checks clearing stale older model errors for the checked component
+- backend identity visibility for the connected control server, including PID, start time, binary path/mtime, version, revision, and stale-backend restart warning
+- Copy Model Health for a safe support bundle containing planner/Codex/backend verification details without secrets
+- owned-backend cleanup and recovery support for dogfood launches, so obsolete dogfood-owned control-server processes and owned backend process trees for the same repo/address are stopped before a fresh one starts
+- target-repo binding for dogfood launches: `scripts/start-v2-dogfood.ps1 -RepoPath ...` starts the backend in that target repo, passes the expected repo path into the shell, verifies the backend reports the same repo before opening the UI, and the shell blocks Start/Continue with a `Wrong Repo Backend` recovery prompt if a stale server is serving another repo
+- `Recover Backend / Unlock Repo` for dogfood-owned launches: restarts the owned backend after verifying the port is clear, refreshes the shell, reruns model health, and mechanically clears stale active-run guards without deleting run history or artifacts
+- SQLite busy/locked recovery for common GUI reads; persistent lock contention becomes a clear `state_database_locked` protocol error instead of trapping the user behind raw SQLite output
+- a Side Chat pane backed by the context-agent foundation; it answers from visible runtime status and remains non-interfering by default
+- a Runtime Timeouts & Autonomy settings card for timeout presets, per-timeout edits, and permission profile selection through `set_runtime_config`
+- an Updates card for GitHub release checks and changelog copying; install is disabled until safe Windows self-update assets are available
 - a Dogfood Notes pane that records quick timestamped friction notes tied to the repo and latest run when available
 - a Worker Panel that shows real worker ids, statuses, scopes, worktree paths, approval state, executor thread/turn metadata, and explicit operator-triggered worker actions for create, dispatch, remove, and integration preview
 - a Live Output pane backed by `/v2/events`, with readable planner/executor/worker/approval/model rows, category/current-run/text filtering, verbosity-aware detail, and trace-only raw payloads by default
 - a Control Chat pane backed by real `inject_control_message`
-- a controls pane for Update Dashboard, Reload Outputs, safe stop, clear stop, and immediate verbosity changes that immediately affect Live Output
+- a controls pane for Update Dashboard, Reload Outputs, safe stop, clear stop, `Clear Stop and Continue` for safe-stop pauses, and immediate verbosity changes that immediately affect Live Output
 - persisted local shell state for practical dogfooding, including the last control-server address, auto-reconnect preference, last selected artifact/contract/repo file/worker/dogfood note, side-chat context policy, and activity filters
 - auto-reconnect and rehydration behavior so the shell can reattach to a restarted control server, resume the current status snapshot, reload pending context, workers, artifacts, dogfood notes, contract selections, and continue the live event stream with recent-history replay where available
 - a `scripts/start-v2-dogfood.ps1` helper that launches the owned control server hidden by default, opens the Electron shell, writes logs under `.orchestrator/logs`, and stops the owned control server when the shell exits
@@ -87,7 +100,7 @@ What now exists in the first desktop shell:
 
 What is still intentionally missing from the desktop shell:
 
-- full side-chat conversational backend
+- full LLM-backed side-chat escalation and tool-calling backend
 - worker apply controls
 - worker-specific approval controls in the shell
 - packaged GUI installer polish
@@ -107,7 +120,7 @@ What is solid enough to dogfood now:
 
 What is still experimental:
 
-- Side Chat remains recorded-only
+- Side Chat answers from observable runtime context only; richer LLM-backed conversation/escalation is still experimental/deferred
 - terminal sessions are local operator utilities and are not persisted across shell restarts
 - Action Required UI is still focused on the primary executor path for approve/deny; worker-specific approval controls remain deferred
 - Dogfood Notes are local repo-scoped capture only in this slice; there is no built-in GitHub issue export flow yet
@@ -121,15 +134,20 @@ Recommended daily dogfood workflow:
 powershell -ExecutionPolicy Bypass -File .\scripts\start-v2-dogfood.ps1 -RepoPath D:\Projects\target-repo
 ```
 
+The helper builds from the orchestrator repo, but the control server is bound to the `-RepoPath` target repo. The shell shows both the expected repo and the backend-reported repo; if they differ, it hides the wrong repo's run state behind a `Wrong Repo Backend` warning and recommends `Restart Backend for Target Repo`.
+
 2. For a double-click style launch, run `scripts\Launch-Orchestrator-V2-Shell.vbs` or create a shortcut to it and pin that shortcut to the taskbar.
 3. Use `-DebugVisibleWindows` only when you intentionally want visible backend PowerShell windows for debugging.
 4. Leave auto-reconnect enabled in the shell for routine control-server restarts.
-5. Use the shell for status, Control Chat, artifacts, contract editing, workers, and approvals.
+5. Use the shell for status, Control Chat, planner questions, artifacts, contract editing, workers, and approvals.
 6. Start on the guided Home dashboard: confirm the top strip says `Connection Status: Ready`, check the Current Repo card for the repo root, then follow the "What should I do now?" card.
 7. If the Home dashboard recommends starting or continuing a run, use Start Build / Continue Build; they call explicit `start_run` / `continue_run` protocol actions and return immediately while the control-server process runs the foreground loop.
-8. Capture friction and bugs in the Dogfood Notes pane while they are fresh; notes stay timestamped and tied to the repo/run context.
-9. Keep the headless CLI available for direct `run`, `continue`, `status`, and `doctor` use when you do not need the GUI.
-10. If the shell restarts, reconnect to the same control server and let it rehydrate current status, pending action, workers, artifacts, side-chat history, dogfood notes, and recent activity.
+8. If the planner asks a question, open Action Required, type the raw answer, and click `Send Answer and Continue`; the shell queues `inject_control_message` and then calls `continue_run`.
+9. If a safe stop was requested, open Action Required and click `Clear Stop and Continue`; the shell clears the mechanical stop flag, then resumes through `continue_run` when the run is resumable.
+10. Capture friction and bugs in the Dogfood Notes pane while they are fresh; notes stay timestamped and tied to the repo/run context.
+11. Keep the headless CLI available for direct `run`, `continue`, `status`, and `doctor` use when you do not need the GUI.
+12. If the shell restarts, reconnect to the same control server and let it rehydrate current status, pending action, workers, artifacts, side-chat history, dogfood notes, and recent activity.
+13. If a run is shown as already active but nothing is progressing, or if SQLite reports a temporary lock, click `Recover Backend / Unlock Repo`. It only stops dogfood-owned backend processes or proven owned backend listeners, never unknown user-started processes.
 
 V2 will preserve the current architecture:
 
@@ -397,9 +415,9 @@ orchestrator version
 
 3. Confirm:
    - planner API key is present
-   - the saved planner model is what you want; the default `gpt-5-latest` resolves through the OpenAI Models API to the newest available mainline `gpt-5.x` model when discovery succeeds, and it does not silently fall back to an unverified model if discovery fails
+   - the saved planner model is `gpt-5-latest` or an explicit `gpt-5.4` or newer model; lower planner models are marked invalid
    - optional `ntfy` values are set correctly
-   - Codex app-server is ready
+   - Codex app-server resolves to the expected Codex CLI and `Test Codex Config` verifies `gpt-5.5`, `danger-full-access`, approval `never`, and effort `xhigh`
 
 ### Target Repo Initialization
 
@@ -466,6 +484,8 @@ When the planner returns `ask_human`:
 - if `ntfy` is unavailable or not configured, the CLI falls back to terminal input
 - the raw human reply is persisted unchanged
 - one next planner turn runs using that raw reply as data
+
+From the V2 shell, `ask_human` is an Action Required state. The shell shows the question/blocker, lets the operator type the raw answer, and `Send Answer and Continue` performs the mechanical sequence `inject_control_message` with `reason: ask_human_answer`, then `continue_run` for the same run. Control Chat messages sent while `ask_human` is pending are treated as queued raw answers and the shell exposes a Continue-with-queued-answer path.
 
 Mode differences:
 
@@ -547,9 +567,43 @@ Use:
 - Default config path on Windows: `%AppData%\orchestrator\config.json`
 - Override it per command with `--config PATH`
 - Saved config includes current operator settings such as planner model, verbosity, worker concurrency limit, drift watcher enablement, repo contract confirmation, and optional `ntfy` settings
-- The default planner model is `gpt-5-latest`, an orchestrator alias that dynamically resolves through OpenAI model discovery to the newest available mainline GPT-5 model the account can see; set an exact model id in config or `OPENAI_MODEL` when you need pinned behavior, and use the model-test action to verify availability
+- The default planner model is `gpt-5-latest`, an orchestrator alias that dynamically resolves through OpenAI model discovery to the newest available mainline GPT-5 model the account can see; exact planner models must be `gpt-5.4` or newer, and the model-test action verifies the resolved/requested model with a tiny Responses API call
 - `setup` manages planner model, drift watcher enablement, repo contract confirmation, and `ntfy` settings
 - `OPENAI_API_KEY` remains environment-only
+
+Runtime timeout fields are first-class config values:
+
+- `planner_request_timeout`
+- `executor_idle_timeout`
+- `executor_turn_timeout`
+- `subagent_timeout`
+- `shell_command_timeout`
+- `install_timeout`
+- `human_wait_timeout`
+
+Each accepts a duration such as `30m` or `2h`, or `unlimited`. `executor_turn_timeout` and `human_wait_timeout` default to `unlimited`, replacing the old hidden 20-minute executor wait deadline.
+
+Runtime settings examples:
+
+```powershell
+orchestrator settings show
+orchestrator settings set-timeout executor_turn_timeout unlimited
+orchestrator settings set-timeout install_timeout 4h
+orchestrator settings set-permission full_send
+```
+
+The V2 shell Settings tab exposes the same settings through `get_runtime_config` / `set_runtime_config`, including timeout presets and permission profiles (`Guided`, `Balanced`, `Autonomous`, `Full Send / Lab Mode`).
+
+Update foundation commands:
+
+```powershell
+orchestrator update status
+orchestrator update check
+orchestrator update changelog
+orchestrator update install
+```
+
+Update check/changelog/status use GitHub Releases. `install` is intentionally truthful and not automated yet; safe Windows self-update requires signed/checksummed release assets and a staged replacement path.
 
 ### Target Repo Runtime State
 
@@ -643,10 +697,10 @@ Common `next_operator_action` values:
   - `list_repo_tree`
   - `open_repo_file`
   - `get_runtime_config`
-  - `set_runtime_config` for verbosity-related fields only
+  - `set_runtime_config` for verbosity, runtime timeouts, permission profile, and update settings
   - `inject_control_message`
   - `list_control_messages`
-  - `send_side_chat_message` as a truthful recorded-only stub
+  - `send_side_chat_message` as a non-interfering context-agent message
   - `list_side_chat_messages`
   - `capture_dogfood_issue`
   - `list_dogfood_issues`
@@ -657,7 +711,20 @@ Common `next_operator_action` values:
   - `integrate_workers`
 - `GET /v2/events` streams NDJSON engine events.
 - `get_status_snapshot` now surfaces live planner operator-status fields, run elapsed-time fields, and model-health fields when available.
-- `test_planner_model` verifies the configured planner model or `gpt-5-latest` alias through OpenAI model discovery. `test_executor_model` truthfully checks what the engine can detect about Codex launch/config and reports model-unavailable errors from the latest executor failure; it does not silently downgrade or claim unverified Codex model access.
+- `test_planner_model` verifies the configured planner model or `gpt-5-latest` alias. The alias resolves through OpenAI model discovery first, then the resolved/requested model must complete a tiny Responses API probe. Planner models below `gpt-5.4` are invalid.
+- `test_executor_model` / `test_codex_config` runs a real Codex probe through the same Codex command path visible to the control server:
+
+```powershell
+codex exec --model gpt-5.5 --sandbox danger-full-access -c 'approval_policy="never"' -c 'model_reasoning_effort="xhigh"' --cd <repo> "Reply with only OK."
+```
+
+- The executor/app-server runtime also requests `model=gpt-5.5`, approval `never`, `danger-full-access`, and effort `xhigh`; it does not silently downgrade.
+- If you update Codex, restart the dogfood/control server so old app-server processes cannot keep using stale binaries or environment.
+- The dogfood helper writes `.orchestrator/state/dogfood-backend.json` for the backend process it owns. Normal dogfood startup launches `dist\orchestrator.exe` directly so that metadata tracks the actual backend instead of a wrapper shell. On the next dogfood startup, that owned process and any proven owned backend listener process tree are stopped automatically before a fresh backend starts for the same repo/address. Unknown processes on the same port are reported with PID/path/command line and are not killed blindly.
+- The control server records `.orchestrator/state/active-run-guard.json` while a GUI-launched run loop is active. If the backend dies, `recover_stale_run` can mechanically clear that stale active guard while preserving run status, checkpoints, history, and artifacts.
+- Common shell reads use SQLite busy timeout/WAL plus bounded retry. If the state DB stays locked, the protocol returns `state_database_locked` with a plain recovery recommendation.
+- The shell auto-runs `test_planner_model` and `test_executor_model` after connect/reconnect and before protocol Start Build / Continue Build. If both pass, stale older model errors no longer block the GUI; if either fails, Action Required explains the current failure.
+- Use Copy Model Health from Settings when asking for model/backend support. It includes backend PID, binary path/version, planner model verification, Codex path/version/config, `gpt-5.5` verification, full-access status, and excludes secrets.
 - Pending actions are now durable engine state. When available, they describe what the engine is about to do next at a safe boundary.
 - The desktop proof shell now also supports:
   - a tabbed guided Home dashboard with plain Connection Status and Loop Status indicators
@@ -668,7 +735,7 @@ Common `next_operator_action` values:
   - protocol-backed editing of the canonical contract files only
   - embedded operator terminal tabs for local shell convenience
   - an Action Required card with protocol-backed primary executor approve and deny buttons when approval is required
-  - a non-interfering Side Chat pane backed by recorded protocol messages only
+  - a non-interfering Side Chat pane that persists raw messages and answers from observable runtime context
   - a Dogfood Notes pane backed by timestamped repo/run-scoped issue capture through the same protocol
   - a richer progress and roadmap-alignment panel driven by planner-safe operator status plus surfaced roadmap context
   - Worker Panel controls for explicit create, dispatch, remove, and integration-preview actions through the engine protocol
@@ -702,8 +769,8 @@ Notes:
 - the AI autofill wizard drafts selected canonical contract files through the real engine protocol and previews the generated content before you save any file
 - the repo browser is read-only for arbitrary repo files in this slice and lists one directory at a time through explicit protocol actions
 - the terminal pane is an operator utility shell only; it supports multiple local tabs, but run control still belongs to the explicit engine protocol and control actions
-- the Codex/model readiness card reports what the engine can actually verify; full access/model/effort details remain `Not verified` when the protocol cannot prove them, and unavailable-model errors are shown without silent fallback
-- the Side Chat pane records non-interfering messages only in this slice; it does not alter the active run and does not yet have a real conversational backend
+- the Codex/model readiness card reports the exact Codex executable path/version/config source seen by the control server; `gpt-5.5` full-access is `Verified` only after the Codex probe succeeds, and unavailable-model errors are shown without silent fallback
+- the Side Chat pane is a non-interfering context assistant in this slice; it persists raw messages, answers from visible runtime context, and never alters the active run, sets stop flags, or queues control intervention messages
 - the Dogfood Notes pane is a lightweight local capture path for friction and bug notes; it does not yet file GitHub issues automatically
 - the Worker Panel can now create workers, dispatch one bounded worker turn, remove idle workers, and build integration previews
 - the activity timeline is a filtered view over the real event stream plus shell-local terminal lifecycle events; it does not expose hidden reasoning
@@ -719,7 +786,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-v2-dogfood.ps1
 
 The helper builds and launches the development binary at `dist\orchestrator.exe`. Portable release payloads still live under `dist\windows-amd64\portable\`.
 
-In normal mode, the helper launches the owned control server hidden, opens only the Electron window, writes logs under `.orchestrator\logs`, requests safe stop when the shell exits, and then stops only the control-server process it launched. Use the debug flag below if you want visible backend consoles.
+In normal mode, the helper launches the owned control server hidden, opens only the Electron window, writes logs under `.orchestrator\logs`, requests safe stop when the shell exits, and then stops only the control-server process it launched. It starts the backend binary directly, not through a persistent PowerShell wrapper. It also stops stale dogfood-owned backends for the same repo/address before launching, kills only proven owned backend listener process trees if the first stop does not clear the port, waits for the port to clear, and refuses to kill unknown listeners. If the port cannot clear, the diagnostic output includes attempted PID/path/command line, kill methods used, current listener PID/path/command line, whether it matched ownership metadata, and the safe next action. Use the debug flag below if you want visible backend consoles.
 
 For a clickable Windows launch, use `scripts\Launch-Orchestrator-V2-Shell.vbs` or create a shortcut to that file and pin the shortcut. The VBS launcher starts the dogfood helper hidden so the user-facing experience is just the Electron app window.
 
@@ -745,7 +812,7 @@ The helper also passes the chosen control-server address into the Electron shell
 - Automatic merge into the main repo happens only when the planner explicitly requests an apply step, and only through the supported safe apply modes.
 - Plugin loading exists, but there is no plugin management CLI.
 - The first GUI shell exists, but it is still only a narrow protocol proof surface rather than the full V2 operator console.
-- Side chat backend replies are not implemented yet; the protocol records side-chat messages and reports that truthfully.
+- Side Chat is currently an observable-context assistant, not the final LLM/tooling backend. It does not perform hidden actions or semantic run steering.
 - Arbitrary repo-file editing is not implemented in the shell; only the canonical contract files are saveable in this slice.
 - The shell currently remembers local UI/session state, but it does not restore live terminal processes across restarts.
 - Event backlog replay after reconnect is limited by the control server's in-memory event history window.

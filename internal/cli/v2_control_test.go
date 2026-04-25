@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"orchestrator/internal/config"
 	"orchestrator/internal/control"
 	"orchestrator/internal/executor"
+	"orchestrator/internal/executor/appserver"
 	"orchestrator/internal/journal"
 	"orchestrator/internal/orchestration"
 	"orchestrator/internal/planner"
@@ -101,6 +103,10 @@ func TestLocalControlServerGetStatusSnapshotAction(t *testing.T) {
 	}
 
 	payload := response.Payload.(map[string]any)
+	backend := payload["backend"].(map[string]any)
+	if backend["pid"] == nil || backend["started_at"] == "" || backend["binary_version"] == "" {
+		t.Fatalf("backend identity missing required fields: %#v", backend)
+	}
 	runtimeSnapshot := payload["runtime"].(map[string]any)
 	if runtimeSnapshot["verbosity"] != "normal" {
 		t.Fatalf("runtime.verbosity = %#v, want normal", runtimeSnapshot["verbosity"])
@@ -137,10 +143,237 @@ func TestLocalControlServerGetStatusSnapshotAction(t *testing.T) {
 	if pendingAction["present"] != false {
 		t.Fatalf("pending_action.present = %#v, want false", pendingAction["present"])
 	}
+	stopFlag := payload["stop_flag"].(map[string]any)
+	if stopFlag["present"] != false {
+		t.Fatalf("stop_flag.present = %#v, want false", stopFlag["present"])
+	}
+	if stopFlag["applies_at"] != "next_safe_point" {
+		t.Fatalf("stop_flag.applies_at = %#v, want next_safe_point", stopFlag["applies_at"])
+	}
+}
+
+func TestLocalControlServerStatusSnapshotSurfacesAskHumanActionRequired(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	writeRepoMarkerFiles(t, repoRoot)
+	layout := state.ResolveLayout(repoRoot)
+	configPath := filepathJoin(t, repoRoot, "config.json")
+	if err := config.Save(configPath, config.Default()); err != nil {
+		t.Fatalf("config.Save() error = %v", err)
+	}
+
+	store, _, err := ensureRuntime(context.Background(), layout)
+	if err != nil {
+		t.Fatalf("ensureRuntime() error = %v", err)
+	}
+	run, err := store.CreateRun(context.Background(), state.CreateRunParams{
+		RepoPath: repoRoot,
+		Goal:     "continue after human confirms model access",
+		Status:   state.StatusInitialized,
+		Checkpoint: state.Checkpoint{
+			Sequence:     2,
+			Stage:        "planner",
+			Label:        "planner_turn_completed",
+			SafePause:    true,
+			PlannerTurn:  1,
+			ExecutorTurn: 0,
+			CreatedAt:    time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	if err := store.SavePlannerOperatorStatus(context.Background(), run.ID, &state.PlannerOperatorStatus{
+		ContractVersion: "planner.v1",
+		OperatorMessage: "Codex was blocked by a model/access issue. Confirm whether that is fixed.",
+		CurrentFocus:    "waiting for human confirmation",
+	}); err != nil {
+		t.Fatalf("SavePlannerOperatorStatus() error = %v", err)
+	}
+	if err := store.SaveLatestStopReason(context.Background(), run.ID, orchestration.StopReasonPlannerAskHuman); err != nil {
+		t.Fatalf("SaveLatestStopReason() error = %v", err)
+	}
+	journalWriter, err := journal.Open(layout.JournalPath)
+	if err != nil {
+		t.Fatalf("journal.Open() error = %v", err)
+	}
+	if err := journalWriter.Append(journal.Event{
+		Type:           "human.question.presented",
+		RunID:          run.ID,
+		RepoPath:       repoRoot,
+		Goal:           run.Goal,
+		Status:         string(state.StatusInitialized),
+		Message:        "planner question presented to human input bridge",
+		ResponseID:     "resp_question",
+		PlannerOutcome: string(planner.OutcomeAskHuman),
+		HumanQuestion:  "Has the Codex gpt-5.5 model/access issue been fixed?",
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	inv := Invocation{
+		Stdout:     &bytes.Buffer{},
+		Stderr:     &bytes.Buffer{},
+		RepoRoot:   repoRoot,
+		Layout:     layout,
+		Config:     config.Default(),
+		ConfigPath: configPath,
+		RuntimeCfg: runtimecfg.NewManager(configPath, config.Default()),
+		Events:     activity.NewBroker(activity.DefaultHistoryLimit),
+		Version:    "test",
+	}
+
+	server := httptest.NewServer(newLocalControlServer(inv).Handler())
+	defer server.Close()
+
+	response := postControlAction(t, server.URL, `{
+		"id":"req_status_ask_human",
+		"type":"request",
+		"action":"get_status_snapshot",
+		"payload":{"run_id":"`+run.ID+`"}
+	}`)
+	if !response.OK {
+		t.Fatalf("response.OK = false, error = %#v", response.Error)
+	}
+
+	payload := response.Payload.(map[string]any)
+	askHuman := payload["ask_human"].(map[string]any)
+	if askHuman["present"] != true {
+		t.Fatalf("ask_human.present = %#v, want true", askHuman["present"])
+	}
+	if askHuman["question"] != "Has the Codex gpt-5.5 model/access issue been fixed?" {
+		t.Fatalf("ask_human.question = %#v", askHuman["question"])
+	}
+	if askHuman["planner_outcome"] != "ask_human" {
+		t.Fatalf("ask_human.planner_outcome = %#v, want ask_human", askHuman["planner_outcome"])
+	}
+	if askHuman["run_id"] != run.ID {
+		t.Fatalf("ask_human.run_id = %#v, want %q", askHuman["run_id"], run.ID)
+	}
+}
+
+func TestLocalControlServerStatusSnapshotMarksExecuteReadySafePause(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	writeRepoMarkerFiles(t, repoRoot)
+	layout := state.ResolveLayout(repoRoot)
+	configPath := filepathJoin(t, repoRoot, "config.json")
+	if err := config.Save(configPath, config.Default()); err != nil {
+		t.Fatalf("config.Save() error = %v", err)
+	}
+
+	store, _, err := ensureRuntime(context.Background(), layout)
+	if err != nil {
+		t.Fatalf("ensureRuntime() error = %v", err)
+	}
+	run, err := store.CreateRun(context.Background(), state.CreateRunParams{
+		RepoPath: repoRoot,
+		Goal:     "dispatch the next executor task",
+		Status:   state.StatusInitialized,
+		Checkpoint: state.Checkpoint{
+			Sequence:     3,
+			Stage:        "planner",
+			Label:        "planner_turn_completed",
+			SafePause:    true,
+			PlannerTurn:  2,
+			ExecutorTurn: 0,
+			CreatedAt:    time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	journalWriter, err := journal.Open(layout.JournalPath)
+	if err != nil {
+		t.Fatalf("journal.Open() error = %v", err)
+	}
+	if err := journalWriter.Append(journal.Event{
+		Type:           "planner.turn.completed",
+		RunID:          run.ID,
+		RepoPath:       repoRoot,
+		Goal:           run.Goal,
+		Status:         string(state.StatusInitialized),
+		PlannerOutcome: string(planner.OutcomeExecute),
+		Message:        "planner selected an executor task",
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	inv := Invocation{
+		Stdout:     &bytes.Buffer{},
+		Stderr:     &bytes.Buffer{},
+		RepoRoot:   repoRoot,
+		Layout:     layout,
+		Config:     config.Default(),
+		ConfigPath: configPath,
+		RuntimeCfg: runtimecfg.NewManager(configPath, config.Default()),
+		Events:     activity.NewBroker(activity.DefaultHistoryLimit),
+		Version:    "test",
+	}
+
+	server := httptest.NewServer(newLocalControlServer(inv).Handler())
+	defer server.Close()
+
+	response := postControlAction(t, server.URL, `{
+		"id":"req_status_execute_ready",
+		"type":"request",
+		"action":"get_status_snapshot",
+		"payload":{"run_id":"`+run.ID+`"}
+	}`)
+	if !response.OK {
+		t.Fatalf("response.OK = false, error = %#v", response.Error)
+	}
+
+	payload := response.Payload.(map[string]any)
+	runSnapshot := payload["run"].(map[string]any)
+	if runSnapshot["activity_state"] != "ready_to_dispatch" {
+		t.Fatalf("run.activity_state = %#v, want ready_to_dispatch", runSnapshot["activity_state"])
+	}
+	if runSnapshot["activity_message"] != "Planner selected the next code task. Executor has not started yet. Click Continue Build to dispatch it." {
+		t.Fatalf("run.activity_message = %#v", runSnapshot["activity_message"])
+	}
+	if runSnapshot["actively_processing"] != false {
+		t.Fatalf("run.actively_processing = %#v, want false", runSnapshot["actively_processing"])
+	}
+	if runSnapshot["waiting_at_safe_point"] != true {
+		t.Fatalf("run.waiting_at_safe_point = %#v, want true", runSnapshot["waiting_at_safe_point"])
+	}
+	if runSnapshot["execute_ready"] != true {
+		t.Fatalf("run.execute_ready = %#v, want true", runSnapshot["execute_ready"])
+	}
+	if runSnapshot["next_operator_action"] != "continue_existing_run" {
+		t.Fatalf("run.next_operator_action = %#v, want continue_existing_run", runSnapshot["next_operator_action"])
+	}
 }
 
 func TestLocalControlServerModelHealthActionsSurfaceExecutorModelErrors(t *testing.T) {
-	t.Parallel()
+	restoreInspect := inspectCodexEnvironment
+	restoreProbe := runRequiredCodexExecProbe
+	t.Cleanup(func() {
+		inspectCodexEnvironment = restoreInspect
+		runRequiredCodexExecProbe = restoreProbe
+	})
+	codexEnv := appserver.CodexEnvironment{
+		CodexPath:        `C:\Users\me\AppData\Roaming\npm\codex.cmd`,
+		CodexVersion:     "codex-cli 0.124.0",
+		AppServerCommand: `C:\Program Files\nodejs\node.exe`,
+		AppServerArgs:    []string{"codex.js", "app-server", "--listen", "stdio://"},
+		ConfigSource:     `C:\Users\me\.codex\config.toml`,
+	}
+	inspectCodexEnvironment = func(context.Context) (appserver.CodexEnvironment, error) {
+		return codexEnv, nil
+	}
+	runRequiredCodexExecProbe = func(context.Context, string) (appserver.CodexExecProbeResult, error) {
+		return appserver.CodexExecProbeResult{Environment: codexEnv, Success: true}, nil
+	}
 
 	repoRoot := t.TempDir()
 	writeRepoMarkerFiles(t, repoRoot)
@@ -233,8 +466,190 @@ func TestLocalControlServerModelHealthActionsSurfaceExecutorModelErrors(t *testi
 	}
 	testPayload := testResponse.Payload.(map[string]any)
 	testExecutor := testPayload["executor"].(map[string]any)
-	if testExecutor["model_unavailable"] != true {
-		t.Fatalf("test executor.model_unavailable = %#v, want true", testExecutor["model_unavailable"])
+	if testExecutor["verification_state"] != "verified" {
+		t.Fatalf("test executor.verification_state = %#v, want verified", testExecutor["verification_state"])
+	}
+	if testExecutor["model_unavailable"] != false {
+		t.Fatalf("test executor.model_unavailable = %#v, want false after successful fresh probe", testExecutor["model_unavailable"])
+	}
+
+	postTestStatusResponse := postControlAction(t, server.URL, `{
+		"id":"req_status_after_model_test",
+		"type":"request",
+		"action":"get_status_snapshot",
+		"payload":{}
+	}`)
+	if !postTestStatusResponse.OK {
+		t.Fatalf("post-test status response failed: %#v", postTestStatusResponse.Error)
+	}
+	postTestPayload := postTestStatusResponse.Payload.(map[string]any)
+	postTestHealth := postTestPayload["model_health"].(map[string]any)
+	postTestExecutor := postTestHealth["executor"].(map[string]any)
+	if postTestExecutor["verification_state"] != "verified" {
+		t.Fatalf("post-test executor.verification_state = %#v, want verified from fresh probe cache", postTestExecutor["verification_state"])
+	}
+	if postTestHealth["blocking"] != false {
+		t.Fatalf("post-test model_health.blocking = %#v, want false after fresh successful Codex probe", postTestHealth["blocking"])
+	}
+}
+
+func TestLocalControlServerModelHealthActionsRoutePlannerAndCodexAlias(t *testing.T) {
+	restorePlannerProbe := runPlannerModelProbe
+	restoreInspect := inspectCodexEnvironment
+	restoreCodexProbe := runRequiredCodexExecProbe
+	t.Cleanup(func() {
+		runPlannerModelProbe = restorePlannerProbe
+		inspectCodexEnvironment = restoreInspect
+		runRequiredCodexExecProbe = restoreCodexProbe
+	})
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+
+	runPlannerModelProbe = func(_ context.Context, apiKey string, model string) (plannerModelProbeResult, error) {
+		if apiKey != "sk-test" {
+			t.Fatalf("apiKey = %q, want sk-test", apiKey)
+		}
+		if model != "gpt-5.4" {
+			t.Fatalf("planner probe model = %q, want gpt-5.4", model)
+		}
+		return plannerModelProbeResult{RequestedModel: model, VerifiedModel: model, ResponseID: "resp_route_probe"}, nil
+	}
+	codexEnv := appserver.CodexEnvironment{
+		CodexPath:        `C:\Users\me\AppData\Roaming\npm\codex.cmd`,
+		CodexVersion:     "codex-cli 0.124.0",
+		AppServerCommand: `C:\Program Files\nodejs\node.exe`,
+		AppServerArgs:    []string{"codex.js", "app-server", "--listen", "stdio://"},
+		ConfigSource:     `C:\Users\me\.codex\config.toml`,
+	}
+	inspectCodexEnvironment = func(context.Context) (appserver.CodexEnvironment, error) {
+		return codexEnv, nil
+	}
+	runRequiredCodexExecProbe = func(context.Context, string) (appserver.CodexExecProbeResult, error) {
+		return appserver.CodexExecProbeResult{Environment: codexEnv, Success: true}, nil
+	}
+
+	repoRoot := t.TempDir()
+	writeRepoMarkerFiles(t, repoRoot)
+	layout := state.ResolveLayout(repoRoot)
+	configPath := filepathJoin(t, repoRoot, "config.json")
+	cfg := config.Default()
+	cfg.PlannerModel = "gpt-5.4"
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("config.Save() error = %v", err)
+	}
+
+	inv := Invocation{
+		Stdout:     &bytes.Buffer{},
+		Stderr:     &bytes.Buffer{},
+		RepoRoot:   repoRoot,
+		Layout:     layout,
+		Config:     cfg,
+		ConfigPath: configPath,
+		RuntimeCfg: runtimecfg.NewManager(configPath, cfg),
+		Events:     activity.NewBroker(activity.DefaultHistoryLimit),
+		Version:    "test",
+	}
+	server := httptest.NewServer(newLocalControlServer(inv).Handler())
+	defer server.Close()
+
+	plannerResponse := postControlAction(t, server.URL, `{
+		"id":"req_planner_model",
+		"type":"request",
+		"action":"test_planner_model",
+		"payload":{"model":"gpt-5.4"}
+	}`)
+	if !plannerResponse.OK {
+		t.Fatalf("test_planner_model response failed: %#v", plannerResponse.Error)
+	}
+	plannerPayload := plannerResponse.Payload.(map[string]any)
+	plannerHealth := plannerPayload["planner"].(map[string]any)
+	if plannerHealth["verification_state"] != "verified" {
+		t.Fatalf("planner.verification_state = %#v, want verified", plannerHealth["verification_state"])
+	}
+	if plannerHealth["verified_model"] != "gpt-5.4" {
+		t.Fatalf("planner.verified_model = %#v, want gpt-5.4", plannerHealth["verified_model"])
+	}
+
+	codexAliasResponse := postControlAction(t, server.URL, `{
+		"id":"req_codex_alias",
+		"type":"request",
+		"action":"test_codex_config",
+		"payload":{}
+	}`)
+	if !codexAliasResponse.OK {
+		t.Fatalf("test_codex_config response failed: %#v", codexAliasResponse.Error)
+	}
+	codexAliasPayload := codexAliasResponse.Payload.(map[string]any)
+	executorHealth := codexAliasPayload["executor"].(map[string]any)
+	if executorHealth["verification_state"] != "verified" {
+		t.Fatalf("executor.verification_state = %#v, want verified", executorHealth["verification_state"])
+	}
+	if executorHealth["verified_model"] != "gpt-5.5" {
+		t.Fatalf("executor.verified_model = %#v, want gpt-5.5", executorHealth["verified_model"])
+	}
+}
+
+func TestLocalControlServerModelHealthActionsAcceptMinimalPowerShellPayloads(t *testing.T) {
+	restorePlannerProbe := runPlannerModelProbe
+	restoreInspect := inspectCodexEnvironment
+	restoreCodexProbe := runRequiredCodexExecProbe
+	t.Cleanup(func() {
+		runPlannerModelProbe = restorePlannerProbe
+		inspectCodexEnvironment = restoreInspect
+		runRequiredCodexExecProbe = restoreCodexProbe
+	})
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+
+	runPlannerModelProbe = func(_ context.Context, _ string, model string) (plannerModelProbeResult, error) {
+		return plannerModelProbeResult{RequestedModel: model, VerifiedModel: model, ResponseID: "resp_minimal_probe"}, nil
+	}
+	codexEnv := appserver.CodexEnvironment{
+		CodexPath:        `C:\Users\me\AppData\Roaming\npm\codex.cmd`,
+		CodexVersion:     "codex-cli 0.124.0",
+		AppServerCommand: `C:\Program Files\nodejs\node.exe`,
+		AppServerArgs:    []string{"codex.js", "app-server", "--listen", "stdio://"},
+		ConfigSource:     `C:\Users\me\.codex\config.toml`,
+	}
+	inspectCodexEnvironment = func(context.Context) (appserver.CodexEnvironment, error) {
+		return codexEnv, nil
+	}
+	runRequiredCodexExecProbe = func(context.Context, string) (appserver.CodexExecProbeResult, error) {
+		return appserver.CodexExecProbeResult{Environment: codexEnv, Success: true}, nil
+	}
+
+	repoRoot := t.TempDir()
+	writeRepoMarkerFiles(t, repoRoot)
+	layout := state.ResolveLayout(repoRoot)
+	cfg := config.Default()
+	cfg.PlannerModel = "gpt-5.4"
+	inv := Invocation{
+		Stdout:   &bytes.Buffer{},
+		Stderr:   &bytes.Buffer{},
+		RepoRoot: repoRoot,
+		Layout:   layout,
+		Config:   cfg,
+		Events:   activity.NewBroker(activity.DefaultHistoryLimit),
+		Version:  "test",
+	}
+	server := httptest.NewServer(newLocalControlServer(inv).Handler())
+	defer server.Close()
+
+	for _, action := range []string{"test_planner_model", "test_executor_model", "test_codex_config"} {
+		response := postControlAction(t, server.URL, `{"action":"`+action+`"}`)
+		if !response.OK {
+			t.Fatalf("%s minimal payload failed: %#v", action, response.Error)
+		}
+		payload := response.Payload.(map[string]any)
+		if action == "test_planner_model" {
+			plannerHealth := payload["planner"].(map[string]any)
+			if plannerHealth["verification_state"] != "verified" {
+				t.Fatalf("%s planner.verification_state = %#v, want verified", action, plannerHealth["verification_state"])
+			}
+			continue
+		}
+		executorHealth := payload["executor"].(map[string]any)
+		if executorHealth["verification_state"] != "verified" {
+			t.Fatalf("%s executor.verification_state = %#v, want verified", action, executorHealth["verification_state"])
+		}
 	}
 }
 
@@ -666,6 +1081,172 @@ func TestLocalControlServerRunActionGuardRejectsOverlappingControlRuns(t *testin
 	waitForActivityEvent(t, events, "run_completed", runID)
 }
 
+func TestLocalControlServerRecoverStaleRunClearsGuardAndPreservesHistory(t *testing.T) {
+	repoRoot := t.TempDir()
+	writeRepoMarkerFiles(t, repoRoot)
+	layout := state.ResolveLayout(repoRoot)
+	configPath := filepathJoin(t, repoRoot, "config.json")
+	if err := config.Save(configPath, config.Default()); err != nil {
+		t.Fatalf("config.Save() error = %v", err)
+	}
+
+	store, journalWriter, err := ensureRuntime(context.Background(), layout)
+	if err != nil {
+		t.Fatalf("ensureRuntime() error = %v", err)
+	}
+	checkpoint := state.Checkpoint{
+		Sequence:  1,
+		Stage:     "planner",
+		Label:     "planner_turn_completed",
+		SafePause: true,
+		CreatedAt: time.Now().UTC(),
+	}
+	run, err := store.CreateRun(context.Background(), state.CreateRunParams{
+		RepoPath:   repoRoot,
+		Goal:       "Recover stale active run",
+		Status:     state.StatusInitialized,
+		Checkpoint: checkpoint,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	if err := journalWriter.Append(journal.Event{
+		Type:           "planner.turn.completed",
+		RunID:          run.ID,
+		RepoPath:       repoRoot,
+		Goal:           run.Goal,
+		Status:         string(run.Status),
+		PlannerOutcome: string(planner.OutcomeExecute),
+		Message:        "planner selected an executor task",
+		Checkpoint:     journalCheckpointRef(checkpoint),
+		At:             time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Append planner event error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	guard := activeRunGuardFile{
+		Owner:            activeRunGuardOwner,
+		SessionID:        "session_old_backend",
+		RunID:            run.ID,
+		Action:           "continue_run",
+		Status:           "active",
+		RepoPath:         repoRoot,
+		BackendPID:       999999,
+		BackendStartedAt: "2026-04-01T00:00:00Z",
+		StartedAt:        "2026-04-01T00:00:00Z",
+		UpdatedAt:        "2026-04-01T00:01:00Z",
+	}
+	encoded, err := json.Marshal(guard)
+	if err != nil {
+		t.Fatalf("json.Marshal(guard) error = %v", err)
+	}
+	if err := os.WriteFile(activeRunGuardPath(layout), encoded, 0o644); err != nil {
+		t.Fatalf("WriteFile(active guard) error = %v", err)
+	}
+
+	events := activity.NewBroker(activity.DefaultHistoryLimit)
+	inv := Invocation{
+		Stdout:     &bytes.Buffer{},
+		Stderr:     &bytes.Buffer{},
+		RepoRoot:   repoRoot,
+		Layout:     layout,
+		Config:     config.Default(),
+		ConfigPath: configPath,
+		RuntimeCfg: runtimecfg.NewManager(configPath, config.Default()),
+		Events:     events,
+		Version:    "test",
+	}
+	server := httptest.NewServer(newLocalControlServer(inv).Handler())
+	defer server.Close()
+
+	guardResponse := postControlAction(t, server.URL, `{
+		"id":"req_active_guard",
+		"type":"request",
+		"action":"get_active_run_guard",
+		"payload":{}
+	}`)
+	if !guardResponse.OK {
+		t.Fatalf("get_active_run_guard failed: %#v", guardResponse.Error)
+	}
+	guardPayload := guardResponse.Payload.(map[string]any)
+	if guardPayload["stale"] != true {
+		t.Fatalf("active guard stale = %#v, want true", guardPayload["stale"])
+	}
+
+	recoveryResponse := postControlAction(t, server.URL, `{
+		"id":"req_recover_stale",
+		"type":"request",
+		"action":"recover_stale_run",
+		"payload":{"run_id":"`+run.ID+`","reason":"operator_recovery","force":true}
+	}`)
+	if !recoveryResponse.OK {
+		t.Fatalf("recover_stale_run failed: %#v", recoveryResponse.Error)
+	}
+	recoveryPayload := recoveryResponse.Payload.(map[string]any)
+	if recoveryPayload["recovered"] != true {
+		t.Fatalf("recovered = %#v, want true", recoveryPayload["recovered"])
+	}
+	if recoveryPayload["active_guard_cleared"] != true {
+		t.Fatalf("active_guard_cleared = %#v, want true", recoveryPayload["active_guard_cleared"])
+	}
+	if recoveryPayload["status"] != string(state.StatusInitialized) {
+		t.Fatalf("status = %#v, want initialized run preserved", recoveryPayload["status"])
+	}
+	if recoveryPayload["next_operator_action"] != "continue_existing_run" {
+		t.Fatalf("next_operator_action = %#v, want continue_existing_run", recoveryPayload["next_operator_action"])
+	}
+	if _, err := os.Stat(activeRunGuardPath(layout)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("active guard file should be removed, stat err = %v", err)
+	}
+
+	statusResponse := postControlAction(t, server.URL, `{
+		"id":"req_status_after_recover",
+		"type":"request",
+		"action":"get_status_snapshot",
+		"payload":{"run_id":"`+run.ID+`"}
+	}`)
+	if !statusResponse.OK {
+		t.Fatalf("get_status_snapshot after recovery failed: %#v", statusResponse.Error)
+	}
+	statusPayload := statusResponse.Payload.(map[string]any)
+	statusGuard := statusPayload["active_run_guard"].(map[string]any)
+	if statusGuard["present"] != false {
+		t.Fatalf("status active guard present = %#v, want false", statusGuard["present"])
+	}
+	statusRun := statusPayload["run"].(map[string]any)
+	if statusRun["next_operator_action"] != "continue_existing_run" {
+		t.Fatalf("status run.next_operator_action = %#v, want continue_existing_run", statusRun["next_operator_action"])
+	}
+	if statusRun["execute_ready"] != true {
+		t.Fatalf("status run.execute_ready = %#v, want true", statusRun["execute_ready"])
+	}
+	if statusRun["waiting_at_safe_point"] != true {
+		t.Fatalf("status run.waiting_at_safe_point = %#v, want true", statusRun["waiting_at_safe_point"])
+	}
+
+	store, err = openExistingStore(layout)
+	if err != nil {
+		t.Fatalf("openExistingStore() error = %v", err)
+	}
+	defer store.Close()
+	updated, found, err := store.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if !found {
+		t.Fatalf("run %s should be preserved", run.ID)
+	}
+	if updated.Status != state.StatusInitialized {
+		t.Fatalf("run status = %q, want initialized", updated.Status)
+	}
+	if updated.LatestStopReason != "" {
+		t.Fatalf("latest stop reason = %q, want unchanged empty stop reason", updated.LatestStopReason)
+	}
+}
+
 func TestLocalControlServerSideChatStoresMessagesAndRemainsTruthful(t *testing.T) {
 	t.Parallel()
 
@@ -681,7 +1262,7 @@ func TestLocalControlServerSideChatStoresMessagesAndRemainsTruthful(t *testing.T
 	if err != nil {
 		t.Fatalf("ensureRuntime() error = %v", err)
 	}
-	if _, err := store.CreateRun(context.Background(), state.CreateRunParams{
+	run, err := store.CreateRun(context.Background(), state.CreateRunParams{
 		RepoPath: repoRoot,
 		Goal:     "record a side chat message",
 		Status:   state.StatusInitialized,
@@ -694,7 +1275,8 @@ func TestLocalControlServerSideChatStoresMessagesAndRemainsTruthful(t *testing.T
 			ExecutorTurn: 0,
 			CreatedAt:    time.Now().UTC(),
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("CreateRun() error = %v", err)
 	}
 	if err := store.Close(); err != nil {
@@ -727,21 +1309,24 @@ func TestLocalControlServerSideChatStoresMessagesAndRemainsTruthful(t *testing.T
 		t.Fatalf("response.OK = false, error = %#v", response.Error)
 	}
 	payload := response.Payload.(map[string]any)
-	if payload["available"] != false {
-		t.Fatalf("available = %#v, want false", payload["available"])
+	if payload["available"] != true {
+		t.Fatalf("available = %#v, want true", payload["available"])
 	}
 	if payload["stored"] != true {
 		t.Fatalf("stored = %#v, want true", payload["stored"])
 	}
-	if !strings.Contains(payload["message"].(string), "not implemented") {
-		t.Fatalf("message = %#v, want truthful stub", payload["message"])
+	if !strings.Contains(payload["message"].(string), "observable runtime context") {
+		t.Fatalf("message = %#v, want truthful context-agent message", payload["message"])
 	}
 	entry := payload["entry"].(map[string]any)
 	if entry["raw_text"] != "What remains before release?" {
 		t.Fatalf("entry.raw_text = %#v, want recorded side chat text", entry["raw_text"])
 	}
-	if entry["backend_state"] != "unavailable" {
-		t.Fatalf("entry.backend_state = %#v, want unavailable", entry["backend_state"])
+	if entry["backend_state"] != "context_agent" {
+		t.Fatalf("entry.backend_state = %#v, want context_agent", entry["backend_state"])
+	}
+	if !strings.Contains(entry["response_message"].(string), "Latest run") {
+		t.Fatalf("entry.response_message = %#v, want contextual reply", entry["response_message"])
 	}
 
 	listResponse := postControlAction(t, server.URL, `{
@@ -767,6 +1352,46 @@ func TestLocalControlServerSideChatStoresMessagesAndRemainsTruthful(t *testing.T
 	recorded := items[0].(map[string]any)
 	if recorded["response_message"] == "" {
 		t.Fatal("response_message should keep the truthful unavailable note")
+	}
+
+	if _, err := os.Stat(autoStopFlagPath(layout)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("side chat should not set the stop flag; Stat() error = %v", err)
+	}
+	verificationStore, err := state.Open(layout.DBPath)
+	if err != nil {
+		t.Fatalf("state.Open() error = %v", err)
+	}
+	defer verificationStore.Close()
+	if err := verificationStore.EnsureSchema(context.Background()); err != nil {
+		t.Fatalf("EnsureSchema() error = %v", err)
+	}
+	controlMessages, err := verificationStore.ListControlMessages(context.Background(), run.ID, "", 10)
+	if err != nil {
+		t.Fatalf("ListControlMessages() error = %v", err)
+	}
+	if len(controlMessages) != 0 {
+		t.Fatalf("side chat should not queue control messages; got %d", len(controlMessages))
+	}
+	if _, found, err := verificationStore.GetPendingAction(context.Background(), run.ID); err != nil {
+		t.Fatalf("GetPendingAction() error = %v", err)
+	} else if found {
+		t.Fatal("side chat should not create or change pending actions")
+	}
+	latestRun, found, err := verificationStore.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if !found {
+		t.Fatal("run disappeared after side chat message")
+	}
+	if latestRun.Status != state.StatusInitialized {
+		t.Fatalf("run status changed after side chat: %s", latestRun.Status)
+	}
+	if strings.TrimSpace(latestRun.LatestStopReason) != "" {
+		t.Fatalf("side chat should not set run stop reason; got %q", latestRun.LatestStopReason)
+	}
+	if guard := buildActiveRunGuardSnapshot(inv); guard.Present {
+		t.Fatalf("side chat should not create active-run guard; got %#v", guard)
 	}
 
 	eventStream, cancel := events.Subscribe(0)

@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 const bootstrap = {
   defaultControlAddress: String(process.env.ORCHESTRATOR_V2_SHELL_ADDR || "").trim(),
+  expectedRepoPath: String(process.env.ORCHESTRATOR_V2_EXPECTED_REPO || "").trim(),
 };
 
 function listen(channel, callback) {
@@ -18,6 +19,9 @@ contextBridge.exposeInMainWorld("orchestratorConsole", {
   getConnectionState() {
     return ipcRenderer.invoke("protocol:get-connection-state");
   },
+  restartBackend(address = "") {
+    return ipcRenderer.invoke("shell:restart-backend", { address });
+  },
   getStatusSnapshot(runId = "", address = "") {
     return ipcRenderer.invoke("protocol:get-status", { runId, address });
   },
@@ -26,6 +30,12 @@ contextBridge.exposeInMainWorld("orchestratorConsole", {
   },
   continueRun(payload) {
     return ipcRenderer.invoke("protocol:continue-run", payload);
+  },
+  getActiveRunGuard(address = "") {
+    return ipcRenderer.invoke("protocol:get-active-run-guard", { address });
+  },
+  recoverStaleRun(runId = "", reason = "operator_recovery", force = true, address = "") {
+    return ipcRenderer.invoke("protocol:recover-stale-run", { runId, reason, force, address });
   },
   testPlannerModel(model = "", address = "") {
     return ipcRenderer.invoke("protocol:test-planner-model", { model, address });
@@ -92,6 +102,27 @@ contextBridge.exposeInMainWorld("orchestratorConsole", {
   },
   integrateWorkers(workerIds = [], address = "") {
     return ipcRenderer.invoke("protocol:integrate-workers", { workerIds, address });
+  },
+  getRuntimeConfig(address = "") {
+    return ipcRenderer.invoke("protocol:get-runtime-config", { address });
+  },
+  setRuntimeConfig(patch) {
+    return ipcRenderer.invoke("protocol:set-runtime-config", patch);
+  },
+  checkForUpdates(includePrereleases = false, address = "") {
+    return ipcRenderer.invoke("protocol:check-for-updates", { includePrereleases, address });
+  },
+  getUpdateStatus(address = "") {
+    return ipcRenderer.invoke("protocol:get-update-status", { address });
+  },
+  installUpdate(version = "", address = "") {
+    return ipcRenderer.invoke("protocol:install-update", { version, address });
+  },
+  skipUpdate(version = "", address = "") {
+    return ipcRenderer.invoke("protocol:skip-update", { version, address });
+  },
+  getUpdateChangelog(includePrereleases = false, address = "") {
+    return ipcRenderer.invoke("protocol:get-update-changelog", { includePrereleases, address });
   },
   setVerbosity(verbosity, address = "") {
     return ipcRenderer.invoke("protocol:set-verbosity", { verbosity, address });

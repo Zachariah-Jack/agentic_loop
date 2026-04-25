@@ -60,8 +60,19 @@ type ContinueRunRequest struct {
 	Mode     string `json:"mode,omitempty"`
 }
 
+type RecoverStaleRunRequest struct {
+	RunID  string `json:"run_id,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	Force  bool   `json:"force,omitempty"`
+}
+
 type ModelTestRequest struct {
 	Model string `json:"model,omitempty"`
+}
+
+type UpdateRequest struct {
+	IncludePrereleases *bool  `json:"include_prereleases,omitempty"`
+	Version            string `json:"version,omitempty"`
 }
 
 type PendingActionRequest struct {
@@ -179,6 +190,8 @@ type IntegrateWorkersRequest struct {
 type ActionSet struct {
 	StartRun             func(context.Context, StartRunRequest) (any, error)
 	ContinueRun          func(context.Context, ContinueRunRequest) (any, error)
+	GetActiveRunGuard    func(context.Context) (any, error)
+	RecoverStaleRun      func(context.Context, RecoverStaleRunRequest) (any, error)
 	TestPlannerModel     func(context.Context, ModelTestRequest) (any, error)
 	TestExecutorModel    func(context.Context, ModelTestRequest) (any, error)
 	GetStatusSnapshot    func(context.Context, string) (any, error)
@@ -209,6 +222,11 @@ type ActionSet struct {
 	IntegrateWorkers     func(context.Context, IntegrateWorkersRequest) (any, error)
 	GetRuntimeConfig     func(context.Context) (any, error)
 	SetRuntimeConfig     func(context.Context, runtimecfg.Patch) (any, error)
+	CheckForUpdates      func(context.Context, UpdateRequest) (any, error)
+	GetUpdateStatus      func(context.Context) (any, error)
+	InstallUpdate        func(context.Context, UpdateRequest) (any, error)
+	SkipUpdate           func(context.Context, UpdateRequest) (any, error)
+	GetUpdateChangelog   func(context.Context, UpdateRequest) (any, error)
 }
 
 type Server struct {
@@ -293,6 +311,34 @@ func (s Server) dispatch(ctx context.Context, req RequestEnvelope) ResponseEnvel
 		if err != nil {
 			return actionError(req, "continue_run_failed", err)
 		}
+		return okResponse(req, response)
+	case "get_active_run_guard":
+		handler := s.Actions.GetActiveRunGuard
+		if handler == nil {
+			return unsupportedAction(req, "get_active_run_guard")
+		}
+		response, err := handler(ctx)
+		if err != nil {
+			return actionError(req, "get_active_run_guard_failed", err)
+		}
+		return okResponse(req, response)
+	case "recover_stale_run":
+		handler := s.Actions.RecoverStaleRun
+		if handler == nil {
+			return unsupportedAction(req, "recover_stale_run")
+		}
+		var payload RecoverStaleRunRequest
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return invalidPayload(req, err)
+		}
+		response, err := handler(ctx, payload)
+		if err != nil {
+			return actionError(req, "recover_stale_run_failed", err)
+		}
+		s.publish("stale_run_recovered", map[string]any{
+			"run_id": strings.TrimSpace(payload.RunID),
+			"reason": strings.TrimSpace(payload.Reason),
+		})
 		return okResponse(req, response)
 	case "test_planner_model":
 		handler := s.Actions.TestPlannerModel
@@ -723,6 +769,11 @@ func (s Server) dispatch(ctx context.Context, req RequestEnvelope) ResponseEnvel
 		if err != nil {
 			return actionError(req, "set_runtime_config_failed", err)
 		}
+		if payload.HasChanges() {
+			s.publish("runtime_config_changed", map[string]any{
+				"applies_at": "next_operation_or_safe_point",
+			})
+		}
 		if payload.Verbosity != nil {
 			s.publish("verbosity_changed", map[string]any{
 				"verbosity":  strings.TrimSpace(*payload.Verbosity),
@@ -730,6 +781,72 @@ func (s Server) dispatch(ctx context.Context, req RequestEnvelope) ResponseEnvel
 			})
 		}
 		return okResponse(req, cfg)
+	case "check_for_updates":
+		handler := s.Actions.CheckForUpdates
+		if handler == nil {
+			return unsupportedAction(req, "check_for_updates")
+		}
+		var payload UpdateRequest
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return invalidPayload(req, err)
+		}
+		response, err := handler(ctx, payload)
+		if err != nil {
+			return actionError(req, "check_for_updates_failed", err)
+		}
+		return okResponse(req, response)
+	case "get_update_status":
+		handler := s.Actions.GetUpdateStatus
+		if handler == nil {
+			return unsupportedAction(req, "get_update_status")
+		}
+		response, err := handler(ctx)
+		if err != nil {
+			return actionError(req, "get_update_status_failed", err)
+		}
+		return okResponse(req, response)
+	case "install_update":
+		handler := s.Actions.InstallUpdate
+		if handler == nil {
+			return unsupportedAction(req, "install_update")
+		}
+		var payload UpdateRequest
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return invalidPayload(req, err)
+		}
+		response, err := handler(ctx, payload)
+		if err != nil {
+			return actionError(req, "install_update_failed", err)
+		}
+		return okResponse(req, response)
+	case "skip_update":
+		handler := s.Actions.SkipUpdate
+		if handler == nil {
+			return unsupportedAction(req, "skip_update")
+		}
+		var payload UpdateRequest
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return invalidPayload(req, err)
+		}
+		response, err := handler(ctx, payload)
+		if err != nil {
+			return actionError(req, "skip_update_failed", err)
+		}
+		return okResponse(req, response)
+	case "get_update_changelog":
+		handler := s.Actions.GetUpdateChangelog
+		if handler == nil {
+			return unsupportedAction(req, "get_update_changelog")
+		}
+		var payload UpdateRequest
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return invalidPayload(req, err)
+		}
+		response, err := handler(ctx, payload)
+		if err != nil {
+			return actionError(req, "get_update_changelog_failed", err)
+		}
+		return okResponse(req, response)
 	default:
 		return unsupportedAction(req, strings.TrimSpace(req.Action))
 	}
@@ -851,12 +968,28 @@ func invalidPayload(req RequestEnvelope, err error) ResponseEnvelope {
 }
 
 func actionError(req RequestEnvelope, code string, err error) ResponseEnvelope {
+	if isSQLiteBusyError(err) {
+		code = "state_database_locked"
+		err = fmt.Errorf("state database is temporarily locked by another orchestrator process; retry after recovery or restart the owned backend")
+	}
 	return ResponseEnvelope{
 		ID:    req.ID,
 		Type:  "response",
 		OK:    false,
 		Error: &ErrorEnvelope{Code: code, Message: err.Error()},
 	}
+}
+
+func isSQLiteBusyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "sqlite_busy") ||
+		strings.Contains(text, "sqlite_locked") ||
+		strings.Contains(text, "database is locked") ||
+		strings.Contains(text, "database table is locked") ||
+		strings.Contains(text, "database schema is locked")
 }
 
 func unsupportedAction(req RequestEnvelope, action string) ResponseEnvelope {

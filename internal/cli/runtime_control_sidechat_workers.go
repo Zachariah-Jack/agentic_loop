@@ -11,7 +11,7 @@ import (
 	"orchestrator/internal/state"
 )
 
-const sideChatUnavailableMessage = "side chat backend is not implemented in this slice; the message was recorded only and did not affect the active run"
+const sideChatAgentMessage = "side chat answered from observable runtime context only; it did not alter the active run"
 
 func sendSideChatMessage(ctx context.Context, inv Invocation, request control.SideChatRequest) (controlSideChatSendSnapshot, error) {
 	repoRoot, err := resolveRequestedRepoRoot(inv.RepoRoot, request.RepoPath)
@@ -47,11 +47,15 @@ func sendSideChatMessage(ctx context.Context, inv Invocation, request control.Si
 	}
 
 	runID := ""
+	var latestRun *state.Run
 	if run, found, err := store.LatestRun(ctx); err != nil {
 		return controlSideChatSendSnapshot{}, err
 	} else if found && strings.EqualFold(strings.TrimSpace(run.RepoPath), strings.TrimSpace(repoRoot)) {
 		runID = run.ID
+		runCopy := run
+		latestRun = &runCopy
 	}
+	reply := buildSideChatAgentReply(inv, latestRun, request.Message)
 
 	recorded, err := store.RecordSideChatMessage(ctx, state.CreateSideChatMessageParams{
 		RepoPath:        repoRoot,
@@ -59,27 +63,28 @@ func sendSideChatMessage(ctx context.Context, inv Invocation, request control.Si
 		Source:          "side_chat",
 		ContextPolicy:   strings.TrimSpace(request.ContextPolicy),
 		RawText:         request.Message,
-		BackendState:    "unavailable",
-		ResponseMessage: sideChatUnavailableMessage,
+		BackendState:    "context_agent",
+		ResponseMessage: reply,
 	})
 	if err != nil {
 		return controlSideChatSendSnapshot{}, err
 	}
 
 	emitEngineEvent(inv, "side_chat_message_recorded", map[string]any{
-		"repo_path":       repoRoot,
-		"run_id":          runID,
-		"side_chat_id":    recorded.ID,
-		"context_policy":  strings.TrimSpace(recorded.ContextPolicy),
-		"backend_state":   recorded.BackendState,
-		"message_preview": previewString(recorded.RawText, 240),
+		"repo_path":        repoRoot,
+		"run_id":           runID,
+		"side_chat_id":     recorded.ID,
+		"context_policy":   strings.TrimSpace(recorded.ContextPolicy),
+		"backend_state":    recorded.BackendState,
+		"message_preview":  previewString(recorded.RawText, 240),
+		"response_preview": previewString(recorded.ResponseMessage, 240),
 	})
 
 	entry := controlSideChatSnapshotFromState(recorded)
 	return controlSideChatSendSnapshot{
-		Available: false,
+		Available: true,
 		Stored:    true,
-		Message:   sideChatUnavailableMessage,
+		Message:   sideChatAgentMessage,
 		Entry:     &entry,
 	}, nil
 }
@@ -130,9 +135,44 @@ func listSideChatMessages(ctx context.Context, inv Invocation, request control.L
 		Items:     items,
 	}
 	if len(items) == 0 {
-		snapshot.Message = "no side chat messages are recorded yet; backend replies are still not implemented in this slice"
+		snapshot.Message = "no side chat conversation is recorded yet; Side Chat answers from observable runtime context and does not affect the active run"
 	}
 	return snapshot, nil
+}
+
+func buildSideChatAgentReply(inv Invocation, run *state.Run, question string) string {
+	question = strings.ToLower(strings.TrimSpace(question))
+	cfg := currentConfig(inv)
+	pieces := []string{
+		"Side Chat can see the current repo, latest run summary, model health/config status, timeout settings, and recent recorded activity. It does not change the run unless you explicitly promote a message to Control Chat or use a control button.",
+	}
+	if run == nil || strings.TrimSpace(run.ID) == "" {
+		pieces = append(pieces, fmt.Sprintf("Current repo: %s. No run is recorded yet for this repo.", inv.RepoRoot))
+	} else {
+		pieces = append(pieces, fmt.Sprintf("Current repo: %s.", inv.RepoRoot))
+		pieces = append(pieces, fmt.Sprintf("Latest run: %s (%s). Goal: %s.", run.ID, run.Status, previewString(run.Goal, 220)))
+		if strings.TrimSpace(run.LatestStopReason) != "" {
+			pieces = append(pieces, fmt.Sprintf("Latest stop reason: %s.", run.LatestStopReason))
+		}
+		if run.PlannerOperatorStatus != nil && strings.TrimSpace(run.PlannerOperatorStatus.OperatorMessage) != "" {
+			pieces = append(pieces, "Planner message: "+previewString(run.PlannerOperatorStatus.OperatorMessage, 360))
+		}
+		if strings.TrimSpace(run.ExecutorTurnStatus) != "" {
+			pieces = append(pieces, fmt.Sprintf("Executor turn status: %s.", run.ExecutorTurnStatus))
+		}
+		if strings.TrimSpace(run.ExecutorLastError) != "" {
+			pieces = append(pieces, "Latest executor error: "+previewString(run.ExecutorLastError, 360))
+		}
+	}
+	pieces = append(pieces, fmt.Sprintf("Timeouts: executor_turn_timeout=%s, human_wait_timeout=%s.", cfg.Timeouts.ExecutorTurnTimeout, cfg.Timeouts.HumanWaitTimeout))
+	pieces = append(pieces, "Permission mode: "+cfg.Permissions.Profile+".")
+	if strings.Contains(question, "safe stop") || strings.Contains(question, "stop") {
+		pieces = append(pieces, "If you want to stop the live loop, use Safe Stop in Control. Side Chat will not request it on its own.")
+	}
+	if strings.Contains(question, "planner") || strings.Contains(question, "reconsider") {
+		pieces = append(pieces, "To ask the planner to reconsider, promote a note to Control Chat so it is forwarded raw at the next safe point.")
+	}
+	return strings.Join(pieces, "\n\n")
 }
 
 func listWorkersForControl(ctx context.Context, inv Invocation, request control.ListWorkersRequest) (controlWorkerListSnapshot, error) {

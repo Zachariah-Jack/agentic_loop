@@ -91,7 +91,7 @@ func runBoundedCycle(
 		Store:                      store,
 		Journal:                    journalWriter,
 		Planner:                    &plannerClient,
-		Executor:                   &lazyExecutorClient{version: inv.Version},
+		Executor:                   ptrLazyExecutorClient(newLazyExecutorClient(inv.Version, currentConfig(inv))),
 		HumanInteractor:            newHumanInteractor(inv, journalWriter),
 		DriftWatcher:               orchestration.NewDeterministicDriftWatcher(),
 		DriftReviewOn:              currentConfig(inv).DriftWatcherEnabled,

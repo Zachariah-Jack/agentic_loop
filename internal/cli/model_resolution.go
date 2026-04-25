@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,12 +27,21 @@ var (
 	latestGPT5ModelsEndpoint = "https://api.openai.com/v1/models"
 	latestGPT5HTTPClient     = &http.Client{Timeout: latestGPT5LookupTimeout}
 	latestGPT5Lookup         = lookupLatestGPT5Model
+	plannerProbeEndpoint     = "https://api.openai.com/v1/responses"
+	plannerProbeHTTPClient   = &http.Client{Timeout: 15 * time.Second}
+	runPlannerModelProbe     = probePlannerModelWithResponses
 	latestGPT5Cache          = struct {
 		sync.Mutex
 		model   string
 		expires time.Time
 	}{}
 )
+
+type plannerModelProbeResult struct {
+	RequestedModel string
+	VerifiedModel  string
+	ResponseID     string
+}
 
 func resolvePlannerModel(inv Invocation) string {
 	if model := strings.TrimSpace(os.Getenv("OPENAI_MODEL")); model != "" {
@@ -119,6 +130,76 @@ func lookupOpenAIModel(ctx context.Context, apiKey string, model string) error {
 		return fmt.Errorf("models api returned HTTP %d for model %s", resp.StatusCode, model)
 	}
 	return nil
+}
+
+func probePlannerModelWithResponses(ctx context.Context, apiKey string, model string) (plannerModelProbeResult, error) {
+	apiKey = strings.TrimSpace(apiKey)
+	model = strings.TrimSpace(model)
+	if apiKey == "" {
+		return plannerModelProbeResult{}, errors.New("openai api key is required for planner model verification")
+	}
+	if model == "" {
+		return plannerModelProbeResult{}, errors.New("model is required for planner model verification")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	body, err := json.Marshal(map[string]any{
+		"model":             model,
+		"input":             "Reply with only OK.",
+		"max_output_tokens": 16,
+	})
+	if err != nil {
+		return plannerModelProbeResult{}, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, plannerProbeEndpoint, bytes.NewReader(body))
+	if err != nil {
+		return plannerModelProbeResult{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := plannerProbeHTTPClient.Do(req)
+	if err != nil {
+		return plannerModelProbeResult{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return plannerModelProbeResult{}, openAIHTTPError(resp, "responses api")
+	}
+
+	var envelope struct {
+		ID    string `json:"id"`
+		Model string `json:"model"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+		return plannerModelProbeResult{}, err
+	}
+	verified := strings.TrimSpace(envelope.Model)
+	if verified == "" {
+		verified = model
+	}
+	return plannerModelProbeResult{
+		RequestedModel: model,
+		VerifiedModel:  verified,
+		ResponseID:     strings.TrimSpace(envelope.ID),
+	}, nil
+}
+
+func openAIHTTPError(resp *http.Response, service string) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err == nil && strings.TrimSpace(envelope.Error.Message) != "" {
+		return fmt.Errorf("%s returned HTTP %d: %s", service, resp.StatusCode, strings.TrimSpace(envelope.Error.Message))
+	}
+	return fmt.Errorf("%s returned HTTP %d: %s", service, resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
 func lookupLatestGPT5Model(ctx context.Context, apiKey string) (string, error) {

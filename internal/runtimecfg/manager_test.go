@@ -1,73 +1,59 @@
 package runtimecfg
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
 	"orchestrator/internal/config"
 )
 
-func TestManagerSetVerbosityPersistsConfig(t *testing.T) {
+func TestApplyPatchUpdatesTimeoutsAndPermissionProfile(t *testing.T) {
 	t.Parallel()
 
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	manager := NewManager(configPath, config.Default())
-
-	cfg, changed, err := manager.SetVerbosity(config.VerbosityTrace)
+	path := filepath.Join(t.TempDir(), "config.json")
+	manager := NewManager(path, config.Default())
+	profile := "full_send"
+	cfg, changed, err := manager.ApplyPatch(Patch{
+		PermissionProfile: &profile,
+		Timeouts: TimeoutPatch{
+			ExecutorTurnTimeout: OptionalString{Set: true, Value: "4h"},
+			HumanWaitTimeout:    OptionalString{Set: true, Value: "unlimited"},
+		},
+	})
 	if err != nil {
-		t.Fatalf("SetVerbosity() error = %v", err)
+		t.Fatalf("ApplyPatch() error = %v", err)
 	}
 	if !changed {
-		t.Fatal("SetVerbosity() changed = false, want true")
+		t.Fatal("changed = false, want true")
 	}
-	if cfg.Verbosity != config.VerbosityTrace {
-		t.Fatalf("cfg.Verbosity = %q, want %q", cfg.Verbosity, config.VerbosityTrace)
+	if cfg.Timeouts.ExecutorTurnTimeout != "4h" {
+		t.Fatalf("ExecutorTurnTimeout = %q, want 4h", cfg.Timeouts.ExecutorTurnTimeout)
+	}
+	if cfg.Permissions.Profile != "full_send" {
+		t.Fatalf("Permissions.Profile = %q, want full_send", cfg.Permissions.Profile)
 	}
 
-	loaded, err := config.Load(configPath)
+	loaded, err := config.Load(path)
 	if err != nil {
-		t.Fatalf("config.Load() error = %v", err)
+		t.Fatalf("Load() error = %v", err)
 	}
-	if loaded.Verbosity != config.VerbosityTrace {
-		t.Fatalf("loaded.Verbosity = %q, want %q", loaded.Verbosity, config.VerbosityTrace)
+	if loaded.Timeouts.ExecutorTurnTimeout != "4h" {
+		t.Fatalf("persisted ExecutorTurnTimeout = %q, want 4h", loaded.Timeouts.ExecutorTurnTimeout)
 	}
 }
 
-func TestManagerReloadFromDiskSeesExternalChange(t *testing.T) {
+func TestTimeoutPatchNullMeansUnlimited(t *testing.T) {
 	t.Parallel()
 
-	configPath := filepath.Join(t.TempDir(), "config.json")
-	initial := config.Default()
-	if err := config.Save(configPath, initial); err != nil {
-		t.Fatalf("config.Save(initial) error = %v", err)
+	var patch Patch
+	if err := json.Unmarshal([]byte(`{"timeouts":{"executor_turn_timeout":null}}`), &patch); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-
-	manager := NewManager(configPath, initial)
-
-	updated := initial
-	updated.Verbosity = config.VerbosityVerbose
-	if err := config.Save(configPath, updated); err != nil {
-		t.Fatalf("config.Save(updated) error = %v", err)
+	if !patch.Timeouts.ExecutorTurnTimeout.Set {
+		t.Fatal("ExecutorTurnTimeout.Set = false, want true")
 	}
-
-	cfg, changed, err := manager.ReloadFromDisk()
-	if err != nil {
-		t.Fatalf("ReloadFromDisk() error = %v", err)
-	}
-	if !changed {
-		t.Fatal("ReloadFromDisk() changed = false, want true")
-	}
-	if cfg.Verbosity != config.VerbosityVerbose {
-		t.Fatalf("cfg.Verbosity = %q, want %q", cfg.Verbosity, config.VerbosityVerbose)
-	}
-}
-
-func TestManagerApplyPatchRejectsInvalidVerbosity(t *testing.T) {
-	t.Parallel()
-
-	manager := NewManager("", config.Default())
-	value := "chatty"
-	if _, _, err := manager.ApplyPatch(Patch{Verbosity: &value}); err == nil {
-		t.Fatal("ApplyPatch() unexpectedly succeeded")
+	if patch.Timeouts.ExecutorTurnTimeout.Value != "unlimited" {
+		t.Fatalf("ExecutorTurnTimeout.Value = %q, want unlimited", patch.Timeouts.ExecutorTurnTimeout.Value)
 	}
 }

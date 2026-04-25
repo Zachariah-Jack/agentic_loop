@@ -43,6 +43,8 @@ Implemented in the engine now:
 
 - `start_run`
 - `continue_run`
+- `get_active_run_guard`
+- `recover_stale_run`
 - `get_status_snapshot`
 - `test_planner_model`
 - `test_executor_model` / `test_codex_config`
@@ -61,10 +63,10 @@ Implemented in the engine now:
 - `list_repo_tree`
 - `open_repo_file`
 - `get_runtime_config`
-- `set_runtime_config` for verbosity-related fields only
+- `set_runtime_config` for verbosity, runtime timeouts, permission profile, and update settings
 - `inject_control_message`
 - `list_control_messages`
-- `send_side_chat_message` as a truthful recorded-only stub
+- `send_side_chat_message` as a non-interfering context-agent message
 - `list_side_chat_messages`
 - `capture_dogfood_issue`
 - `list_dogfood_issues`
@@ -80,6 +82,9 @@ Implemented engine behavior in this slice:
 - durable pending-action state
 - async control-server-launched foreground run loops for `start_run` and `continue_run`
 - a process-local active-run guard that rejects overlapping GUI-launched unattended loops for the same control server
+- a durable active-run guard file for GUI-launched loops so a run left active by a dead previous backend can be detected and mechanically recovered
+- `recover_stale_run`, which clears stale active-run guards without deleting run history/artifacts or changing the run's planner/executor outcome
+- SQLite busy hardening for common state reads: busy timeout, WAL mode, bounded retry, and a plain `state_database_locked` error when lock contention persists
 - durable control-message queue
 - safe-point intervention routing that packages raw control messages plus pending action context into the next planner turn
 - live planner-safe operator-status fields on the current runtime path
@@ -108,6 +113,11 @@ Implemented on top of the protocol now:
 - protocol-backed control-message injection
 - protocol-backed safe-stop and verbosity controls
 - practical shell-dogfooding behavior on top of the same protocol: local session persistence, reconnect/rehydration, inline error reporting, and a one-command startup helper
+- model-health normalization across status snapshots and latest probe results, so newer successful component probes clear older stale component errors while newer failures remain blocking
+- backend identity fields in status snapshots for stale-process detection: PID, start time, binary path/mtime, version, revision, build time, repo root, and stale restart recommendation
+- dogfood-owned backend metadata and cleanup in the startup helper; owned stale processes and proven owned backend listener process trees for the same repo/address are stopped automatically, while unknown processes are reported with PID/path/command line and left alone
+- shell recovery over the same protocol: `Recover Backend / Unlock Repo` calls `recover_stale_run` when a stale active-run guard is present, restarts only dogfood-owned backend processes when needed after verifying the port is clear, reconnects, reruns health checks, and refreshes panels
+- dogfood repo binding: the startup helper launches the backend from the selected target repo, verifies `get_status_snapshot.runtime.repo_root` matches `-RepoPath`, and passes the expected repo path to the shell; the shell treats expected/actual repo mismatch as a mechanical `Wrong Repo Backend` state and disables Start/Continue until recovery restarts the backend for the target repo
 
 Not implemented yet:
 
@@ -141,6 +151,14 @@ Not implemented yet:
 }
 ```
 
+For quick local PowerShell probes, the control endpoint also accepts a minimal action-only envelope and treats missing `type` as `"request"` and missing `payload` as `{}`:
+
+```json
+{
+  "action": "test_executor_model"
+}
+```
+
 ### Success response
 
 ```json
@@ -165,6 +183,33 @@ Not implemented yet:
   }
 }
 ```
+
+Common dogfood recovery error:
+
+```json
+{
+  "type": "response",
+  "ok": false,
+  "error": {
+    "code": "state_database_locked",
+    "message": "state database is temporarily locked by another orchestrator process; retry after recovery or restart the owned backend"
+  }
+}
+```
+
+The shell should show this as a recovery problem, not as a raw SQLite crash. It should recommend `Recover Backend / Unlock Repo` for dogfood-owned launches and must not kill unknown processes automatically.
+
+If dogfood backend cleanup cannot clear the port, startup/recovery must report a diagnostic block instead of a vague failure:
+
+- attempted owned PID
+- attempted process path and command line
+- kill methods used, including `taskkill /T /F` on Windows
+- current port-holder PID/path/command line
+- whether the current holder matches dogfood ownership metadata
+- whether the current holder is different from the attempted PID
+- the next safe action
+
+Normal dogfood launches start `dist\orchestrator.exe` directly so ownership metadata tracks the actual backend process rather than a hidden PowerShell wrapper. Unknown port holders are still protected from automatic termination.
 
 ### Event
 
@@ -207,6 +252,62 @@ Response payload:
 - `repo_path`
 - `started_at`
 - operator message
+
+### `get_active_run_guard`
+
+Purpose:
+
+- inspect whether the repo has a durable active-run guard created by a GUI/control-server-launched run loop
+- distinguish current-backend active runs from stale guards left by a previous backend process/session
+
+Payload:
+
+```json
+{}
+```
+
+Response payload includes:
+
+- `present`
+- `run_id`
+- `action`
+- `status`
+- `repo_path`
+- `backend_pid`
+- `backend_started_at`
+- `session_id`
+- `current_backend`
+- `stale`
+- `stale_reason`
+- `message`
+
+### `recover_stale_run`
+
+Purpose:
+
+- mechanically recover from a stale active-run guard that blocks normal dogfood use
+- preserve run history, artifacts, and repo files
+- avoid pretending the planner completed or that executor work succeeded
+
+Payload:
+
+```json
+{
+  "run_id": "run_123",
+  "reason": "operator_recovery",
+  "force": true
+}
+```
+
+Behavior:
+
+- if the selected run is unfinished, preserves its status/checkpoint/history so a safe-pause `continue_existing_run` remains resumable
+- clears the matching stale active-run guard
+- emits `stale_run_recovered`
+- returns the refreshed next operator action, such as `continue_existing_run` for a resumable safe-pause run
+- refuses to recover a run actively owned by the current backend; request Safe Stop first instead
+
+This is recovery plumbing, not semantic completion. It must not mark `planner_complete`, delete artifacts, delete state history, or choose project direction.
 
 Current behavior:
 
@@ -260,7 +361,7 @@ Response payload:
 - `planner.configured_model`
 - `planner.requested_model`
 - `planner.resolved_model` when an alias resolves
-- `planner.verified_model` when the Models API confirms availability
+- `planner.verified_model` when the resolved/requested model completes the Responses API probe
 - `planner.verification_state`, such as `verified`, `missing_api_key`, `discovery_failed`, `invalid`, or `unavailable`
 - `planner.last_error` when verification fails
 - `planner.plain_english`
@@ -270,8 +371,10 @@ Response payload:
 Current behavior:
 
 - `gpt-5-latest` is an orchestrator planner-model alias that resolves through the OpenAI Models API to the newest available mainline GPT-5 model visible to the account
-- exact model ids are checked directly through the Models API
+- exact planner model ids below `gpt-5.4` are invalid for this product line
+- exact model ids, and resolved alias targets, are checked by a tiny Responses API call
 - if discovery or verification fails, the engine reports that truthfully and does not silently fall back to another model
+- the desktop shell auto-runs this check on connect/reconnect and before protocol Start Build / Continue Build preflight
 
 ### `test_executor_model` / `test_codex_config`
 
@@ -289,11 +392,17 @@ Payload:
 
 Response payload:
 
-- `executor.configured_model`, currently `external Codex configuration`
-- `executor.requested_model` when Codex reported or errored with a model id
+- `executor.configured_model`, currently the required executor model `gpt-5.5`
+- `executor.requested_model`
 - `executor.verification_state`, such as `launch_ready_model_not_verified`, `invalid`, `unavailable`, or `not_verified`
-- `executor.access_mode`, reflecting the current app-server execution policy the engine can see
-- `executor.effort`, currently `not reported` unless Codex exposes it
+- `executor.access_mode`, reflecting the required app-server execution policy
+- `executor.effort`
+- `executor.codex_executable_path`
+- `executor.codex_version`
+- `executor.codex_config_source`
+- `executor.codex_model_verified`
+- `executor.codex_permission_mode_verified`
+- `executor.codex_last_probe_error`
 - `executor.model_unavailable`
 - `executor.last_error`
 - `executor.plain_english`
@@ -301,9 +410,18 @@ Response payload:
 
 Current behavior:
 
-- the orchestrator does not silently change the Codex model
+- the orchestrator requires Codex executor model `gpt-5.5`
+- executor app-server turns request `model=gpt-5.5`, approval `never`, `danger-full-access`, and effort `xhigh`
+- `test_executor_model` / `test_codex_config` runs a real probe through the Codex command path visible to the control server:
+
+```powershell
+codex exec --model gpt-5.5 --sandbox danger-full-access -c 'approval_policy="never"' -c 'model_reasoning_effort="xhigh"' --cd <repo> "Reply with only OK."
+```
+
+- the orchestrator does not silently fall back to a weaker Codex model
 - if the latest executor failure says a model does not exist or the account lacks access, the status snapshot and test action mark executor model health as `invalid` and `blocking`
-- if no model-specific failure is known, the test can verify the Codex app-server launch path, but the exact external Codex model/effort may remain `not_verified`
+- if no probe has succeeded in the current process, Codex model/full-access remains `not_verified` or `launch_ready_model_not_verified`; operators should restart the control server after Codex updates and test again
+- after a newer successful executor probe, the control server and shell treat older run-level unavailable-model errors as stale for model-health gating; a newer executor run failure overrides that success again
 
 ### `pause_at_safe_point`
 
@@ -389,6 +507,7 @@ Behavior:
 - message is persisted raw
 - engine does not reinterpret it
 - message becomes planner input at the next safe point with pending action context
+- when the latest snapshot reports `ask_human.present=true`, the shell may queue the operator's answer with `source:"action_required_answer"` and `reason:"ask_human_answer"`, then call `continue_run` for that run; the answer remains raw data and the planner decides how to proceed
 
 ### `send_side_chat_message`
 
@@ -408,8 +527,12 @@ Payload:
 
 Behavior:
 
-- does not alter active run unless explicitly promoted later
-- current slice records the raw side-chat message durably, returns a truthful recorded-only stub response, and does not affect the active run
+- records the raw side-chat message durably and returns an assistant response generated from observable runtime context
+- does not call `inject_control_message`
+- does not set `set_stop_flag` / `stop_safe`
+- does not change pending actions, active-run guards, planner input, executor dispatch, or run state
+- can affect a live run only through a separate explicit future promotion action that routes through Control Chat / `inject_control_message`
+- does not expose hidden chain-of-thought or secrets
 
 ### `list_side_chat_messages`
 
@@ -429,7 +552,7 @@ Payload:
 Behavior:
 
 - returns the side-chat log recorded so far for this repo
-- current slice does not produce real side-chat assistant replies; recorded messages include a truthful backend-unavailable note
+- messages may include context-agent replies. Full LLM-backed tool use and automatic run steering are still out of scope.
 
 ### `capture_dogfood_issue`
 
@@ -576,31 +699,76 @@ Payload:
 }
 ```
 
-### `set_config`
+### `get_runtime_config` / `set_runtime_config`
 
 Purpose:
 
-- apply selected configuration updates
+- inspect or apply selected runtime configuration updates
 
 Payload:
 
 ```json
 {
-  "planner_model": "gpt-5-latest",
-  "side_chat_model": "gpt-5.4-mini",
-  "worker_concurrency_limit": 2,
-  "ntfy": {
-    "enabled": true,
-    "server_url": "https://ntfy.example.com",
-    "topic": "orchestrator",
-    "auth_token_ref": "credential_store_key"
+  "verbosity": "verbose",
+  "permission_profile": "autonomous",
+  "timeouts": {
+    "planner_request_timeout": "2m",
+    "executor_idle_timeout": "unlimited",
+    "executor_turn_timeout": null,
+    "subagent_timeout": "unlimited",
+    "shell_command_timeout": "30m",
+    "install_timeout": "2h",
+    "human_wait_timeout": "unlimited"
+  },
+  "updates": {
+    "update_channel": "stable",
+    "auto_check_updates": true,
+    "auto_download_updates": false,
+    "auto_install_updates": false,
+    "ask_before_update": true,
+    "include_prereleases": false,
+    "update_check_interval": "24h"
   }
 }
 ```
 
-Config updates should become active at safe points, not by mutating an in-flight turn.
+Timeout fields accept finite Go-style durations such as `30m` or `2h`, plus `unlimited`, `no-limit`, `none`, or JSON `null` for no limit. `executor_turn_timeout` and `human_wait_timeout` default to unlimited.
 
-`gpt-5-latest` is the orchestrator's planner-model alias. Live OpenAI calls resolve it through the Models API to the newest available mainline versioned GPT-5 model visible to the account. Exact model ids still pin behavior. If discovery fails, the engine reports the failure; it does not silently fall back to an unverified model.
+Config updates are persisted immediately. They apply to future operations immediately. In-flight transports use them only where technically possible; otherwise the response/status should say they apply at the next operation or safe boundary.
+
+Permission profiles are mechanical policy labels and toggles:
+
+- `guided`
+- `balanced`
+- `autonomous`
+- `full_send`
+
+They do not grant the GUI semantic authority; planner/executor direction still flows through the existing planner/executor/control protocol boundaries.
+
+`gpt-5-latest` is the orchestrator's planner-model alias. Live OpenAI calls resolve it through the Models API to the newest available mainline versioned GPT-5 model visible to the account. Exact model ids still pin behavior. The `test_planner_model` action then verifies the resolved/requested model with a tiny Responses API call. If discovery or verification fails, the engine reports the failure; it does not silently fall back to an unverified model.
+
+### Update actions
+
+Actions:
+
+- `check_for_updates`
+- `get_update_status`
+- `get_update_changelog`
+- `skip_update`
+- `install_update`
+
+Update checks use GitHub Releases. The response includes current version/revision where available, latest version, release URL, changelog text, update availability, channel, and install support state.
+
+`install_update` is currently a truthful foundation action: it reports unsupported/not-yet-implemented unless a safe signed/checksummed Windows asset and staged install path are available. It must not pretend to replace a running executable.
+
+### Side Chat actions
+
+Actions:
+
+- `send_side_chat_message`
+- `list_side_chat_messages`
+
+Side Chat messages are persisted raw and answered by a non-interfering context-agent foundation that reads observable runtime context only. It does not set stop flags, queue control messages, alter pending actions, or change planner/executor flow. Future side-chat escalation must be an explicit audited control action.
 
 ### `get_status_snapshot`
 
@@ -621,6 +789,10 @@ Response should include:
 - repo/runtime readiness
 - latest run summary
 - run start/stop/elapsed-time fields when available
+- `build_time` with `Total Build Time`, current run time, current step label, and current step time
+- `timeouts` with the current runtime timeout values and unlimited state
+- `permissions` with the active autonomy profile/toggles
+- `update_status` with the current GitHub Releases update-check state
 - latest checkpoint
 - stop reason
 - pending action buffer
@@ -1020,6 +1192,44 @@ Suggested shape:
 
 ```json
 {
+  "backend": {
+    "pid": 1234,
+    "started_at": "2026-04-24T14:00:00Z",
+    "binary_path": "D:\\Projects\\agentic_loop\\dist\\orchestrator.exe",
+    "binary_modified_at": "2026-04-24T13:59:00Z",
+    "binary_version": "v1.0.1-dev",
+    "binary_revision": "abc123",
+    "binary_build_time": "2026-04-24T13:59:00Z",
+    "repo_root": "D:\\Projects\\target_repo",
+    "control_address": "http://127.0.0.1:44777",
+    "owner": "orchestrator-v2-dogfood",
+    "owner_session_id": "session_abc",
+    "owner_metadata_path": "D:\\Projects\\target_repo\\.orchestrator\\state\\dogfood-backend.json",
+    "stale": false,
+    "stale_reason": ""
+  },
+  "active_run_guard": {
+    "present": true,
+    "run_id": "run_123",
+    "action": "continue_run",
+    "status": "active",
+    "backend_pid": 1234,
+    "backend_started_at": "2026-04-24T14:00:00Z",
+    "session_id": "session_abc",
+    "currently_processing": true,
+    "waiting_at_safe_point": false,
+    "last_progress_at": "2026-04-24T14:03:00Z",
+    "current_backend": true,
+    "stale": false,
+    "stale_reason": "",
+    "message": "a control-server-launched run loop is currently active"
+  },
+  "stop_flag": {
+    "present": false,
+    "path": "D:\\Projects\\target_repo\\.orchestrator\\state\\auto.stop",
+    "applies_at": "next_safe_point",
+    "reason": ""
+  },
   "runtime": {
     "engine_mode": "headless_or_console_attached",
     "repo_ready": true,
@@ -1037,8 +1247,22 @@ Suggested shape:
     "elapsed_seconds": 872,
     "elapsed_label": "stopped after 14:32",
     "executor_last_error": "",
-    "latest_checkpoint": {},
-    "next_operator_action": "continue_existing_run"
+    "executor_thread_id": "",
+    "executor_turn_id": "",
+    "executor_turn_status": "",
+    "latest_checkpoint": {
+      "sequence": 3,
+      "stage": "planner",
+      "label": "planner_turn_completed",
+      "safe_pause": true
+    },
+    "latest_planner_outcome": "execute",
+    "next_operator_action": "continue_existing_run",
+    "activity_state": "ready_to_dispatch",
+    "activity_message": "Planner selected the next code task. Executor has not started yet. Click Continue Build to dispatch it.",
+    "actively_processing": false,
+    "waiting_at_safe_point": true,
+    "execute_ready": true
   },
   "model_health": {
     "planner": {
@@ -1047,14 +1271,20 @@ Suggested shape:
       "verification_state": "not_verified"
     },
     "executor": {
-      "configured_model": "external Codex configuration",
-      "requested_model": "not reported yet",
+      "configured_model": "gpt-5.5",
+      "requested_model": "gpt-5.5",
       "verification_state": "not_verified",
-      "access_mode": "workspace-write sandbox, approval on-request"
+      "access_mode": "danger-full-access sandbox, approval never",
+      "effort": "xhigh",
+      "codex_executable_path": "C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd",
+      "codex_version": "codex-cli 0.124.0",
+      "codex_config_source": "C:\\Users\\me\\.codex\\config.toml",
+      "codex_model_verified": false,
+      "codex_permission_mode_verified": false
     },
-    "needs_attention": false,
+    "needs_attention": true,
     "blocking": false,
-    "message": "Model health has not been fully verified."
+    "message": "Model or Codex configuration needs attention before unattended operation."
   },
   "planner_status": {
     "operator_message": "Implementing input handling next.",
@@ -1065,12 +1295,31 @@ Suggested shape:
     "progress_confidence": "medium",
     "progress_basis": "scene exists; input, collisions, and scoring remain"
   },
+  "ask_human": {
+    "present": true,
+    "run_id": "run_123",
+    "question": "Has the Codex model/access issue been fixed?",
+    "blocker": "Codex was blocked by a model/access issue.",
+    "action_summary": "waiting for human confirmation",
+    "planner_outcome": "ask_human",
+    "response_id": "resp_123",
+    "source": "human.question.presented",
+    "updated_at": "2026-04-24T14:14:32Z",
+    "message": "Type a raw answer; the shell queues it through inject_control_message and resumes with continue_run."
+  },
   "pending_action": {},
   "workers": [],
   "approvals": [],
   "artifacts": []
 }
 ```
+
+Loop-state fields are mechanical, not semantic project judgments:
+
+- `actively_processing=true` means the control server is currently advancing a run loop or an executor/planner turn is active.
+- `waiting_at_safe_point=true` means the run is paused at a durable safe checkpoint and no executor turn is active.
+- `execute_ready=true` means the latest planner outcome is `execute`, the checkpoint is a planner safe pause, and Codex has not started the executor turn yet. The GUI should show `Ready to Continue` / `Continue Build / Dispatch Executor`, not `Running`.
+- Active-run guard presence alone must not be rendered as `Running`; consumers should use `active_run_guard.currently_processing`.
 
 ## Security And Secret Handling
 
@@ -1095,7 +1344,7 @@ Implement the protocol skeleton before the GUI:
 2. `get_status_snapshot`
 3. `get_activity_stream`
 4. `set_verbosity`
-5. `set_config` applied at safe points
+5. `set_runtime_config` applied at safe points
 6. `inject_control_message`
 7. `get_pending_action`
 

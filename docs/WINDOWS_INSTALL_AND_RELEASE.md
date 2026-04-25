@@ -48,6 +48,31 @@ The portable folder includes:
 - `REAL_APP_WORKFLOW.md`
 - `build-metadata.txt`
 
+## GitHub Release And Update Metadata
+
+The first updater foundation uses GitHub Releases as the default source of update metadata. The app can check releases, show the latest version, show/copy release notes, and report whether an update is available.
+
+Current update commands:
+
+```powershell
+orchestrator update status
+orchestrator update check
+orchestrator update changelog
+orchestrator update install
+```
+
+`install` is intentionally truthful in this foundation slice: it reports unsupported until Windows release assets are signed or checksummed and a safe staged install path is available. It must not pretend to replace a running executable.
+
+When publishing a release:
+
+- tag the release with a semver-style version such as `v1.1.0`
+- attach a Windows portable zip named like `orchestrator_<version>_windows_amd64_portable.zip`
+- include release notes suitable for display in the GUI Updates card
+- include checksums when available, preferably a `SHA256SUMS` file
+- do not publish secrets, local runtime state, logs, or target-repo artifacts
+
+The GUI Updates card respects update settings from runtime config: channel, prerelease inclusion, auto-check, auto-download, auto-install, ask-before-update, skipped versions, and check interval. Guided mode should ask before installing updates. Full Send may eventually install automatically only when `auto_install_updates` is enabled and no admin elevation/reboot is needed.
+
 ## Build The Windows Installer
 
 From the repo root:

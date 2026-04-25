@@ -70,7 +70,16 @@ func runStatus(ctx context.Context, inv Invocation) error {
 	fmt.Fprintf(inv.Stdout, "  planner.model_verification: %s\n", modelHealth.Planner.VerificationState)
 	fmt.Fprintf(inv.Stdout, "  executor.model_verification: %s\n", modelHealth.Executor.VerificationState)
 	fmt.Fprintf(inv.Stdout, "  executor.model_request: %s\n", valueOrUnavailable(modelHealth.Executor.RequestedModel))
+	fmt.Fprintf(inv.Stdout, "  executor.codex_path: %s\n", valueOrUnavailable(modelHealth.Executor.CodexExecutablePath))
+	fmt.Fprintf(inv.Stdout, "  executor.codex_version: %s\n", valueOrUnavailable(modelHealth.Executor.CodexVersion))
+	fmt.Fprintf(inv.Stdout, "  executor.full_access_verified: %t\n", modelHealth.Executor.CodexPermissionModeVerified)
 	fmt.Fprintf(inv.Stdout, "  workers.concurrency_limit: %d\n", cfg.WorkerConcurrencyLimit)
+	fmt.Fprintf(inv.Stdout, "  permission.profile: %s\n", cfg.Permissions.Profile)
+	fmt.Fprintf(inv.Stdout, "  timeout.executor_turn_timeout: %s\n", cfg.Timeouts.ExecutorTurnTimeout)
+	fmt.Fprintf(inv.Stdout, "  timeout.human_wait_timeout: %s\n", cfg.Timeouts.HumanWaitTimeout)
+	fmt.Fprintf(inv.Stdout, "  timeout.install_timeout: %s\n", cfg.Timeouts.InstallTimeout)
+	fmt.Fprintf(inv.Stdout, "  updates.channel: %s\n", cfg.Updates.UpdateChannel)
+	fmt.Fprintf(inv.Stdout, "  updates.auto_check: %t\n", cfg.Updates.AutoCheckUpdates)
 	fmt.Fprintf(inv.Stdout, "  review.drift_watcher_enabled: %t\n", cfg.DriftWatcherEnabled)
 	fmt.Fprintf(inv.Stdout, "  plugins.enabled: %t\n", pluginSummary.Enabled)
 	fmt.Fprintf(inv.Stdout, "  plugins.loaded: %d\n", pluginSummary.Loaded)
@@ -125,6 +134,13 @@ func runStatus(ctx context.Context, inv Invocation) error {
 		}
 		fmt.Fprintf(inv.Stdout, "  runs.total: %d\n", stats.TotalRuns)
 		fmt.Fprintf(inv.Stdout, "  runs.resumable: %d\n", stats.ResumableRuns)
+		if buildTime, found, err := store.GetBuildTime(ctx, inv.RepoRoot); err == nil {
+			buildTimeSnapshot := buildBuildTimeSnapshot(buildTime, found, false, time.Now().UTC())
+			fmt.Fprintf(inv.Stdout, "  total_build_time: %s\n", buildTimeSnapshot.TotalBuildTimeLabel)
+			fmt.Fprintf(inv.Stdout, "  current_step: %s\n", valueOrUnavailable(buildTimeSnapshot.CurrentStepLabel))
+		} else {
+			return err
+		}
 
 		latestRun, latestFound, err = store.LatestRun(ctx)
 		if err != nil {
@@ -181,6 +197,10 @@ func runStatus(ctx context.Context, inv Invocation) error {
 			fmt.Fprintf(inv.Stdout, "  executor.model_verification: %s\n", valueOrUnavailable(modelHealth.Executor.VerificationState))
 			fmt.Fprintf(inv.Stdout, "  executor.model_requested: %s\n", valueOrUnavailable(modelHealth.Executor.RequestedModel))
 			fmt.Fprintf(inv.Stdout, "  executor.model_error: %s\n", valueOrUnavailable(modelHealth.Executor.LastError))
+			fmt.Fprintf(inv.Stdout, "  executor.codex_path: %s\n", valueOrUnavailable(modelHealth.Executor.CodexExecutablePath))
+			fmt.Fprintf(inv.Stdout, "  executor.codex_version: %s\n", valueOrUnavailable(modelHealth.Executor.CodexVersion))
+			fmt.Fprintf(inv.Stdout, "  executor.codex_config_source: %s\n", valueOrUnavailable(modelHealth.Executor.CodexConfigSource))
+			fmt.Fprintf(inv.Stdout, "  executor.full_access_verified: %t\n", modelHealth.Executor.CodexPermissionModeVerified)
 			writeOperatorStatus(inv.Stdout, verbosity, "  planner.", operatorStatusFromState(latestRun.PlannerOperatorStatus))
 			integrationArtifactPath := latestIntegrationArtifactPathFromEvents(latestEvents)
 			integrationApplyStatus, integrationApplyArtifactPath := latestIntegrationApplySummaryFromEvents(latestEvents)

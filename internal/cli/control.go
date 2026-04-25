@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -82,6 +83,7 @@ func serveControlServer(ctx context.Context, inv Invocation, addr string, ready 
 	}
 
 	baseURL := "http://" + listener.Addr().String()
+	_ = os.Setenv("ORCHESTRATOR_CONTROL_ADDR", baseURL)
 	if ready != nil {
 		ready(baseURL)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -148,9 +149,10 @@ func (m *controlRunManager) ContinueRun(ctx context.Context, inv Invocation, req
 }
 
 type controlRunReservation struct {
-	runID   string
-	action  string
-	started time.Time
+	runID     string
+	action    string
+	started   time.Time
+	sessionID string
 }
 
 func (m *controlRunManager) reserve(action string, runID string) (controlRunReservation, error) {
@@ -162,9 +164,10 @@ func (m *controlRunManager) reserve(action string, runID string) (controlRunRese
 	}
 
 	reservation := controlRunReservation{
-		runID:   strings.TrimSpace(runID),
-		action:  strings.TrimSpace(action),
-		started: time.Now().UTC(),
+		runID:     strings.TrimSpace(runID),
+		action:    strings.TrimSpace(action),
+		started:   time.Now().UTC(),
+		sessionID: newControlSessionID(),
 	}
 	m.active = true
 	m.activeID = reservation.runID
@@ -204,7 +207,13 @@ func (m *controlRunManager) runForeground(
 	run state.Run,
 	mode foregroundLoopMode,
 ) {
+	_ = writeActiveRunGuard(inv, reservation, run, "active")
+	_ = store.StartBuildSession(context.Background(), run.RepoPath, run.ID, buildStepLabelForAction(reservation.action), reservation.started)
 	defer m.finish(reservation)
+	defer removeActiveRunGuard(inv, reservation)
+	defer func() {
+		_ = store.EndBuildSession(context.Background(), run.RepoPath, "loop stopped", time.Now().UTC())
+	}()
 	defer store.Close()
 
 	if err := executeForegroundLoop(context.Background(), inv, store, journalWriter, run, mode); err != nil {
@@ -212,6 +221,17 @@ func (m *controlRunManager) runForeground(
 			"action": reservation.action,
 			"error":  err.Error(),
 		}))
+	}
+}
+
+func buildStepLabelForAction(action string) string {
+	switch strings.TrimSpace(action) {
+	case "start_run":
+		return "Starting build loop"
+	case "continue_run":
+		return "Continuing build loop"
+	default:
+		return "Orchestrator loop active"
 	}
 }
 
@@ -227,6 +247,20 @@ func (m *controlRunManager) applyActiveStatus(snapshot controlStatusSnapshot) co
 		return snapshot
 	}
 
+	snapshot.ActiveRunGuard.Present = true
+	snapshot.ActiveRunGuard.RunID = activeID
+	snapshot.ActiveRunGuard.Action = action
+	snapshot.ActiveRunGuard.Status = "active"
+	snapshot.ActiveRunGuard.BackendPID = os.Getpid()
+	snapshot.ActiveRunGuard.BackendStartedAt = formatSnapshotTime(controlBackendStartedAt)
+	snapshot.ActiveRunGuard.StartedAt = formatSnapshotTime(started)
+	snapshot.ActiveRunGuard.CurrentlyProcessing = true
+	snapshot.ActiveRunGuard.WaitingAtSafePoint = false
+	snapshot.ActiveRunGuard.LastProgressAt = formatSnapshotTime(started)
+	snapshot.ActiveRunGuard.CurrentBackend = true
+	snapshot.ActiveRunGuard.Stale = false
+	snapshot.ActiveRunGuard.StaleReason = ""
+	snapshot.ActiveRunGuard.Message = "a control-server-launched run loop is currently active"
 	snapshot.Run.Status = "active"
 	snapshot.Run.StopReason = ""
 	snapshot.Run.StartedAt = formatSnapshotTime(started)
@@ -234,12 +268,31 @@ func (m *controlRunManager) applyActiveStatus(snapshot controlStatusSnapshot) co
 	snapshot.Run.ElapsedSeconds = int64(time.Since(started).Seconds())
 	snapshot.Run.ElapsedLabel = "running for " + formatHumanDuration(time.Since(started))
 	snapshot.Run.NextOperatorAction = "watch_progress"
+	snapshot.Run.ActivityState = "running"
+	snapshot.Run.ActivityMessage = "The control server is actively advancing this run."
+	snapshot.Run.ActivelyProcessing = true
+	snapshot.Run.WaitingAtSafePoint = false
+	snapshot.Run.ExecuteReady = false
 	snapshot.Run.Completed = false
 	snapshot.Run.Resumable = false
 	snapshot.PendingAction.Message = strings.TrimSpace(snapshot.PendingAction.Message)
 	if snapshot.PendingAction.Message == "" {
 		snapshot.PendingAction.Message = fmt.Sprintf("%s launched at %s is currently active", action, formatSnapshotTime(started))
 	}
+	elapsed := time.Since(started)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	total := time.Duration(snapshot.BuildTime.TotalBuildTimeMS)*time.Millisecond + elapsed
+	snapshot.BuildTime.TotalBuildTimeMS = int64(total / time.Millisecond)
+	snapshot.BuildTime.TotalBuildTimeLabel = formatHumanDuration(total)
+	snapshot.BuildTime.CurrentRunTimeMS = int64(elapsed / time.Millisecond)
+	snapshot.BuildTime.CurrentRunTimeLabel = formatHumanDuration(elapsed)
+	snapshot.BuildTime.CurrentStepStartedAt = formatSnapshotTime(started)
+	snapshot.BuildTime.CurrentStepTimeMS = int64(elapsed / time.Millisecond)
+	snapshot.BuildTime.CurrentStepTimeLabel = formatHumanDuration(elapsed)
+	snapshot.BuildTime.CurrentStepLabel = "Orchestrator loop active"
+	snapshot.BuildTime.CurrentActiveSessionStart = formatSnapshotTime(started)
 	return snapshot
 }
 

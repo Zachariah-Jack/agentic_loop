@@ -136,6 +136,19 @@ func runDoctor(ctx context.Context, inv Invocation) error {
 			detail:  "present",
 		})
 	}
+	modelHealth := buildModelHealthSnapshot(ctx, inv, nil)
+	plannerModelLevel := "WARN"
+	if modelHealth.Planner.VerificationState == "invalid" {
+		plannerModelLevel = "FAIL"
+	} else if modelHealth.Planner.VerificationState == "verified" {
+		plannerModelLevel = "OK"
+	}
+	checks = append(checks, check{
+		section: "planner",
+		label:   "planner model",
+		level:   plannerModelLevel,
+		detail:  fmt.Sprintf("%s (%s)", valueOrUnavailable(modelHealth.Planner.ConfiguredModel), modelHealth.Planner.VerificationState),
+	})
 
 	cfgState := "missing"
 	if _, err := config.Load(inv.ConfigPath); err == nil {
@@ -238,6 +251,32 @@ func runDoctor(ctx context.Context, inv Invocation) error {
 			label:   "codex app-server",
 			level:   "OK",
 			detail:  launchPlan.Command,
+		})
+	}
+	executorModelLevel := "WARN"
+	if modelHealth.Executor.VerificationState == "invalid" || modelHealth.Executor.VerificationState == "unavailable" || modelHealth.Executor.ModelUnavailable {
+		executorModelLevel = "FAIL"
+	} else if modelHealth.Executor.VerificationState == "verified" {
+		executorModelLevel = "OK"
+	}
+	checks = append(checks, check{
+		section: "executor",
+		label:   "codex required model",
+		level:   executorModelLevel,
+		detail:  fmt.Sprintf("%s (%s)", valueOrUnavailable(modelHealth.Executor.RequestedModel), modelHealth.Executor.VerificationState),
+	})
+	checks = append(checks, check{
+		section: "executor",
+		label:   "codex access requirement",
+		level:   executorModelLevel,
+		detail:  fmt.Sprintf("%s, effort %s", valueOrUnavailable(modelHealth.Executor.AccessMode), valueOrUnavailable(modelHealth.Executor.Effort)),
+	})
+	if modelHealth.Executor.CodexExecutablePath != "" || modelHealth.Executor.CodexVersion != "" {
+		checks = append(checks, check{
+			section: "executor",
+			label:   "codex resolved path",
+			level:   executorModelLevel,
+			detail:  fmt.Sprintf("%s (%s)", valueOrUnavailable(modelHealth.Executor.CodexExecutablePath), valueOrUnavailable(modelHealth.Executor.CodexVersion)),
 		})
 	}
 

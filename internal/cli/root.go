@@ -75,7 +75,9 @@ func NewApp(opts Options) *App {
 		"resume":         newResumeCommand(),
 		"run":            newRunCommand(),
 		"setup":          newSetupCommand(),
+		"settings":       newSettingsCommand(),
 		"status":         newStatusCommand(),
+		"update":         newUpdateCommand(),
 		"version":        newVersionCommand(),
 		"workers":        newWorkersCommand(),
 	}

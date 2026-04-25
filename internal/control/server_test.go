@@ -131,3 +131,65 @@ func TestServerSetRuntimeConfigRejectsUnknownFields(t *testing.T) {
 		t.Fatalf("response missing invalid_payload\n%s", recorder.Body.String())
 	}
 }
+
+func TestServerSetRuntimeConfigAcceptsTimeoutPatch(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	server := Server{
+		Actions: ActionSet{
+			SetRuntimeConfig: func(_ context.Context, patch runtimecfg.Patch) (any, error) {
+				called = true
+				if !patch.Timeouts.ExecutorTurnTimeout.Set {
+					t.Fatal("ExecutorTurnTimeout.Set = false, want true")
+				}
+				return map[string]any{"ok": true}, nil
+			},
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v2/control", bytes.NewBufferString(`{
+		"id":"req_timeout",
+		"type":"request",
+		"action":"set_runtime_config",
+		"payload":{"timeouts":{"executor_turn_timeout":null,"human_wait_timeout":"unlimited"}}
+	}`))
+
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200\n%s", recorder.Code, recorder.Body.String())
+	}
+	if !called {
+		t.Fatal("SetRuntimeConfig handler was not called")
+	}
+}
+
+func TestServerRoutesUpdateActions(t *testing.T) {
+	t.Parallel()
+
+	server := Server{
+		Actions: ActionSet{
+			CheckForUpdates: func(_ context.Context, _ UpdateRequest) (any, error) {
+				return map[string]any{"checked": true}, nil
+			},
+			GetUpdateStatus: func(_ context.Context) (any, error) {
+				return map[string]any{"current_version": "v1.1.0-dev"}, nil
+			},
+			GetUpdateChangelog: func(_ context.Context, _ UpdateRequest) (any, error) {
+				return map[string]any{"changelog": "changes"}, nil
+			},
+		},
+	}
+	for _, action := range []string{"check_for_updates", "get_update_status", "get_update_changelog"} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v2/control", bytes.NewBufferString(`{"type":"request","action":"`+action+`","payload":{}}`))
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status code = %d, want 200\n%s", action, recorder.Code, recorder.Body.String())
+		}
+		if strings.Contains(recorder.Body.String(), "unsupported_action") {
+			t.Fatalf("%s returned unsupported_action\n%s", action, recorder.Body.String())
+		}
+	}
+}

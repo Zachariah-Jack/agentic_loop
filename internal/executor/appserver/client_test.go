@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"orchestrator/internal/config"
 	"orchestrator/internal/executor"
 )
 
@@ -29,7 +30,7 @@ func TestDeriveCodexJSPath(t *testing.T) {
 func TestBuildThreadStartParams(t *testing.T) {
 	t.Parallel()
 
-	params := buildThreadStartParams(`D:\repo`, "read-only", probeInstructions, "never")
+	params := buildThreadStartParams(`D:\repo`, "read-only", probeInstructions, "never", "")
 	if params["cwd"] != `D:\repo` {
 		t.Fatalf("cwd = %v, want repo path", params["cwd"])
 	}
@@ -46,12 +47,18 @@ func TestBuildThreadStartParams(t *testing.T) {
 	}
 }
 
-func TestBuildThreadStartParamsWorkspaceWrite(t *testing.T) {
+func TestBuildThreadStartParamsAutonomousExecute(t *testing.T) {
 	t.Parallel()
 
-	params := buildThreadStartParams(`D:\repo`, "workspace-write", executeInstructions, "on-request")
-	if params["sandbox"] != "workspace-write" {
-		t.Fatalf("sandbox = %v, want workspace-write", params["sandbox"])
+	params := buildThreadStartParams(`D:\repo`, config.RequiredCodexSandboxMode, executeInstructions, config.RequiredCodexApprovalPolicy, config.RequiredCodexExecutorModel)
+	if params["sandbox"] != config.RequiredCodexSandboxMode {
+		t.Fatalf("sandbox = %v, want %s", params["sandbox"], config.RequiredCodexSandboxMode)
+	}
+	if params["approvalPolicy"] != config.RequiredCodexApprovalPolicy {
+		t.Fatalf("approvalPolicy = %v, want %s", params["approvalPolicy"], config.RequiredCodexApprovalPolicy)
+	}
+	if params["model"] != config.RequiredCodexExecutorModel {
+		t.Fatalf("model = %v, want %s", params["model"], config.RequiredCodexExecutorModel)
 	}
 
 	instructions, _ := params["developerInstructions"].(string)
@@ -63,7 +70,7 @@ func TestBuildThreadStartParamsWorkspaceWrite(t *testing.T) {
 func TestBuildTurnStartParams(t *testing.T) {
 	t.Parallel()
 
-	params := buildTurnStartParams("thr_123", `D:\repo`, "Reply with ok.", readOnlySandboxPolicy(), "never")
+	params := buildTurnStartParams("thr_123", `D:\repo`, "Reply with ok.", readOnlySandboxPolicy(), "never", "", "")
 	if params["threadId"] != "thr_123" {
 		t.Fatalf("threadId = %v, want thr_123", params["threadId"])
 	}
@@ -85,19 +92,25 @@ func TestBuildTurnStartParams(t *testing.T) {
 	}
 }
 
-func TestBuildTurnStartParamsWorkspaceWrite(t *testing.T) {
+func TestBuildTurnStartParamsAutonomousExecute(t *testing.T) {
 	t.Parallel()
 
-	params := buildTurnStartParams("thr_123", `D:\repo`, "Implement the bounded slice.", workspaceWriteSandboxPolicy(), "on-request")
+	params := buildTurnStartParams("thr_123", `D:\repo`, "Implement the bounded slice.", dangerFullAccessSandboxPolicy(), config.RequiredCodexApprovalPolicy, config.RequiredCodexExecutorModel, config.RequiredCodexReasoningEffort)
 	sandbox, ok := params["sandboxPolicy"].(map[string]any)
 	if !ok {
 		t.Fatalf("sandboxPolicy = %#v, want map", params["sandboxPolicy"])
 	}
-	if sandbox["type"] != "workspaceWrite" {
-		t.Fatalf("sandboxPolicy.type = %v, want workspaceWrite", sandbox["type"])
+	if sandbox["type"] != config.RequiredCodexTurnSandboxPolicy {
+		t.Fatalf("sandboxPolicy.type = %v, want %s", sandbox["type"], config.RequiredCodexTurnSandboxPolicy)
 	}
-	if sandbox["networkAccess"] != false {
-		t.Fatalf("sandboxPolicy.networkAccess = %v, want false", sandbox["networkAccess"])
+	if params["approvalPolicy"] != config.RequiredCodexApprovalPolicy {
+		t.Fatalf("approvalPolicy = %v, want %s", params["approvalPolicy"], config.RequiredCodexApprovalPolicy)
+	}
+	if params["model"] != config.RequiredCodexExecutorModel {
+		t.Fatalf("model = %v, want %s", params["model"], config.RequiredCodexExecutorModel)
+	}
+	if params["effort"] != config.RequiredCodexReasoningEffort {
+		t.Fatalf("effort = %v, want %s", params["effort"], config.RequiredCodexReasoningEffort)
 	}
 }
 
@@ -228,7 +241,7 @@ func TestTurnTimeoutUsesExecuteDefault(t *testing.T) {
 	client := Client{}
 	timeout := client.turnTimeout(turnMode{waitTimeout: defaultExecuteTimeout})
 	if timeout != defaultExecuteTimeout {
-		t.Fatalf("turnTimeout() = %s, want %s", timeout, defaultExecuteTimeout)
+		t.Fatalf("turnTimeout() = %v, want %v", timeout, defaultExecuteTimeout)
 	}
 }
 

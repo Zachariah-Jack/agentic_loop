@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"orchestrator/internal/config"
 	"orchestrator/internal/executor"
 )
 
@@ -27,14 +28,17 @@ const (
 	defaultClientTitle = "Orchestrator CLI"
 
 	defaultProbeTimeout   = 2 * time.Minute
-	defaultExecuteTimeout = 20 * time.Minute
+	defaultExecuteTimeout = 0
 	probeInstructions     = "You are an executor probe. Operate read-only. Do not modify files, apply patches, create commits, or run mutating commands. Inspect and report only."
 	executeInstructions   = "You are the primary executor for the orchestrator. Perform only the bounded task provided in the current turn. Do not choose a new task and do not decide whether the overall run is complete."
 )
 
 type LaunchPlan struct {
-	Command string
-	Args    []string
+	Command     string
+	Args        []string
+	CodexPath   string
+	NodePath    string
+	CodexJSPath string
 }
 
 type Client struct {
@@ -70,15 +74,21 @@ type initResponse struct {
 }
 
 type threadStartResponse struct {
-	Thread        threadRef `json:"thread"`
-	Model         string    `json:"model"`
-	ModelProvider string    `json:"modelProvider"`
+	Thread          threadRef       `json:"thread"`
+	Model           string          `json:"model"`
+	ModelProvider   string          `json:"modelProvider"`
+	ReasoningEffort string          `json:"reasoningEffort"`
+	ApprovalPolicy  string          `json:"approvalPolicy"`
+	Sandbox         json.RawMessage `json:"sandbox"`
 }
 
 type threadResumeResponse struct {
-	Thread        threadState `json:"thread"`
-	Model         string      `json:"model"`
-	ModelProvider string      `json:"modelProvider"`
+	Thread          threadState     `json:"thread"`
+	Model           string          `json:"model"`
+	ModelProvider   string          `json:"modelProvider"`
+	ReasoningEffort string          `json:"reasoningEffort"`
+	ApprovalPolicy  string          `json:"approvalPolicy"`
+	Sandbox         json.RawMessage `json:"sandbox"`
 }
 
 type threadRef struct {
@@ -194,6 +204,8 @@ type turnMode struct {
 	threadInstructions string
 	turnSandboxPolicy  map[string]any
 	approvalPolicy     string
+	model              string
+	effort             string
 	waitTimeout        time.Duration
 }
 
@@ -230,8 +242,11 @@ func ResolveLaunchPlan() (LaunchPlan, error) {
 		}
 
 		return LaunchPlan{
-			Command: nodePath,
-			Args:    []string{codexJS, "app-server", "--listen", "stdio://"},
+			Command:     nodePath,
+			Args:        []string{codexJS, "app-server", "--listen", "stdio://"},
+			CodexPath:   codexPath,
+			NodePath:    nodePath,
+			CodexJSPath: codexJS,
 		}, nil
 	}
 
@@ -241,8 +256,9 @@ func ResolveLaunchPlan() (LaunchPlan, error) {
 	}
 
 	return LaunchPlan{
-		Command: codexPath,
-		Args:    []string{"app-server", "--listen", "stdio://"},
+		Command:   codexPath,
+		Args:      []string{"app-server", "--listen", "stdio://"},
+		CodexPath: codexPath,
 	}, nil
 }
 
@@ -262,10 +278,12 @@ func (c Client) Probe(ctx context.Context, req executor.ProbeRequest) (executor.
 
 func (c Client) Execute(ctx context.Context, req executor.TurnRequest) (executor.TurnResult, error) {
 	return c.runTurn(ctx, req, turnMode{
-		threadSandbox:      "workspace-write",
+		threadSandbox:      config.RequiredCodexSandboxMode,
 		threadInstructions: executeInstructions,
-		turnSandboxPolicy:  workspaceWriteSandboxPolicy(),
-		approvalPolicy:     "on-request",
+		turnSandboxPolicy:  dangerFullAccessSandboxPolicy(),
+		approvalPolicy:     config.RequiredCodexApprovalPolicy,
+		model:              config.RequiredCodexExecutorModel,
+		effort:             config.RequiredCodexReasoningEffort,
 		waitTimeout:        defaultExecuteTimeout,
 	})
 }
@@ -288,8 +306,11 @@ func (c Client) runTurn(ctx context.Context, req executor.TurnRequest, mode turn
 
 	timeout := c.turnTimeout(mode)
 
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 
 	cmd := exec.CommandContext(ctx, c.LaunchPlan.Command, c.LaunchPlan.Args...)
 	cmd.Dir = req.RepoPath
@@ -366,10 +387,10 @@ func (c Client) runTurn(ctx context.Context, req executor.TurnRequest, mode turn
 	}
 
 	threadMethod := "thread/start"
-	threadParams := buildThreadStartParams(req.RepoPath, mode.threadSandbox, mode.threadInstructions, mode.approvalPolicy)
+	threadParams := buildThreadStartParams(req.RepoPath, mode.threadSandbox, mode.threadInstructions, mode.approvalPolicy, mode.model)
 	if acc.result.ThreadID != "" {
 		threadMethod = "thread/resume"
-		threadParams = buildThreadResumeParams(acc.result.ThreadID, req.RepoPath, mode.threadSandbox, mode.threadInstructions, mode.approvalPolicy)
+		threadParams = buildThreadResumeParams(acc.result.ThreadID, req.RepoPath, mode.threadSandbox, mode.threadInstructions, mode.approvalPolicy, mode.model)
 		acc.result.ResumedThread = true
 	}
 
@@ -427,7 +448,7 @@ func (c Client) runTurn(ctx context.Context, req executor.TurnRequest, mode turn
 		if err := sendMessage(sender, map[string]any{
 			"method": "turn/start",
 			"id":     turnRequestID,
-			"params": buildTurnStartParams(acc.result.ThreadID, req.RepoPath, req.Prompt, mode.turnSandboxPolicy, mode.approvalPolicy),
+			"params": buildTurnStartParams(acc.result.ThreadID, req.RepoPath, req.Prompt, mode.turnSandboxPolicy, mode.approvalPolicy, mode.model, mode.effort),
 		}); err != nil {
 			return acc.fail("turn_send", err.Error(), stderrBuf.String())
 		}
@@ -504,33 +525,38 @@ func (c Client) turnTimeout(mode turnMode) time.Duration {
 	if c.Timeout > 0 {
 		return c.Timeout
 	}
-	if mode.waitTimeout > 0 {
-		return mode.waitTimeout
-	}
-	return defaultProbeTimeout
+	return mode.waitTimeout
 }
 
-func buildThreadStartParams(repoPath string, sandbox string, developerInstructions string, approvalPolicy string) map[string]any {
-	return map[string]any{
+func buildThreadStartParams(repoPath string, sandbox string, developerInstructions string, approvalPolicy string, model string) map[string]any {
+	params := map[string]any{
 		"cwd":                   repoPath,
 		"approvalPolicy":        approvalPolicy,
 		"sandbox":               sandbox,
 		"developerInstructions": developerInstructions,
 	}
+	if strings.TrimSpace(model) != "" {
+		params["model"] = strings.TrimSpace(model)
+	}
+	return params
 }
 
-func buildThreadResumeParams(threadID string, repoPath string, sandbox string, developerInstructions string, approvalPolicy string) map[string]any {
-	return map[string]any{
+func buildThreadResumeParams(threadID string, repoPath string, sandbox string, developerInstructions string, approvalPolicy string, model string) map[string]any {
+	params := map[string]any{
 		"threadId":              threadID,
 		"cwd":                   repoPath,
 		"approvalPolicy":        approvalPolicy,
 		"sandbox":               sandbox,
 		"developerInstructions": developerInstructions,
 	}
+	if strings.TrimSpace(model) != "" {
+		params["model"] = strings.TrimSpace(model)
+	}
+	return params
 }
 
-func buildTurnStartParams(threadID string, repoPath string, prompt string, sandboxPolicy map[string]any, approvalPolicy string) map[string]any {
-	return map[string]any{
+func buildTurnStartParams(threadID string, repoPath string, prompt string, sandboxPolicy map[string]any, approvalPolicy string, model string, effort string) map[string]any {
+	params := map[string]any{
 		"threadId":       threadID,
 		"cwd":            repoPath,
 		"approvalPolicy": approvalPolicy,
@@ -542,6 +568,13 @@ func buildTurnStartParams(threadID string, repoPath string, prompt string, sandb
 		},
 		"sandboxPolicy": sandboxPolicy,
 	}
+	if strings.TrimSpace(model) != "" {
+		params["model"] = strings.TrimSpace(model)
+	}
+	if strings.TrimSpace(effort) != "" {
+		params["effort"] = strings.TrimSpace(effort)
+	}
+	return params
 }
 
 func readOnlySandboxPolicy() map[string]any {
@@ -557,6 +590,12 @@ func workspaceWriteSandboxPolicy() map[string]any {
 		"type":           "workspaceWrite",
 		"networkAccess":  false,
 		"readOnlyAccess": map[string]any{"type": "fullAccess"},
+	}
+}
+
+func dangerFullAccessSandboxPolicy() map[string]any {
+	return map[string]any{
+		"type": config.RequiredCodexTurnSandboxPolicy,
 	}
 }
 

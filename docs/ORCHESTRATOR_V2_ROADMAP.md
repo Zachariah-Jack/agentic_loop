@@ -1,6 +1,11 @@
 # ORCHESTRATOR V2 ROADMAP
 
-Status: Proposed phased V2 implementation roadmap
+Status: Proposed phased V2 implementation roadmap with several dogfood foundations now implemented
+
+Current implementation note:
+
+- The V2 shell/control stack now includes runtime-configurable timeouts, active-only Total Build Time tracking, a non-interfering Side Chat context-agent foundation, persisted permission/autonomy profile settings, and GitHub Releases update-check/changelog support.
+- Safe Windows self-install, the final LLM-backed side-chat tool/escalation backend, and broad permission-profile enforcement across every future installer/test/Git workflow remain staged follow-up work.
 
 ## Purpose
 
@@ -54,7 +59,7 @@ Goal:
 Deliver:
 
 - `set_verbosity`
-- `set_config`
+- `set_runtime_config`
 - safe-point reload behavior
 - durable journaling of config changes where relevant
 
@@ -150,7 +155,7 @@ Acceptance:
 
 Current implementation status:
 
-- the Electron proof shell now includes guided Home, protocol-backed Start/Continue, Action Required, Live Output with verbosity-aware filtering, model health visibility/test actions, elapsed-time display, Control Chat injection, safe stop, worker controls, artifacts/files, terminals, and dogfood notes
+- the Electron proof shell now includes guided Home, protocol-backed Start/Continue, Action Required, Live Output with verbosity-aware filtering, model health visibility/test actions plus auto-check/preflight normalization, backend identity/stale-backend detection, owned backend process-tree cleanup with port diagnostics, SQLite busy recovery messaging/retry, stale active-run recovery, elapsed-time display, Control Chat injection, safe stop, worker controls, artifacts/files, terminals, and dogfood notes
 - full side-chat backend, worker-specific approval UI, packaged installer polish, and final desktop-console polish remain later phases
 
 ### Phase 8: Terminal Tabs

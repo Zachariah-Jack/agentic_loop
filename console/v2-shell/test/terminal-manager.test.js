@@ -110,3 +110,20 @@ test("terminal manager can clear, stop, and close individual sessions", async ()
   assert.equal(snapshot.count, 1);
   assert.equal(snapshot.active_session_id, "terminal_2");
 });
+
+test("terminal manager shutdown is idempotent", async () => {
+  const { children, spawnImpl } = fakeSpawnFactory();
+  const manager = createTerminalManager({ spawnImpl, maxBufferChars: 1024 });
+
+  manager.start({ cwd: "D:/Projects/agentic_loop" });
+  await flushTicks();
+  assert.equal(manager.snapshot().count, 1);
+
+  manager.shutdown();
+  manager.shutdown();
+  await flushTicks();
+
+  assert.equal(children.length, 1);
+  assert.equal(manager.snapshot().count, 0);
+  assert.equal(manager.snapshot().active_session_id, "");
+});
