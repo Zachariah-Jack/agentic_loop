@@ -52,7 +52,7 @@ What exists now in the engine:
 - safe-point runtime verbosity reload (`quiet`, `normal`, `verbose`, `trace`) without restarting the process
 - a durable control-message queue and safe-point intervention path that feeds raw operator messages plus pending action context back into the planner
 - planner-safe operator-status/progress fields now live additively on the current `planner.v1` runtime path, while `planner.v2` remains the future stricter contract
-- a non-interfering Side Chat context-agent foundation: messages are persisted raw and answered from observable runtime context only; Side Chat does not queue control messages, set stop flags, alter pending actions, or change planner/executor flow unless the operator explicitly promotes a message through Control Chat
+- a Side Chat context-agent foundation: messages are persisted raw and answered from observable runtime context only; Side Chat can queue planner-visible notes or request Safe Stop only through explicit audited protocol actions
 - runtime-configurable timeout settings for planner requests, executor idle waits, executor turns, subagents, shell commands, installs, and human waits; executor turns and human waits default to `unlimited`
 - durable active-only `Total Build Time` tracking for control-server-launched Start/Continue loops
 - permission/autonomy profile settings (`guided`, `balanced`, `autonomous`, `full_send`) surfaced in status/runtime config
@@ -85,8 +85,8 @@ What now exists in the first desktop shell:
 - target-repo binding for dogfood launches: `scripts/start-v2-dogfood.ps1 -RepoPath ...` starts the backend in that target repo, passes the expected repo path into the shell, verifies the backend reports the same repo before opening the UI, and the shell blocks Start/Continue with a `Wrong Repo Backend` recovery prompt if a stale server is serving another repo
 - `Recover Backend / Unlock Repo` for dogfood-owned launches: restarts the owned backend after verifying the port is clear, refreshes the shell, reruns model health, and mechanically clears stale active-run guards without deleting run history or artifacts
 - SQLite busy/locked recovery for common GUI reads; persistent lock contention becomes a clear `state_database_locked` protocol error instead of trapping the user behind raw SQLite output
-- a Side Chat pane backed by the context-agent foundation; it answers from visible runtime status and remains non-interfering by default
-- a Runtime Timeouts & Autonomy settings card for timeout presets, per-timeout edits, and permission profile selection through `set_runtime_config`
+- a Side Chat pane backed by the context-agent foundation; it answers from visible runtime status, has quick actions for "what is happening now" and "what changed while I was gone", and uses explicit audited protocol actions for planner reconsideration or Safe Stop
+- a Runtime Timeouts & Autonomy settings card for timeout presets, all seven per-timeout edits, and permission profile selection through `set_runtime_config`
 - an Updates card for GitHub release checks and changelog copying; install is disabled until safe Windows self-update assets are available
 - a Dogfood Notes pane that records quick timestamped friction notes tied to the repo and latest run when available
 - a Worker Panel that shows real worker ids, statuses, scopes, worktree paths, approval state, executor thread/turn metadata, and explicit operator-triggered worker actions for create, dispatch, remove, and integration preview
@@ -700,8 +700,10 @@ Common `next_operator_action` values:
   - `set_runtime_config` for verbosity, runtime timeouts, permission profile, and update settings
   - `inject_control_message`
   - `list_control_messages`
-  - `send_side_chat_message` as a non-interfering context-agent message
+  - `send_side_chat_message` as a context-agent message
   - `list_side_chat_messages`
+  - `side_chat_context_snapshot`
+  - `side_chat_action_request`
   - `capture_dogfood_issue`
   - `list_dogfood_issues`
   - `list_workers`
@@ -735,7 +737,7 @@ codex exec --model gpt-5.5 --sandbox danger-full-access -c 'approval_policy="nev
   - protocol-backed editing of the canonical contract files only
   - embedded operator terminal tabs for local shell convenience
   - an Action Required card with protocol-backed primary executor approve and deny buttons when approval is required
-  - a non-interfering Side Chat pane that persists raw messages and answers from observable runtime context
+  - a Side Chat pane that persists raw messages, answers from observable runtime context, and exposes audited quick actions for planner notes and Safe Stop
   - a Dogfood Notes pane backed by timestamped repo/run-scoped issue capture through the same protocol
   - a richer progress and roadmap-alignment panel driven by planner-safe operator status plus surfaced roadmap context
   - Worker Panel controls for explicit create, dispatch, remove, and integration-preview actions through the engine protocol
@@ -770,7 +772,7 @@ Notes:
 - the repo browser is read-only for arbitrary repo files in this slice and lists one directory at a time through explicit protocol actions
 - the terminal pane is an operator utility shell only; it supports multiple local tabs, but run control still belongs to the explicit engine protocol and control actions
 - the Codex/model readiness card reports the exact Codex executable path/version/config source seen by the control server; `gpt-5.5` full-access is `Verified` only after the Codex probe succeeds, and unavailable-model errors are shown without silent fallback
-- the Side Chat pane is a non-interfering context assistant in this slice; it persists raw messages, answers from visible runtime context, and never alters the active run, sets stop flags, or queues control intervention messages
+- the Side Chat pane is an observable-context assistant in this slice; normal messages never alter the active run, and any planner note or Safe Stop request goes through a visible audited protocol action
 - the Dogfood Notes pane is a lightweight local capture path for friction and bug notes; it does not yet file GitHub issues automatically
 - the Worker Panel can now create workers, dispatch one bounded worker turn, remove idle workers, and build integration previews
 - the activity timeline is a filtered view over the real event stream plus shell-local terminal lifecycle events; it does not expose hidden reasoning

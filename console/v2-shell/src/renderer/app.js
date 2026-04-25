@@ -175,6 +175,8 @@ function initializeRefs() {
   refs.permissionProfile = document.getElementById("permission-profile");
   refs.timeoutPlannerRequest = document.getElementById("timeout-planner-request");
   refs.timeoutExecutorTurn = document.getElementById("timeout-executor-turn");
+  refs.timeoutExecutorIdle = document.getElementById("timeout-executor-idle");
+  refs.timeoutSubagent = document.getElementById("timeout-subagent");
   refs.timeoutShellCommand = document.getElementById("timeout-shell-command");
   refs.timeoutInstall = document.getElementById("timeout-install");
   refs.timeoutHumanWait = document.getElementById("timeout-human-wait");
@@ -239,6 +241,13 @@ function initializeRefs() {
   refs.sideChatContextPolicy = document.getElementById("side-chat-context-policy");
   refs.sendSideChatMessageButton = document.getElementById("send-side-chat-message");
   refs.sideChatBody = document.getElementById("side-chat-body");
+  refs.sideChatWhatNow = document.getElementById("side-chat-what-now");
+  refs.sideChatWhatChanged = document.getElementById("side-chat-what-changed");
+  refs.sideChatExplainBlocker = document.getElementById("side-chat-explain-blocker");
+  refs.sideChatAskPlannerReconsider = document.getElementById("side-chat-ask-planner-reconsider");
+  refs.sideChatSafeStop = document.getElementById("side-chat-safe-stop");
+  refs.sideChatCopyConversation = document.getElementById("side-chat-copy-conversation");
+  refs.sideChatCopySupport = document.getElementById("side-chat-copy-support");
   refs.dogfoodTitleInput = document.getElementById("dogfood-title");
   refs.dogfoodNoteInput = document.getElementById("dogfood-note");
   refs.captureDogfoodIssueButton = document.getElementById("capture-dogfood-issue");
@@ -851,7 +860,11 @@ function renderHomeDashboard() {
     homeRow("Planner Outcome", vm.status.latestPlannerOutcome),
     homeRow("Executor Status", vm.status.executorTurnStatus),
     homeRow("Next Operator Action", vm.status.nextOperatorAction),
-    homeRow("Elapsed", vm.status.elapsedLabel),
+    homeRow("Total Build Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.total_build_time_label || "Unavailable" : "Unavailable"),
+    homeRow("Current Run Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_run_time_label || "Unavailable" : "Unavailable"),
+    homeRow("Current Step", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_step_label || "Unavailable" : "Unavailable"),
+    homeRow("Current Step Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_step_time_label || "Unavailable" : "Unavailable"),
+    homeRow("Run Elapsed", vm.status.elapsedLabel),
     homeRow("What Happened", vm.whatHappened.stop.title),
     homeRow("Next Action", vm.whatHappened.stop.nextAction),
     homeRow("Pending Held", vm.status.pendingHeld ? "true" : "false"),
@@ -998,7 +1011,7 @@ function renderStatus() {
     ["Goal", vm.goal],
     ["Run State", vm.completed ? "completed" : vm.stopReason],
     ["Stop Reason", vm.stopReason],
-    ["Elapsed", vm.elapsedLabel],
+    ["Run Elapsed", vm.elapsedLabel],
     ["Started At", vm.startedAt],
     ["Stopped / Last Updated", vm.stoppedAt],
     ["Total Build Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.total_build_time_label || "Unavailable" : "Unavailable"],
@@ -1076,6 +1089,8 @@ function renderRuntimeSettings() {
   };
   if (refs.timeoutPlannerRequest) refs.timeoutPlannerRequest.value = timeoutValue("planner_request_timeout", refs.timeoutPlannerRequest.value || "2m");
   if (refs.timeoutExecutorTurn) refs.timeoutExecutorTurn.value = timeoutValue("executor_turn_timeout", refs.timeoutExecutorTurn.value || "unlimited");
+  if (refs.timeoutExecutorIdle) refs.timeoutExecutorIdle.value = timeoutValue("executor_idle_timeout", refs.timeoutExecutorIdle.value || "unlimited");
+  if (refs.timeoutSubagent) refs.timeoutSubagent.value = timeoutValue("subagent_timeout", refs.timeoutSubagent.value || "unlimited");
   if (refs.timeoutShellCommand) refs.timeoutShellCommand.value = timeoutValue("shell_command_timeout", refs.timeoutShellCommand.value || "30m");
   if (refs.timeoutInstall) refs.timeoutInstall.value = timeoutValue("install_timeout", refs.timeoutInstall.value || "2h");
   if (refs.timeoutHumanWait) refs.timeoutHumanWait.value = timeoutValue("human_wait_timeout", refs.timeoutHumanWait.value || "unlimited");
@@ -1085,6 +1100,8 @@ function renderRuntimeSettings() {
   if (refs.runtimeSettingsSummary) {
     const rows = [
       ["Executor turn timeout", timeoutValue("executor_turn_timeout", "unlimited")],
+      ["Executor idle timeout", timeoutValue("executor_idle_timeout", "unlimited")],
+      ["Sub-agent timeout", timeoutValue("subagent_timeout", "unlimited")],
       ["Human wait timeout", timeoutValue("human_wait_timeout", "unlimited")],
       ["Install timeout", timeoutValue("install_timeout", "2h")],
       ["Permission profile", permissions.profile || "balanced"],
@@ -1329,11 +1346,12 @@ function renderSideChat() {
   }
 
   refs.sideChatBody.innerHTML = banner + vm.items
-    .map((item) => `
+    .map((item, index) => `
       <div class="side-chat-item">
         <div class="side-chat-header">
           <div class="side-chat-role">${escapeHTML(item.source)}</div>
           <div class="side-chat-meta">${escapeHTML(item.createdAt)}</div>
+          <button class="button button-mini side-chat-copy" data-side-chat-index="${escapeHTML(String(index))}">Copy</button>
         </div>
         <div class="side-chat-text">${escapeHTML(item.rawText)}</div>
         <div class="side-chat-meta">status: ${escapeHTML(item.status)} | backend: ${escapeHTML(item.backendState)} | run: ${escapeHTML(item.runID)}</div>
@@ -1964,7 +1982,9 @@ async function saveRuntimeConfig() {
       timeouts: {
         ...presetTimeouts,
         planner_request_timeout: refs.timeoutPlannerRequest ? refs.timeoutPlannerRequest.value : presetTimeouts.planner_request_timeout,
+        executor_idle_timeout: refs.timeoutExecutorIdle ? refs.timeoutExecutorIdle.value : presetTimeouts.executor_idle_timeout,
         executor_turn_timeout: refs.timeoutExecutorTurn ? refs.timeoutExecutorTurn.value : presetTimeouts.executor_turn_timeout,
+        subagent_timeout: refs.timeoutSubagent ? refs.timeoutSubagent.value : presetTimeouts.subagent_timeout,
         shell_command_timeout: refs.timeoutShellCommand ? refs.timeoutShellCommand.value : presetTimeouts.shell_command_timeout,
         install_timeout: refs.timeoutInstall ? refs.timeoutInstall.value : presetTimeouts.install_timeout,
         human_wait_timeout: refs.timeoutHumanWait ? refs.timeoutHumanWait.value : presetTimeouts.human_wait_timeout,
@@ -2341,6 +2361,73 @@ async function sendSideChatMessage() {
   } catch (error) {
     reportIssue("side chat", error);
   }
+}
+
+async function askSideChatQuick(message) {
+  if (refs.sideChatMessageInput) {
+    refs.sideChatMessageInput.value = message;
+  }
+  try {
+    const response = await window.orchestratorConsole.sendSideChatMessage({
+      repoPath: activeRepoPath(),
+      message,
+      contextPolicy: refs.sideChatContextPolicy.value,
+      address: state.address,
+    });
+    await refreshSideChat({ quiet: true });
+    setFlash("info", response.message || "Side Chat answered from current runtime context.");
+  } catch (error) {
+    reportIssue("side chat quick action", error);
+  }
+}
+
+async function requestSideChatAction(action, message, options = {}) {
+  try {
+    const response = await window.orchestratorConsole.sideChatActionRequest({
+      repoPath: activeRepoPath(),
+      runId: activeRunID(),
+      action,
+      message,
+      source: options.source || "operator_quick_action",
+      reason: options.reason || "side_chat_quick_action",
+      approved: options.approved !== false,
+      address: state.address,
+    });
+    if (action === "safe_stop" || action === "request_safe_stop") {
+      await refreshStatus({ quiet: true });
+    }
+    setFlash(response.requires_approval ? "info" : "success", response.message || "Side Chat action recorded.");
+  } catch (error) {
+    reportIssue("side chat action", error);
+  }
+}
+
+async function copySideChatConversation() {
+  const vm = window.OrchestratorViewModel.buildSideChatViewModel(state.sideChat);
+  const text = vm.items.length === 0
+    ? "No side chat conversation is recorded yet."
+    : vm.items.map((item) => [
+      `[${item.createdAt}] ${item.source}`,
+      item.rawText,
+      `Reply: ${item.responseMessage}`,
+      `status=${item.status}; backend=${item.backendState}; run=${item.runID}`,
+    ].join("\n")).join("\n\n---\n\n");
+  await copyText(text, "Side Chat conversation copied.");
+}
+
+async function copySideChatItem(index) {
+  const vm = window.OrchestratorViewModel.buildSideChatViewModel(state.sideChat);
+  const item = vm.items[index];
+  if (!item) {
+    setFlash("info", "That Side Chat item is no longer available.");
+    return;
+  }
+  await copyText([
+    `[${item.createdAt}] ${item.source}`,
+    item.rawText,
+    `Reply: ${item.responseMessage}`,
+    `status=${item.status}; backend=${item.backendState}; run=${item.runID}; context=${item.contextPolicy}`,
+  ].join("\n"), "Side Chat item copied.");
 }
 
 async function captureDogfoodIssue() {
@@ -3378,7 +3465,9 @@ function wireEvents() {
   refs.timeoutPreset.addEventListener("change", () => {
     const patch = timeoutPresetPatch(refs.timeoutPreset.value);
     refs.timeoutPlannerRequest.value = patch.planner_request_timeout;
+    refs.timeoutExecutorIdle.value = patch.executor_idle_timeout;
     refs.timeoutExecutorTurn.value = patch.executor_turn_timeout;
+    refs.timeoutSubagent.value = patch.subagent_timeout;
     refs.timeoutShellCommand.value = patch.shell_command_timeout;
     refs.timeoutInstall.value = patch.install_timeout;
     refs.timeoutHumanWait.value = patch.human_wait_timeout;
@@ -3389,6 +3478,25 @@ function wireEvents() {
   refs.clearStopButton.addEventListener("click", () => void clearStop());
   refs.sendControlMessageButton.addEventListener("click", () => void sendControlMessage());
   refs.sendSideChatMessageButton.addEventListener("click", () => void sendSideChatMessage());
+  refs.sideChatWhatNow.addEventListener("click", () => void askSideChatQuick("What is happening right now?"));
+  refs.sideChatWhatChanged.addEventListener("click", () => void askSideChatQuick("What changed while I was gone?"));
+  refs.sideChatExplainBlocker.addEventListener("click", () => void askSideChatQuick("Explain the current blocker, if there is one."));
+  refs.sideChatAskPlannerReconsider.addEventListener("click", () => {
+    const message = refs.sideChatMessageInput.value.trim() || "Operator asks the planner to reconsider the current direction using the latest observable runtime context.";
+    void requestSideChatAction("ask_planner_reconsider", message, { approved: true });
+  });
+  refs.sideChatSafeStop.addEventListener("click", () => {
+    void requestSideChatAction("safe_stop", "Operator requested Safe Stop from Side Chat.", { approved: true });
+  });
+  refs.sideChatCopyConversation.addEventListener("click", () => void copySideChatConversation());
+  refs.sideChatCopySupport.addEventListener("click", () => void copyDebugBundle());
+  refs.sideChatBody.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-side-chat-index]");
+    if (!button) {
+      return;
+    }
+    void copySideChatItem(Number(button.getAttribute("data-side-chat-index")));
+  });
   refs.captureDogfoodIssueButton.addEventListener("click", () => void captureDogfoodIssue());
   refs.sideChatContextPolicy.addEventListener("change", () => persistShellSession());
   refs.sendAnswerContinueButton.addEventListener("click", () => void sendAskHumanAnswer({ continueAfter: true }));

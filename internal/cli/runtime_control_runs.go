@@ -269,7 +269,11 @@ func (m *controlRunManager) applyActiveStatus(snapshot controlStatusSnapshot) co
 	snapshot.Run.ElapsedLabel = "running for " + formatHumanDuration(time.Since(started))
 	snapshot.Run.NextOperatorAction = "watch_progress"
 	snapshot.Run.ActivityState = "running"
-	snapshot.Run.ActivityMessage = "The control server is actively advancing this run."
+	activeStep := strings.TrimSpace(snapshot.BuildTime.CurrentStepLabel)
+	if activeStep == "" || activeStep == "No active build step" || activeStep == "loop stopped" {
+		activeStep = buildStepLabelForAction(action)
+	}
+	snapshot.Run.ActivityMessage = "Current step: " + activeStep + "."
 	snapshot.Run.ActivelyProcessing = true
 	snapshot.Run.WaitingAtSafePoint = false
 	snapshot.Run.ExecuteReady = false
@@ -283,15 +287,25 @@ func (m *controlRunManager) applyActiveStatus(snapshot controlStatusSnapshot) co
 	if elapsed < 0 {
 		elapsed = 0
 	}
+	stepStarted := started
+	if strings.TrimSpace(snapshot.BuildTime.CurrentStepStartedAt) != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(snapshot.BuildTime.CurrentStepStartedAt)); err == nil {
+			stepStarted = parsed
+		}
+	}
+	stepElapsed := time.Since(stepStarted)
+	if stepElapsed < 0 {
+		stepElapsed = 0
+	}
 	total := time.Duration(snapshot.BuildTime.TotalBuildTimeMS)*time.Millisecond + elapsed
 	snapshot.BuildTime.TotalBuildTimeMS = int64(total / time.Millisecond)
 	snapshot.BuildTime.TotalBuildTimeLabel = formatHumanDuration(total)
 	snapshot.BuildTime.CurrentRunTimeMS = int64(elapsed / time.Millisecond)
 	snapshot.BuildTime.CurrentRunTimeLabel = formatHumanDuration(elapsed)
-	snapshot.BuildTime.CurrentStepStartedAt = formatSnapshotTime(started)
-	snapshot.BuildTime.CurrentStepTimeMS = int64(elapsed / time.Millisecond)
-	snapshot.BuildTime.CurrentStepTimeLabel = formatHumanDuration(elapsed)
-	snapshot.BuildTime.CurrentStepLabel = "Orchestrator loop active"
+	snapshot.BuildTime.CurrentStepStartedAt = formatSnapshotTime(stepStarted)
+	snapshot.BuildTime.CurrentStepTimeMS = int64(stepElapsed / time.Millisecond)
+	snapshot.BuildTime.CurrentStepTimeLabel = formatHumanDuration(stepElapsed)
+	snapshot.BuildTime.CurrentStepLabel = activeStep
 	snapshot.BuildTime.CurrentActiveSessionStart = formatSnapshotTime(started)
 	return snapshot
 }

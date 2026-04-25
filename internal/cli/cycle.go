@@ -8,7 +8,9 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"orchestrator/internal/activity"
 	"orchestrator/internal/config"
 	"orchestrator/internal/journal"
 	ntfybridge "orchestrator/internal/ntfy"
@@ -87,6 +89,15 @@ func runBoundedCycle(
 	}
 	pluginManager := loadRuntimePlugins(journalWriter, run)
 
+	cycleEvents := activity.Publisher(inv.Events)
+	if store != nil {
+		cycleEvents = buildTimeActivityPublisher{
+			publisher: inv.Events,
+			store:     store,
+			repoPath:  run.RepoPath,
+		}
+	}
+
 	cycle := orchestration.Cycle{
 		Store:                      store,
 		Journal:                    journalWriter,
@@ -97,10 +108,65 @@ func runBoundedCycle(
 		DriftReviewOn:              currentConfig(inv).DriftWatcherEnabled,
 		WorkerPlanConcurrencyLimit: currentConfig(inv).WorkerConcurrencyLimit,
 		Plugins:                    pluginManager,
-		Events:                     inv.Events,
+		Events:                     cycleEvents,
 	}
 
 	return cycle.RunOnce(ctx, run)
+}
+
+type buildTimeActivityPublisher struct {
+	publisher activity.Publisher
+	store     *state.Store
+	repoPath  string
+}
+
+func (p buildTimeActivityPublisher) Publish(event string, payload map[string]any) activity.Event {
+	if label := buildStepLabelForEvent(event, payload); label != "" && p.store != nil {
+		_ = p.store.UpdateBuildStep(context.Background(), p.repoPath, label, time.Now().UTC())
+	}
+	if p.publisher == nil {
+		return activity.Event{}
+	}
+	return p.publisher.Publish(event, payload)
+}
+
+func buildStepLabelForEvent(event string, payload map[string]any) string {
+	switch strings.TrimSpace(event) {
+	case "planner_turn_started":
+		phase := payloadString(payload, "phase")
+		if strings.Contains(phase, "review") || strings.Contains(phase, "post") {
+			return "Planner is reviewing current progress"
+		}
+		return "Planner is deciding next step"
+	case "planner_turn_completed":
+		return "Planner finished deciding"
+	case "executor_turn_started":
+		return "Codex is thinking"
+	case "executor_turn_completed":
+		return "Codex finished executor turn"
+	case "executor_turn_failed":
+		return "Codex executor turn failed"
+	case "executor_approval_required":
+		return "Waiting for user approval"
+	case "worker_started", "subagent.started":
+		return "Sub-agent initializing"
+	case "worker_dispatched", "subagent.commanded":
+		return "Sub-agent commanded"
+	case "worker_completed", "subagent.completed":
+		return "Sub-agent completed"
+	case "safe_point_intervention_pending":
+		return "Waiting for planner-visible operator note"
+	default:
+		return ""
+	}
+}
+
+func payloadString(payload map[string]any, key string) string {
+	if payload == nil {
+		return ""
+	}
+	value, _ := payload[key].(string)
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func loadRuntimePlugins(journalWriter *journal.Journal, run state.Run) *plugins.Manager {

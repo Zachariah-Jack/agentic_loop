@@ -13,10 +13,11 @@ import (
 )
 
 type Patch struct {
-	Verbosity         *string      `json:"verbosity,omitempty"`
-	Timeouts          TimeoutPatch `json:"timeouts,omitempty"`
-	PermissionProfile *string      `json:"permission_profile,omitempty"`
-	Updates           UpdatePatch  `json:"updates,omitempty"`
+	Verbosity         *string         `json:"verbosity,omitempty"`
+	Timeouts          TimeoutPatch    `json:"timeouts,omitempty"`
+	PermissionProfile *string         `json:"permission_profile,omitempty"`
+	Permissions       PermissionPatch `json:"permissions,omitempty"`
+	Updates           UpdatePatch     `json:"updates,omitempty"`
 }
 
 type OptionalString struct {
@@ -57,6 +58,22 @@ type UpdatePatch struct {
 	IncludePrereleases  *bool          `json:"include_prereleases,omitempty"`
 	UpdateCheckInterval OptionalString `json:"update_check_interval,omitempty"`
 	SkippedVersions     []string       `json:"skipped_versions,omitempty"`
+}
+
+type PermissionPatch struct {
+	AskBeforeInstallingPrograms     *bool `json:"ask_before_installing_programs,omitempty"`
+	AskBeforeInstallingDependencies *bool `json:"ask_before_installing_dependencies,omitempty"`
+	AskBeforeOutsideRepoChanges     *bool `json:"ask_before_modifying_files_outside_repo,omitempty"`
+	AskBeforeDeletingFiles          *bool `json:"ask_before_deleting_files,omitempty"`
+	AskBeforeRunningTests           *bool `json:"ask_before_running_tests,omitempty"`
+	AskBeforeEmulatorTesting        *bool `json:"ask_before_emulator_device_testing,omitempty"`
+	AskBeforeNetworkCalls           *bool `json:"ask_before_network_calls,omitempty"`
+	AskBeforeGitCommits             *bool `json:"ask_before_git_commits,omitempty"`
+	AskBeforeGitPushes              *bool `json:"ask_before_git_pushes,omitempty"`
+	AskBeforeUpdaterInstalls        *bool `json:"ask_before_updater_installs,omitempty"`
+	AskBeforeWorkerParallelism      *bool `json:"ask_before_worker_parallelism,omitempty"`
+	AskBeforeExecutorSteering       *bool `json:"ask_before_executor_steering,omitempty"`
+	AskBeforePlannerDirection       *bool `json:"ask_before_planner_direction_changes,omitempty"`
 }
 
 type Manager struct {
@@ -161,13 +178,14 @@ func (m *Manager) ApplyPatch(patch Patch) (config.Config, bool, error) {
 		return config.Config{}, false, err
 	}
 	if patch.PermissionProfile != nil {
-		profile, err := config.NormalizePermissionProfile(*patch.PermissionProfile)
+		permissions, err := config.PermissionPreset(*patch.PermissionProfile)
 		if err != nil {
 			m.mu.Unlock()
 			return config.Config{}, false, err
 		}
-		cfg.Permissions.Profile = profile
+		cfg.Permissions = permissions
 	}
+	applyPermissionPatch(&cfg, patch.Permissions)
 	applyUpdatePatch(&cfg, patch.Updates)
 
 	cfg = config.WithDefaults(cfg)
@@ -193,6 +211,7 @@ func (p Patch) HasChanges() bool {
 	return p.Verbosity != nil ||
 		p.Timeouts.HasChanges() ||
 		p.PermissionProfile != nil ||
+		p.Permissions.HasChanges() ||
 		p.Updates.HasChanges()
 }
 
@@ -215,6 +234,22 @@ func (p UpdatePatch) HasChanges() bool {
 		p.IncludePrereleases != nil ||
 		p.UpdateCheckInterval.Set ||
 		p.SkippedVersions != nil
+}
+
+func (p PermissionPatch) HasChanges() bool {
+	return p.AskBeforeInstallingPrograms != nil ||
+		p.AskBeforeInstallingDependencies != nil ||
+		p.AskBeforeOutsideRepoChanges != nil ||
+		p.AskBeforeDeletingFiles != nil ||
+		p.AskBeforeRunningTests != nil ||
+		p.AskBeforeEmulatorTesting != nil ||
+		p.AskBeforeNetworkCalls != nil ||
+		p.AskBeforeGitCommits != nil ||
+		p.AskBeforeGitPushes != nil ||
+		p.AskBeforeUpdaterInstalls != nil ||
+		p.AskBeforeWorkerParallelism != nil ||
+		p.AskBeforeExecutorSteering != nil ||
+		p.AskBeforePlannerDirection != nil
 }
 
 func applyTimeoutPatch(cfg *config.Config, patch TimeoutPatch) error {
@@ -259,6 +294,32 @@ func applyTimeoutPatch(cfg *config.Config, patch TimeoutPatch) error {
 	}
 	cfg.Timeouts = config.NormalizeTimeouts(timeouts)
 	return nil
+}
+
+func applyPermissionPatch(cfg *config.Config, patch PermissionPatch) {
+	if cfg == nil || !patch.HasChanges() {
+		return
+	}
+	permissions := config.NormalizePermissions(cfg.Permissions)
+	apply := func(value *bool, target *bool) {
+		if value != nil {
+			*target = *value
+		}
+	}
+	apply(patch.AskBeforeInstallingPrograms, &permissions.AskBeforeInstallingPrograms)
+	apply(patch.AskBeforeInstallingDependencies, &permissions.AskBeforeInstallingDependencies)
+	apply(patch.AskBeforeOutsideRepoChanges, &permissions.AskBeforeOutsideRepoChanges)
+	apply(patch.AskBeforeDeletingFiles, &permissions.AskBeforeDeletingFiles)
+	apply(patch.AskBeforeRunningTests, &permissions.AskBeforeRunningTests)
+	apply(patch.AskBeforeEmulatorTesting, &permissions.AskBeforeEmulatorTesting)
+	apply(patch.AskBeforeNetworkCalls, &permissions.AskBeforeNetworkCalls)
+	apply(patch.AskBeforeGitCommits, &permissions.AskBeforeGitCommits)
+	apply(patch.AskBeforeGitPushes, &permissions.AskBeforeGitPushes)
+	apply(patch.AskBeforeUpdaterInstalls, &permissions.AskBeforeUpdaterInstalls)
+	apply(patch.AskBeforeWorkerParallelism, &permissions.AskBeforeWorkerParallelism)
+	apply(patch.AskBeforeExecutorSteering, &permissions.AskBeforeExecutorSteering)
+	apply(patch.AskBeforePlannerDirection, &permissions.AskBeforePlannerDirection)
+	cfg.Permissions = permissions
 }
 
 func applyUpdatePatch(cfg *config.Config, patch UpdatePatch) {

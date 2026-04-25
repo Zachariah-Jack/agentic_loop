@@ -151,6 +151,35 @@ func (s *Store) EndBuildSession(ctx context.Context, repoPath string, stepLabel 
 	return err
 }
 
+func (s *Store) UpdateBuildStep(ctx context.Context, repoPath string, stepLabel string, at time.Time) error {
+	repoPath = strings.TrimSpace(repoPath)
+	if repoPath == "" {
+		return errors.New("repo path is required")
+	}
+	stepLabel = strings.TrimSpace(stepLabel)
+	if stepLabel == "" {
+		return nil
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	} else {
+		at = at.UTC()
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE build_time
+		    SET current_step_started_at = ?,
+		        current_step_label = ?,
+		        updated_at = ?
+		  WHERE repo_path = ?
+		    AND current_active_session_started_at != ''`,
+		formatTime(at),
+		stepLabel,
+		formatTime(at),
+		repoPath,
+	)
+	return err
+}
+
 func parseStoredTime(value string) time.Time {
 	value = strings.TrimSpace(value)
 	if value == "" {

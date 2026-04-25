@@ -69,6 +69,7 @@ These must survive every implementation chunk.
 - Terminal ask-human and ntfy ask-human paths exist, with terminal fallback.
 - `setup`, `doctor`, `status`, and `history` have real v1 behavior.
 - Planner-owned completion is persisted mechanically.
+- Runtime timeouts, permission/autonomy profiles, active-only Total Build Time, Side Chat context answers/action requests, and GitHub Releases update check/changelog status now exist as V2 foundations.
 
 ### Current maturity assessment
 
@@ -106,6 +107,7 @@ These must survive every implementation chunk.
 - Multi-worker orchestration is not built.
 - Installer and clean Windows package are not built.
 - App-building templates and target-repo onboarding are not fully productized.
+- Safe self-update install and final LLM-backed Side Chat tooling are not complete.
 
 ## 5. Build tracks
 

@@ -102,7 +102,7 @@ Control Chat must not:
 - rewrite the message
 - skip the planner
 
-#### Side Chat / Non-Interfering Conversation
+#### Side Chat / Context Conversation
 
 Purpose:
 
@@ -111,8 +111,8 @@ Purpose:
 Behavior:
 
 - side chat runs against selected context with a helper model or assistant mode
-- side chat messages do not alter the active run
-- the user may explicitly promote a side-chat message into Control Chat
+- normal side chat messages do not alter the active run
+- the user may explicitly promote a side-chat message into Control Chat or request another allowed audited action such as Safe Stop
 
 Side Chat must not:
 
@@ -160,7 +160,7 @@ Current dogfood shell direction:
 - Start/Continue are shown as Start Build / Continue Build and call explicit protocol actions.
 - Loop status must distinguish `Running` from safe-pause states. A planner safe checkpoint with `planner_outcome:"execute"` and no executor thread/turn is `Ready to Continue`, not actively running; the primary action is `Continue Build / Dispatch Executor`.
 - Active-run guards are displayed as running only when the status snapshot says `currently_processing:true`; a guard or unfinished run record by itself is not enough.
-- Side Chat is currently a non-interfering context assistant foundation. It persists raw messages and answers from observable runtime context only; it must plainly say that side messages do not queue Control Chat, set stop flags, change pending actions, or affect planner/Codex flow unless explicitly promoted through a future audited control action.
+- Side Chat is currently a context assistant foundation. It persists raw messages and answers from observable runtime context only; it must plainly say that normal side messages do not affect planner/Codex flow, and that planner notes or Safe Stop requests are explicit audited protocol actions.
 - If a safe stop flag or `operator_stop_requested` state is present, Action Required shows `Safe stop was requested` and offers `Clear Stop and Continue`, which clears the mechanical flag and then uses the explicit `continue_run` protocol action when the run can resume.
 - Backup terminal commands are hidden in advanced help, not presented as the primary path.
 - Stop reasons are translated for display while preserving the technical code in detail views.

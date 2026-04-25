@@ -102,6 +102,44 @@ func TestDefaultTimeoutsPreferUnlimitedExecutorAndHumanWait(t *testing.T) {
 	}
 }
 
+func TestPermissionPresetsApplyExpectedAutonomy(t *testing.T) {
+	t.Parallel()
+
+	guided, err := PermissionPreset("guided")
+	if err != nil {
+		t.Fatalf("PermissionPreset(guided) error = %v", err)
+	}
+	if !guided.AskBeforeInstallingDependencies || !guided.AskBeforeRunningTests || !guided.AskBeforePlannerDirection {
+		t.Fatalf("guided preset should ask before setup, tests, and planner direction changes: %#v", guided)
+	}
+
+	fullSend, err := PermissionPreset("Full Send")
+	if err != nil {
+		t.Fatalf("PermissionPreset(Full Send) error = %v", err)
+	}
+	if fullSend.Profile != "full_send" {
+		t.Fatalf("fullSend.Profile = %q, want full_send", fullSend.Profile)
+	}
+	if fullSend.AskBeforeInstallingDependencies || fullSend.AskBeforeRunningTests || fullSend.AskBeforeGitPushes {
+		t.Fatalf("full_send preset should allow routine dependency/test/git-push actions within scope: %#v", fullSend)
+	}
+	if !fullSend.AskBeforeOutsideRepoChanges {
+		t.Fatalf("full_send preset should still ask before outside-repo changes: %#v", fullSend)
+	}
+}
+
+func TestNormalizePermissionsUsesPresetForProfileOnlyConfig(t *testing.T) {
+	t.Parallel()
+
+	normalized := NormalizePermissions(Permissions{Profile: "guided"})
+	if normalized.Profile != "guided" {
+		t.Fatalf("Profile = %q, want guided", normalized.Profile)
+	}
+	if !normalized.AskBeforeInstallingDependencies || !normalized.AskBeforeRunningTests {
+		t.Fatalf("NormalizePermissions should hydrate omitted booleans from guided preset: %#v", normalized)
+	}
+}
+
 func TestValidateTimeoutValueAcceptsDurationAndUnlimited(t *testing.T) {
 	t.Parallel()
 

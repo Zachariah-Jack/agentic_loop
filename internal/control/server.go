@@ -150,6 +150,22 @@ type SideChatRequest struct {
 	ContextPolicy string `json:"context_policy,omitempty"`
 }
 
+type SideChatContextSnapshotRequest struct {
+	RepoPath string `json:"repo_path,omitempty"`
+	RunID    string `json:"run_id,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+}
+
+type SideChatActionRequest struct {
+	RepoPath string `json:"repo_path,omitempty"`
+	RunID    string `json:"run_id,omitempty"`
+	Action   string `json:"action"`
+	Message  string `json:"message,omitempty"`
+	Source   string `json:"source,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Approved bool   `json:"approved,omitempty"`
+}
+
 type CaptureDogfoodIssueRequest struct {
 	RepoPath string `json:"repo_path,omitempty"`
 	Title    string `json:"title"`
@@ -188,45 +204,47 @@ type IntegrateWorkersRequest struct {
 }
 
 type ActionSet struct {
-	StartRun             func(context.Context, StartRunRequest) (any, error)
-	ContinueRun          func(context.Context, ContinueRunRequest) (any, error)
-	GetActiveRunGuard    func(context.Context) (any, error)
-	RecoverStaleRun      func(context.Context, RecoverStaleRunRequest) (any, error)
-	TestPlannerModel     func(context.Context, ModelTestRequest) (any, error)
-	TestExecutorModel    func(context.Context, ModelTestRequest) (any, error)
-	GetStatusSnapshot    func(context.Context, string) (any, error)
-	SetVerbosity         func(context.Context, string) (any, error)
-	SetStopFlag          func(context.Context, string, string) (any, error)
-	ClearStopFlag        func(context.Context, string) (any, error)
-	GetPendingAction     func(context.Context, string) (any, error)
-	ApproveExecutor      func(context.Context, ExecutorApprovalActionRequest) (any, error)
-	DenyExecutor         func(context.Context, ExecutorApprovalActionRequest) (any, error)
-	GetArtifact          func(context.Context, ArtifactRequest) (any, error)
-	ListRecentArtifacts  func(context.Context, ListArtifactsRequest) (any, error)
-	ListContractFiles    func(context.Context, ListContractFilesRequest) (any, error)
-	OpenContractFile     func(context.Context, ContractFileRequest) (any, error)
-	SaveContractFile     func(context.Context, SaveContractFileRequest) (any, error)
-	RunAIAutofill        func(context.Context, RunAIAutofillRequest) (any, error)
-	ListRepoTree         func(context.Context, RepoTreeRequest) (any, error)
-	OpenRepoFile         func(context.Context, RepoFileRequest) (any, error)
-	InjectControlMessage func(context.Context, InjectControlMessageRequest) (any, error)
-	ListControlMessages  func(context.Context, ListControlMessagesRequest) (any, error)
-	SendSideChatMessage  func(context.Context, SideChatRequest) (any, error)
-	ListSideChatMessages func(context.Context, ListSideChatMessagesRequest) (any, error)
-	CaptureDogfoodIssue  func(context.Context, CaptureDogfoodIssueRequest) (any, error)
-	ListDogfoodIssues    func(context.Context, ListDogfoodIssuesRequest) (any, error)
-	ListWorkers          func(context.Context, ListWorkersRequest) (any, error)
-	CreateWorker         func(context.Context, CreateWorkerRequest) (any, error)
-	DispatchWorker       func(context.Context, DispatchWorkerRequest) (any, error)
-	RemoveWorker         func(context.Context, RemoveWorkerRequest) (any, error)
-	IntegrateWorkers     func(context.Context, IntegrateWorkersRequest) (any, error)
-	GetRuntimeConfig     func(context.Context) (any, error)
-	SetRuntimeConfig     func(context.Context, runtimecfg.Patch) (any, error)
-	CheckForUpdates      func(context.Context, UpdateRequest) (any, error)
-	GetUpdateStatus      func(context.Context) (any, error)
-	InstallUpdate        func(context.Context, UpdateRequest) (any, error)
-	SkipUpdate           func(context.Context, UpdateRequest) (any, error)
-	GetUpdateChangelog   func(context.Context, UpdateRequest) (any, error)
+	StartRun                func(context.Context, StartRunRequest) (any, error)
+	ContinueRun             func(context.Context, ContinueRunRequest) (any, error)
+	GetActiveRunGuard       func(context.Context) (any, error)
+	RecoverStaleRun         func(context.Context, RecoverStaleRunRequest) (any, error)
+	TestPlannerModel        func(context.Context, ModelTestRequest) (any, error)
+	TestExecutorModel       func(context.Context, ModelTestRequest) (any, error)
+	GetStatusSnapshot       func(context.Context, string) (any, error)
+	SetVerbosity            func(context.Context, string) (any, error)
+	SetStopFlag             func(context.Context, string, string) (any, error)
+	ClearStopFlag           func(context.Context, string) (any, error)
+	GetPendingAction        func(context.Context, string) (any, error)
+	ApproveExecutor         func(context.Context, ExecutorApprovalActionRequest) (any, error)
+	DenyExecutor            func(context.Context, ExecutorApprovalActionRequest) (any, error)
+	GetArtifact             func(context.Context, ArtifactRequest) (any, error)
+	ListRecentArtifacts     func(context.Context, ListArtifactsRequest) (any, error)
+	ListContractFiles       func(context.Context, ListContractFilesRequest) (any, error)
+	OpenContractFile        func(context.Context, ContractFileRequest) (any, error)
+	SaveContractFile        func(context.Context, SaveContractFileRequest) (any, error)
+	RunAIAutofill           func(context.Context, RunAIAutofillRequest) (any, error)
+	ListRepoTree            func(context.Context, RepoTreeRequest) (any, error)
+	OpenRepoFile            func(context.Context, RepoFileRequest) (any, error)
+	InjectControlMessage    func(context.Context, InjectControlMessageRequest) (any, error)
+	ListControlMessages     func(context.Context, ListControlMessagesRequest) (any, error)
+	SendSideChatMessage     func(context.Context, SideChatRequest) (any, error)
+	ListSideChatMessages    func(context.Context, ListSideChatMessagesRequest) (any, error)
+	SideChatContextSnapshot func(context.Context, SideChatContextSnapshotRequest) (any, error)
+	SideChatActionRequest   func(context.Context, SideChatActionRequest) (any, error)
+	CaptureDogfoodIssue     func(context.Context, CaptureDogfoodIssueRequest) (any, error)
+	ListDogfoodIssues       func(context.Context, ListDogfoodIssuesRequest) (any, error)
+	ListWorkers             func(context.Context, ListWorkersRequest) (any, error)
+	CreateWorker            func(context.Context, CreateWorkerRequest) (any, error)
+	DispatchWorker          func(context.Context, DispatchWorkerRequest) (any, error)
+	RemoveWorker            func(context.Context, RemoveWorkerRequest) (any, error)
+	IntegrateWorkers        func(context.Context, IntegrateWorkersRequest) (any, error)
+	GetRuntimeConfig        func(context.Context) (any, error)
+	SetRuntimeConfig        func(context.Context, runtimecfg.Patch) (any, error)
+	CheckForUpdates         func(context.Context, UpdateRequest) (any, error)
+	GetUpdateStatus         func(context.Context) (any, error)
+	InstallUpdate           func(context.Context, UpdateRequest) (any, error)
+	SkipUpdate              func(context.Context, UpdateRequest) (any, error)
+	GetUpdateChangelog      func(context.Context, UpdateRequest) (any, error)
 }
 
 type Server struct {
@@ -647,6 +665,41 @@ func (s Server) dispatch(ctx context.Context, req RequestEnvelope) ResponseEnvel
 		if err != nil {
 			return actionError(req, "list_side_chat_messages_failed", err)
 		}
+		return okResponse(req, response)
+	case "side_chat_context_snapshot":
+		handler := s.Actions.SideChatContextSnapshot
+		if handler == nil {
+			return unsupportedAction(req, "side_chat_context_snapshot")
+		}
+		var payload SideChatContextSnapshotRequest
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return invalidPayload(req, err)
+		}
+		response, err := handler(ctx, payload)
+		if err != nil {
+			return actionError(req, "side_chat_context_snapshot_failed", err)
+		}
+		return okResponse(req, response)
+	case "side_chat_action_request":
+		handler := s.Actions.SideChatActionRequest
+		if handler == nil {
+			return unsupportedAction(req, "side_chat_action_request")
+		}
+		var payload SideChatActionRequest
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return invalidPayload(req, err)
+		}
+		response, err := handler(ctx, payload)
+		if err != nil {
+			return actionError(req, "side_chat_action_request_failed", err)
+		}
+		s.publish("side_chat_action_requested", map[string]any{
+			"repo_path": strings.TrimSpace(payload.RepoPath),
+			"run_id":    strings.TrimSpace(payload.RunID),
+			"action":    strings.TrimSpace(payload.Action),
+			"source":    strings.TrimSpace(payload.Source),
+			"approved":  payload.Approved,
+		})
 		return okResponse(req, response)
 	case "capture_dogfood_issue":
 		handler := s.Actions.CaptureDogfoodIssue

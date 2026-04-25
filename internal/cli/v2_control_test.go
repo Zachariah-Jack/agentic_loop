@@ -1414,6 +1414,163 @@ doneSideChat:
 	}
 }
 
+func TestLocalControlServerSideChatContextAndActionRequests(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	writeRepoMarkerFiles(t, repoRoot)
+	layout := state.ResolveLayout(repoRoot)
+	configPath := filepathJoin(t, repoRoot, "config.json")
+	cfg := config.Default()
+	guided, err := config.PermissionPreset("guided")
+	if err != nil {
+		t.Fatalf("PermissionPreset() error = %v", err)
+	}
+	cfg.Permissions = guided
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("config.Save() error = %v", err)
+	}
+
+	store, _, err := ensureRuntime(context.Background(), layout)
+	if err != nil {
+		t.Fatalf("ensureRuntime() error = %v", err)
+	}
+	run, err := store.CreateRun(context.Background(), state.CreateRunParams{
+		RepoPath: repoRoot,
+		Goal:     "test side chat action requests",
+		Status:   state.StatusInitialized,
+		Checkpoint: state.Checkpoint{
+			Sequence:     1,
+			Stage:        "bootstrap",
+			Label:        "run_initialized",
+			SafePause:    false,
+			PlannerTurn:  0,
+			ExecutorTurn: 0,
+			CreatedAt:    time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	if err := store.StartBuildSession(context.Background(), repoRoot, run.ID, "Codex is thinking", time.Now().UTC().Add(-2*time.Minute)); err != nil {
+		t.Fatalf("StartBuildSession() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	events := activity.NewBroker(activity.DefaultHistoryLimit)
+	inv := Invocation{
+		Stdout:     &bytes.Buffer{},
+		Stderr:     &bytes.Buffer{},
+		RepoRoot:   repoRoot,
+		Layout:     layout,
+		Config:     cfg,
+		ConfigPath: configPath,
+		RuntimeCfg: runtimecfg.NewManager(configPath, cfg),
+		Events:     events,
+		Version:    "test",
+	}
+	server := httptest.NewServer(newLocalControlServer(inv).Handler())
+	defer server.Close()
+
+	contextResponse := postControlAction(t, server.URL, `{
+		"id":"req_side_chat_context",
+		"type":"request",
+		"action":"side_chat_context_snapshot",
+		"payload":{"repo_path":"`+strings.ReplaceAll(repoRoot, `\`, `\\`)+`","run_id":"`+run.ID+`","limit":5}
+	}`)
+	if !contextResponse.OK {
+		t.Fatalf("contextResponse.OK = false, error = %#v", contextResponse.Error)
+	}
+	contextPayload := contextResponse.Payload.(map[string]any)
+	if contextPayload["available"] != true {
+		t.Fatalf("available = %#v, want true", contextPayload["available"])
+	}
+	if contextPayload["run_id"] != run.ID {
+		t.Fatalf("run_id = %#v, want %s", contextPayload["run_id"], run.ID)
+	}
+	status := contextPayload["status"].(map[string]any)
+	buildTime := status["build_time"].(map[string]any)
+	if buildTime["current_step_label"] != "Codex is thinking" {
+		t.Fatalf("current_step_label = %#v, want Codex is thinking", buildTime["current_step_label"])
+	}
+
+	approvalResponse := postControlAction(t, server.URL, `{
+		"id":"req_side_chat_action_approval",
+		"type":"request",
+		"action":"side_chat_action_request",
+		"payload":{
+			"repo_path":"`+strings.ReplaceAll(repoRoot, `\`, `\\`)+`",
+			"run_id":"`+run.ID+`",
+			"action":"ask_planner_reconsider",
+			"message":"Please reconsider the Android emulator path.",
+			"source":"side_chat_agent",
+			"approved":false
+		}
+	}`)
+	if !approvalResponse.OK {
+		t.Fatalf("approvalResponse.OK = false, error = %#v", approvalResponse.Error)
+	}
+	approvalPayload := approvalResponse.Payload.(map[string]any)
+	if approvalPayload["requires_approval"] != true {
+		t.Fatalf("requires_approval = %#v, want true", approvalPayload["requires_approval"])
+	}
+	if approvalPayload["status"] != "approval_required" {
+		t.Fatalf("status = %#v, want approval_required", approvalPayload["status"])
+	}
+
+	approvedResponse := postControlAction(t, server.URL, `{
+		"id":"req_side_chat_action_approved",
+		"type":"request",
+		"action":"side_chat_action_request",
+		"payload":{
+			"repo_path":"`+strings.ReplaceAll(repoRoot, `\`, `\\`)+`",
+			"run_id":"`+run.ID+`",
+			"action":"queue_planner_note",
+			"message":"Operator asks the planner to prioritize emulator setup.",
+			"source":"operator_quick_action",
+			"approved":true
+		}
+	}`)
+	if !approvedResponse.OK {
+		t.Fatalf("approvedResponse.OK = false, error = %#v", approvedResponse.Error)
+	}
+	approvedPayload := approvedResponse.Payload.(map[string]any)
+	if approvedPayload["status"] != "completed" {
+		t.Fatalf("status = %#v, want completed", approvedPayload["status"])
+	}
+	if approvedPayload["control_message"] == nil {
+		t.Fatal("approved side chat action should return the queued control message")
+	}
+
+	verificationStore, err := state.Open(layout.DBPath)
+	if err != nil {
+		t.Fatalf("state.Open() error = %v", err)
+	}
+	defer verificationStore.Close()
+	if err := verificationStore.EnsureSchema(context.Background()); err != nil {
+		t.Fatalf("EnsureSchema() error = %v", err)
+	}
+	controlMessages, err := verificationStore.ListControlMessages(context.Background(), run.ID, "", 10)
+	if err != nil {
+		t.Fatalf("ListControlMessages() error = %v", err)
+	}
+	if len(controlMessages) != 1 {
+		t.Fatalf("len(controlMessages) = %d, want 1", len(controlMessages))
+	}
+	if controlMessages[0].Source != "operator_quick_action" {
+		t.Fatalf("control message source = %q, want operator_quick_action", controlMessages[0].Source)
+	}
+	actions, err := verificationStore.ListSideChatActions(context.Background(), repoRoot, 10)
+	if err != nil {
+		t.Fatalf("ListSideChatActions() error = %v", err)
+	}
+	if len(actions) != 2 {
+		t.Fatalf("len(actions) = %d, want 2", len(actions))
+	}
+}
+
 func TestLocalControlServerCaptureAndListDogfoodIssues(t *testing.T) {
 	t.Parallel()
 

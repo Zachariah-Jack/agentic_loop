@@ -444,6 +444,22 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_side_chat_messages_repo_created_at
 			ON side_chat_messages(repo_path, created_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS side_chat_actions (
+			id TEXT PRIMARY KEY,
+			repo_path TEXT NOT NULL,
+			run_id TEXT NOT NULL DEFAULT '',
+			action TEXT NOT NULL,
+			request_text TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
+			reason TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			result_message TEXT NOT NULL DEFAULT '',
+			control_message_id TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_side_chat_actions_repo_created_at
+			ON side_chat_actions(repo_path, created_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS dogfood_issues (
 			id TEXT PRIMARY KEY,
 			repo_path TEXT NOT NULL,
@@ -588,7 +604,7 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		return err
 	}
 
-	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version = 19;"); err != nil {
+	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version = 20;"); err != nil {
 		return err
 	}
 

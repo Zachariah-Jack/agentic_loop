@@ -66,8 +66,10 @@ Implemented in the engine now:
 - `set_runtime_config` for verbosity, runtime timeouts, permission profile, and update settings
 - `inject_control_message`
 - `list_control_messages`
-- `send_side_chat_message` as a non-interfering context-agent message
+- `send_side_chat_message` as a context-agent message
 - `list_side_chat_messages`
+- `side_chat_context_snapshot`
+- `side_chat_action_request`
 - `capture_dogfood_issue`
 - `list_dogfood_issues`
 - `list_workers`
@@ -105,7 +107,7 @@ Implemented on top of the protocol now:
 - protocol-backed AI autofill drafting for canonical contract files, with preview-before-save in the shell
 - protocol-backed read-only repo browsing for tree listing and file opening
 - embedded local operator terminal tabs for shell convenience
-- a Side Chat pane skeleton that records side-chat messages through the real protocol without affecting the active run
+- a Side Chat pane that records context-only messages through the real protocol and uses explicit audited actions for planner notes or Safe Stop
 - a protocol-backed Dogfood Notes pane for quick timestamped issue capture tied to the repo and latest run when available
 - a richer progress and roadmap-alignment panel driven by planner-safe operator status plus surfaced roadmap context
 - Worker Panel controls for explicit create, dispatch, remove, and integration-preview actions through the engine protocol
@@ -513,7 +515,7 @@ Behavior:
 
 Purpose:
 
-- send a non-interfering side chat message
+- send a context-only side chat message
 
 Payload:
 
@@ -531,7 +533,7 @@ Behavior:
 - does not call `inject_control_message`
 - does not set `set_stop_flag` / `stop_safe`
 - does not change pending actions, active-run guards, planner input, executor dispatch, or run state
-- can affect a live run only through a separate explicit future promotion action that routes through Control Chat / `inject_control_message`
+- can affect a live run only through a separate explicit audited `side_chat_action_request`
 - does not expose hidden chain-of-thought or secrets
 
 ### `list_side_chat_messages`
@@ -711,6 +713,10 @@ Payload:
 {
   "verbosity": "verbose",
   "permission_profile": "autonomous",
+  "permissions": {
+    "ask_before_planner_direction_changes": true,
+    "ask_before_executor_steering": false
+  },
   "timeouts": {
     "planner_request_timeout": "2m",
     "executor_idle_timeout": "unlimited",
@@ -767,8 +773,24 @@ Actions:
 
 - `send_side_chat_message`
 - `list_side_chat_messages`
+- `side_chat_context_snapshot`
+- `side_chat_action_request`
 
-Side Chat messages are persisted raw and answered by a non-interfering context-agent foundation that reads observable runtime context only. It does not set stop flags, queue control messages, alter pending actions, or change planner/executor flow. Future side-chat escalation must be an explicit audited control action.
+Side Chat messages are persisted raw and answered by a context-agent foundation that reads observable runtime context only. A normal `send_side_chat_message` never changes planner/executor flow.
+
+`side_chat_context_snapshot` returns the same observable status surface the Side Chat agent may use: current repo/run, planner/executor summaries, pending actions, workers, timeout settings, permission mode, update/model health, recent side-chat messages, and recent events. It must not include hidden chain-of-thought or secrets.
+
+`side_chat_action_request` is the only Side Chat escalation path. Supported actions in this slice are:
+
+- `request_latest_status` / `context_snapshot`
+- `queue_planner_note`
+- `ask_planner_question`
+- `ask_planner_reconsider`
+- `inject_control_message`
+- `safe_stop` / `request_safe_stop`
+- `clear_safe_stop`
+
+Planner-direction actions respect the permission profile. If `ask_before_planner_direction_changes` is true and `approved` is false, the action is persisted as `approval_required` and no control message is queued. Approved planner notes are queued raw through the existing control-message path and are delivered only at the next safe planner boundary. Safe Stop writes the same safe-stop flag as `stop_safe`.
 
 ### `get_status_snapshot`
 

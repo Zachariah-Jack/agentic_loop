@@ -227,6 +227,14 @@
             <input id="timeout-executor-turn" type="text" placeholder="unlimited" />
           </label>
           <label class="field">
+            <span>Executor idle timeout</span>
+            <input id="timeout-executor-idle" type="text" placeholder="unlimited" />
+          </label>
+          <label class="field">
+            <span>Sub-agent timeout</span>
+            <input id="timeout-subagent" type="text" placeholder="unlimited" />
+          </label>
+          <label class="field">
             <span>Shell command timeout</span>
             <input id="timeout-shell-command" type="text" placeholder="30m" />
           </label>
@@ -297,7 +305,16 @@
           <div class="panel-meta">Real-time answers from visible runtime context. It does not affect the active run unless you explicitly promote something to Control Chat.</div>
         </div>
         <div class="non-interfering-banner">
-          Side Chat does not set stop flags, queue Control Chat, change pending actions, or alter planner/Codex flow. It answers from observable status/events/artifacts only.
+          Side Chat answers from observable status/events/artifacts. It only affects planner/Codex flow when you press an explicit audited action button.
+        </div>
+        <div class="button-row button-row-wrap">
+          <button id="side-chat-what-now" class="button button-secondary">What is happening now?</button>
+          <button id="side-chat-what-changed" class="button button-secondary">What changed while I was gone?</button>
+          <button id="side-chat-explain-blocker" class="button button-secondary">Explain current blocker</button>
+          <button id="side-chat-ask-planner-reconsider" class="button button-secondary">Ask planner to reconsider</button>
+          <button id="side-chat-safe-stop" class="button button-danger">Safe stop</button>
+          <button id="side-chat-copy-conversation" class="button button-secondary">Copy conversation</button>
+          <button id="side-chat-copy-support" class="button button-secondary">Copy support bundle</button>
         </div>
         <label class="field">
           <span>Side note</span>

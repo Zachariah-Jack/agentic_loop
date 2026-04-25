@@ -154,6 +154,14 @@ async function listSideChatMessages(baseURL, payload = {}, options = {}) {
   return callControlAction(baseURL, "list_side_chat_messages", payload, options);
 }
 
+async function sideChatContextSnapshot(baseURL, payload = {}, options = {}) {
+  return callControlAction(baseURL, "side_chat_context_snapshot", payload, options);
+}
+
+async function sideChatActionRequest(baseURL, payload = {}, options = {}) {
+  return callControlAction(baseURL, "side_chat_action_request", payload, options);
+}
+
 async function captureDogfoodIssue(baseURL, payload, options = {}) {
   return callControlAction(baseURL, "capture_dogfood_issue", payload, options);
 }
@@ -328,6 +336,8 @@ module.exports = {
   injectControlMessage,
   sendSideChatMessage,
   listSideChatMessages,
+  sideChatContextSnapshot,
+  sideChatActionRequest,
   captureDogfoodIssue,
   listDogfoodIssues,
   listWorkers,

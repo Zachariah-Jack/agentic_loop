@@ -33,6 +33,9 @@ func TestApplyPatchUpdatesTimeoutsAndPermissionProfile(t *testing.T) {
 	if cfg.Permissions.Profile != "full_send" {
 		t.Fatalf("Permissions.Profile = %q, want full_send", cfg.Permissions.Profile)
 	}
+	if cfg.Permissions.AskBeforeInstallingDependencies || cfg.Permissions.AskBeforeRunningTests {
+		t.Fatalf("full_send preset should allow routine dependency/test work: %#v", cfg.Permissions)
+	}
 
 	loaded, err := config.Load(path)
 	if err != nil {
@@ -40,6 +43,36 @@ func TestApplyPatchUpdatesTimeoutsAndPermissionProfile(t *testing.T) {
 	}
 	if loaded.Timeouts.ExecutorTurnTimeout != "4h" {
 		t.Fatalf("persisted ExecutorTurnTimeout = %q, want 4h", loaded.Timeouts.ExecutorTurnTimeout)
+	}
+}
+
+func TestApplyPatchAllowsFineGrainedPermissionOverride(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	manager := NewManager(path, config.Default())
+	profile := "full_send"
+	askBeforePush := true
+	cfg, changed, err := manager.ApplyPatch(Patch{
+		PermissionProfile: &profile,
+		Permissions: PermissionPatch{
+			AskBeforeGitPushes: &askBeforePush,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyPatch() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true")
+	}
+	if cfg.Permissions.Profile != "full_send" {
+		t.Fatalf("Permissions.Profile = %q, want full_send", cfg.Permissions.Profile)
+	}
+	if !cfg.Permissions.AskBeforeGitPushes {
+		t.Fatalf("AskBeforeGitPushes = false, want override true: %#v", cfg.Permissions)
+	}
+	if cfg.Permissions.AskBeforeRunningTests {
+		t.Fatalf("AskBeforeRunningTests = true, want full_send preset value false")
 	}
 }
 

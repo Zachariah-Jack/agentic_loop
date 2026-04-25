@@ -26,6 +26,8 @@ const {
   injectControlMessage,
   sendSideChatMessage,
   listSideChatMessages,
+  sideChatContextSnapshot,
+  sideChatActionRequest,
   captureDogfoodIssue,
   listDogfoodIssues,
   listWorkers,
@@ -422,6 +424,28 @@ ipcMain.handle("protocol:list-side-chat-messages", async (event, payload = {}) =
   return listSideChatMessages(requireConnectedAddress(browserWindow, payload.address), {
     repo_path: payload.repoPath || "",
     limit: payload.limit || 20,
+  });
+});
+
+ipcMain.handle("protocol:side-chat-context-snapshot", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return sideChatContextSnapshot(requireConnectedAddress(browserWindow, payload.address), {
+    repo_path: payload.repoPath || "",
+    run_id: payload.runId || "",
+    limit: payload.limit || 10,
+  });
+});
+
+ipcMain.handle("protocol:side-chat-action-request", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return sideChatActionRequest(requireConnectedAddress(browserWindow, payload.address), {
+    repo_path: payload.repoPath || "",
+    run_id: payload.runId || "",
+    action: payload.action || "",
+    message: payload.message || "",
+    source: payload.source || "",
+    reason: payload.reason || "",
+    approved: Boolean(payload.approved),
   });
 });
 

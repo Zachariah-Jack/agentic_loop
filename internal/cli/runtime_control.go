@@ -252,6 +252,55 @@ type controlSideChatSendSnapshot struct {
 	Entry     *controlSideChatMessageSnapshot `json:"entry,omitempty"`
 }
 
+type controlSideChatEventSnapshot struct {
+	At                 string `json:"at,omitempty"`
+	Type               string `json:"type"`
+	Message            string `json:"message,omitempty"`
+	PlannerOutcome     string `json:"planner_outcome,omitempty"`
+	ExecutorTurnStatus string `json:"executor_turn_status,omitempty"`
+	ArtifactPath       string `json:"artifact_path,omitempty"`
+	StopReason         string `json:"stop_reason,omitempty"`
+}
+
+type controlSideChatContextSnapshot struct {
+	Available      bool                             `json:"available"`
+	RepoPath       string                           `json:"repo_path,omitempty"`
+	RunID          string                           `json:"run_id,omitempty"`
+	VisibleContext []string                         `json:"visible_context,omitempty"`
+	Status         controlStatusSnapshot            `json:"status"`
+	RecentMessages []controlSideChatMessageSnapshot `json:"recent_messages,omitempty"`
+	RecentEvents   []controlSideChatEventSnapshot   `json:"recent_events,omitempty"`
+	Message        string                           `json:"message,omitempty"`
+}
+
+type controlSideChatActionEntrySnapshot struct {
+	ID               string `json:"id"`
+	RepoPath         string `json:"repo_path"`
+	RunID            string `json:"run_id,omitempty"`
+	Action           string `json:"action"`
+	RequestText      string `json:"request_text,omitempty"`
+	Source           string `json:"source,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	Status           string `json:"status"`
+	ResultMessage    string `json:"result_message,omitempty"`
+	ControlMessageID string `json:"control_message_id,omitempty"`
+	CreatedAt        string `json:"created_at,omitempty"`
+	UpdatedAt        string `json:"updated_at,omitempty"`
+}
+
+type controlSideChatActionSnapshot struct {
+	Available        bool                                `json:"available"`
+	Stored           bool                                `json:"stored"`
+	RequiresApproval bool                                `json:"requires_approval"`
+	Action           string                              `json:"action,omitempty"`
+	Status           string                              `json:"status,omitempty"`
+	Message          string                              `json:"message,omitempty"`
+	Entry            *controlSideChatActionEntrySnapshot `json:"entry,omitempty"`
+	ControlMessage   *controlMessageSnapshot             `json:"control_message,omitempty"`
+	StopFlag         *controlStopFlagState               `json:"stop_flag,omitempty"`
+	Context          *controlSideChatContextSnapshot     `json:"context,omitempty"`
+}
+
 type controlDogfoodIssueSnapshot struct {
 	ID        string `json:"id"`
 	RepoPath  string `json:"repo_path"`
@@ -658,6 +707,16 @@ func newLocalControlServer(inv Invocation) control.Server {
 			ListSideChatMessages: func(ctx context.Context, request control.ListSideChatMessagesRequest) (any, error) {
 				return withControlStateBusyRetry(ctx, func() (controlSideChatListSnapshot, error) {
 					return listSideChatMessages(ctx, *current, request)
+				})
+			},
+			SideChatContextSnapshot: func(ctx context.Context, request control.SideChatContextSnapshotRequest) (any, error) {
+				return withControlStateBusyRetry(ctx, func() (controlSideChatContextSnapshot, error) {
+					return sideChatContextSnapshot(ctx, *current, request)
+				})
+			},
+			SideChatActionRequest: func(ctx context.Context, request control.SideChatActionRequest) (any, error) {
+				return withControlStateBusyRetry(ctx, func() (controlSideChatActionSnapshot, error) {
+					return requestSideChatAction(ctx, *current, request)
 				})
 			},
 			CaptureDogfoodIssue: func(ctx context.Context, request control.CaptureDogfoodIssueRequest) (any, error) {
@@ -1073,6 +1132,19 @@ func buildRuntimeConfigSnapshot(inv Invocation) controlRuntimeConfigSnapshot {
 			"timeouts.install_timeout",
 			"timeouts.human_wait_timeout",
 			"permission_profile",
+			"permissions.ask_before_installing_programs",
+			"permissions.ask_before_installing_dependencies",
+			"permissions.ask_before_modifying_files_outside_repo",
+			"permissions.ask_before_deleting_files",
+			"permissions.ask_before_running_tests",
+			"permissions.ask_before_emulator_device_testing",
+			"permissions.ask_before_network_calls",
+			"permissions.ask_before_git_commits",
+			"permissions.ask_before_git_pushes",
+			"permissions.ask_before_updater_installs",
+			"permissions.ask_before_worker_parallelism",
+			"permissions.ask_before_executor_steering",
+			"permissions.ask_before_planner_direction_changes",
 			"updates.update_channel",
 			"updates.auto_check_updates",
 			"updates.auto_download_updates",
@@ -1130,7 +1202,7 @@ func applyRuntimeConfigPatch(ctx context.Context, inv *Invocation, patch runtime
 		}
 		inv.Config.Verbosity = normalized
 	}
-	if patch.Timeouts.HasChanges() || patch.PermissionProfile != nil || patch.Updates.HasChanges() {
+	if patch.Timeouts.HasChanges() || patch.PermissionProfile != nil || patch.Permissions.HasChanges() || patch.Updates.HasChanges() {
 		manager := runtimecfg.NewManager("", inv.Config)
 		cfg, _, err := manager.ApplyPatch(patch)
 		if err != nil {

@@ -13,6 +13,7 @@ This document is the operator-facing readiness and release audit for the current
 - predictable artifact placement under `.orchestrator/artifacts/`
 - target-repo scaffolding for real app-building work
 - portable Windows release build and first installer path
+- runtime timeout/profile settings, active-only Total Build Time status, Side Chat context answers, and GitHub Releases update-check/changelog foundation
 
 ## Explicitly Deferred
 
@@ -22,6 +23,8 @@ This document is the operator-facing readiness and release audit for the current
 - plugins, reviewer agents, and drift-watch agents
 - orchestrator-managed multi-worker mode
 - signed-binary distribution and automated release publishing
+- safe self-install/update replacement for a running Windows binary
+- final LLM-backed Side Chat tooling backend
 - hidden background or daemonized autonomy
 
 ## Prerequisites
@@ -68,6 +71,8 @@ This document is the operator-facing readiness and release audit for the current
 9. `orchestrator history`
 10. inspect `.orchestrator/logs/events.jsonl`
 11. inspect `.orchestrator/artifacts/`
+12. `orchestrator settings show`
+13. `orchestrator update status`
 
 ## Failure Triage Checklist
 
@@ -118,3 +123,5 @@ All of these should pass before calling the current build prime-time v1 ready:
 - `orchestrator auto continue`
 - `orchestrator status`
 - `orchestrator history`
+- `orchestrator settings show`
+- `orchestrator update status`

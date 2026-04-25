@@ -82,6 +82,12 @@ contextBridge.exposeInMainWorld("orchestratorConsole", {
   listSideChatMessages(repoPath = "", limit = 20, address = "") {
     return ipcRenderer.invoke("protocol:list-side-chat-messages", { repoPath, limit, address });
   },
+  sideChatContextSnapshot(repoPath = "", runId = "", limit = 10, address = "") {
+    return ipcRenderer.invoke("protocol:side-chat-context-snapshot", { repoPath, runId, limit, address });
+  },
+  sideChatActionRequest(payload) {
+    return ipcRenderer.invoke("protocol:side-chat-action-request", payload);
+  },
   captureDogfoodIssue(payload) {
     return ipcRenderer.invoke("protocol:capture-dogfood-issue", payload);
   },

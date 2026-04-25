@@ -25,6 +25,8 @@ const {
   injectControlMessage,
   sendSideChatMessage,
   listSideChatMessages,
+  sideChatContextSnapshot,
+  sideChatActionRequest,
   captureDogfoodIssue,
   listDogfoodIssues,
   listWorkers,
@@ -268,6 +270,34 @@ test("runtime config and update helpers use explicit protocol actions", async ()
   assert.match(requestBodies[2], /"action":"check_for_updates"/);
   assert.match(requestBodies[3], /"action":"get_update_status"/);
   assert.match(requestBodies[4], /"action":"get_update_changelog"/);
+});
+
+test("renderer exposes every timeout field and side-chat quick actions", () => {
+  const root = path.resolve(__dirname, "..");
+  const html = fs.readFileSync(path.join(root, "src", "renderer", "index.html"), "utf8");
+  const app = fs.readFileSync(path.join(root, "src", "renderer", "app.js"), "utf8");
+
+  for (const id of [
+    "timeout-planner-request",
+    "timeout-executor-idle",
+    "timeout-executor-turn",
+    "timeout-subagent",
+    "timeout-shell-command",
+    "timeout-install",
+    "timeout-human-wait",
+    "side-chat-what-now",
+    "side-chat-what-changed",
+    "side-chat-explain-blocker",
+    "side-chat-ask-planner-reconsider",
+    "side-chat-safe-stop",
+    "side-chat-copy-conversation",
+    "side-chat-copy-support",
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(app, /timeoutExecutorIdle/);
+  assert.match(app, /timeoutSubagent/);
+  assert.match(app, /sideChatActionRequest/);
 });
 
 test("normalizeModelHealthSnapshot lets newer successful tests clear stale Codex model errors", () => {
@@ -586,10 +616,22 @@ test("side chat protocol helpers use the real control actions", async () => {
     context_policy: "repo_and_latest_run_summary",
   }, { fetchImpl });
   await listSideChatMessages("127.0.0.1:44777", { repo_path: "D:/repo", limit: 10 }, { fetchImpl });
+  await sideChatContextSnapshot("127.0.0.1:44777", { repo_path: "D:/repo", run_id: "run_1" }, { fetchImpl });
+  await sideChatActionRequest("127.0.0.1:44777", {
+    repo_path: "D:/repo",
+    run_id: "run_1",
+    action: "ask_planner_reconsider",
+    message: "Please reconsider emulator setup.",
+    approved: true,
+  }, { fetchImpl });
 
   assert.match(requestBodies[0], /"action":"send_side_chat_message"/);
   assert.match(requestBodies[0], /"context_policy":"repo_and_latest_run_summary"/);
   assert.match(requestBodies[1], /"action":"list_side_chat_messages"/);
+  assert.match(requestBodies[2], /"action":"side_chat_context_snapshot"/);
+  assert.match(requestBodies[2], /"run_id":"run_1"/);
+  assert.match(requestBodies[3], /"action":"side_chat_action_request"/);
+  assert.match(requestBodies[3], /"ask_planner_reconsider"/);
 });
 
 test("dogfood issue protocol helpers use the real control actions", async () => {
@@ -2301,7 +2343,7 @@ test("buildSideChatViewModel normalizes recorded side chat messages", () => {
 
   assert.equal(vm.count, 1);
   assert.equal(vm.nonInterfering, true);
-  assert.match(vm.modeDescription, /does not queue Control Chat/);
+  assert.match(vm.modeDescription, /explicit audited action/);
   assert.equal(vm.buttonLabel, "Ask Side Chat");
   assert.equal(vm.items[0].rawText, "What remains before release?");
   assert.equal(vm.items[0].backendState, "context_agent");

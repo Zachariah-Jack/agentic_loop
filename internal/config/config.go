@@ -119,21 +119,84 @@ func DefaultTimeouts() Timeouts {
 }
 
 func DefaultPermissions() Permissions {
-	return Permissions{
-		Profile:                         "balanced",
-		AskBeforeInstallingPrograms:     true,
-		AskBeforeInstallingDependencies: false,
-		AskBeforeOutsideRepoChanges:     true,
-		AskBeforeDeletingFiles:          true,
-		AskBeforeRunningTests:           false,
-		AskBeforeEmulatorTesting:        true,
-		AskBeforeNetworkCalls:           false,
-		AskBeforeGitCommits:             true,
-		AskBeforeGitPushes:              true,
-		AskBeforeUpdaterInstalls:        true,
-		AskBeforeWorkerParallelism:      true,
-		AskBeforeExecutorSteering:       true,
-		AskBeforePlannerDirection:       true,
+	preset, _ := PermissionPreset("balanced")
+	return preset
+}
+
+func PermissionPreset(profile string) (Permissions, error) {
+	profile, err := NormalizePermissionProfile(profile)
+	if err != nil {
+		return Permissions{}, err
+	}
+	switch profile {
+	case "guided":
+		return Permissions{
+			Profile:                         "guided",
+			AskBeforeInstallingPrograms:     true,
+			AskBeforeInstallingDependencies: true,
+			AskBeforeOutsideRepoChanges:     true,
+			AskBeforeDeletingFiles:          true,
+			AskBeforeRunningTests:           true,
+			AskBeforeEmulatorTesting:        true,
+			AskBeforeNetworkCalls:           true,
+			AskBeforeGitCommits:             true,
+			AskBeforeGitPushes:              true,
+			AskBeforeUpdaterInstalls:        true,
+			AskBeforeWorkerParallelism:      true,
+			AskBeforeExecutorSteering:       true,
+			AskBeforePlannerDirection:       true,
+		}, nil
+	case "autonomous":
+		return Permissions{
+			Profile:                         "autonomous",
+			AskBeforeInstallingPrograms:     false,
+			AskBeforeInstallingDependencies: false,
+			AskBeforeOutsideRepoChanges:     true,
+			AskBeforeDeletingFiles:          true,
+			AskBeforeRunningTests:           false,
+			AskBeforeEmulatorTesting:        false,
+			AskBeforeNetworkCalls:           false,
+			AskBeforeGitCommits:             false,
+			AskBeforeGitPushes:              true,
+			AskBeforeUpdaterInstalls:        true,
+			AskBeforeWorkerParallelism:      false,
+			AskBeforeExecutorSteering:       false,
+			AskBeforePlannerDirection:       true,
+		}, nil
+	case "full_send":
+		return Permissions{
+			Profile:                         "full_send",
+			AskBeforeInstallingPrograms:     false,
+			AskBeforeInstallingDependencies: false,
+			AskBeforeOutsideRepoChanges:     true,
+			AskBeforeDeletingFiles:          false,
+			AskBeforeRunningTests:           false,
+			AskBeforeEmulatorTesting:        false,
+			AskBeforeNetworkCalls:           false,
+			AskBeforeGitCommits:             false,
+			AskBeforeGitPushes:              false,
+			AskBeforeUpdaterInstalls:        false,
+			AskBeforeWorkerParallelism:      false,
+			AskBeforeExecutorSteering:       false,
+			AskBeforePlannerDirection:       false,
+		}, nil
+	default:
+		return Permissions{
+			Profile:                         "balanced",
+			AskBeforeInstallingPrograms:     true,
+			AskBeforeInstallingDependencies: false,
+			AskBeforeOutsideRepoChanges:     true,
+			AskBeforeDeletingFiles:          true,
+			AskBeforeRunningTests:           false,
+			AskBeforeEmulatorTesting:        true,
+			AskBeforeNetworkCalls:           false,
+			AskBeforeGitCommits:             true,
+			AskBeforeGitPushes:              true,
+			AskBeforeUpdaterInstalls:        true,
+			AskBeforeWorkerParallelism:      true,
+			AskBeforeExecutorSteering:       true,
+			AskBeforePlannerDirection:       true,
+		}, nil
 	}
 }
 
@@ -323,7 +386,28 @@ func NormalizePermissions(value Permissions) Permissions {
 		profile = defaults.Profile
 	}
 	value.Profile = profile
+	if permissionsBoolFieldsAllFalse(value) {
+		if preset, err := PermissionPreset(profile); err == nil {
+			return preset
+		}
+	}
 	return value
+}
+
+func permissionsBoolFieldsAllFalse(value Permissions) bool {
+	return !value.AskBeforeInstallingPrograms &&
+		!value.AskBeforeInstallingDependencies &&
+		!value.AskBeforeOutsideRepoChanges &&
+		!value.AskBeforeDeletingFiles &&
+		!value.AskBeforeRunningTests &&
+		!value.AskBeforeEmulatorTesting &&
+		!value.AskBeforeNetworkCalls &&
+		!value.AskBeforeGitCommits &&
+		!value.AskBeforeGitPushes &&
+		!value.AskBeforeUpdaterInstalls &&
+		!value.AskBeforeWorkerParallelism &&
+		!value.AskBeforeExecutorSteering &&
+		!value.AskBeforePlannerDirection
 }
 
 func NormalizePermissionProfile(value string) (string, error) {

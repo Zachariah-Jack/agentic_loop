@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"orchestrator/internal/control"
+	"orchestrator/internal/journal"
 	"orchestrator/internal/state"
 )
 
@@ -138,6 +140,325 @@ func listSideChatMessages(ctx context.Context, inv Invocation, request control.L
 		snapshot.Message = "no side chat conversation is recorded yet; Side Chat answers from observable runtime context and does not affect the active run"
 	}
 	return snapshot, nil
+}
+
+func sideChatContextSnapshot(ctx context.Context, inv Invocation, request control.SideChatContextSnapshotRequest) (controlSideChatContextSnapshot, error) {
+	repoRoot, err := resolveRequestedRepoRoot(inv.RepoRoot, request.RepoPath)
+	if err != nil {
+		return controlSideChatContextSnapshot{}, err
+	}
+
+	status, err := buildControlStatusSnapshot(ctx, inv, strings.TrimSpace(request.RunID))
+	if err != nil {
+		return controlSideChatContextSnapshot{}, err
+	}
+	runID := strings.TrimSpace(request.RunID)
+	if runID == "" && status.Run != nil {
+		runID = strings.TrimSpace(status.Run.ID)
+	}
+
+	limit := request.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	messages, err := listSideChatMessages(ctx, inv, control.ListSideChatMessagesRequest{
+		RepoPath: repoRoot,
+		Limit:    limit,
+	})
+	if err != nil {
+		return controlSideChatContextSnapshot{}, err
+	}
+
+	recentEvents := []controlSideChatEventSnapshot{}
+	if runID != "" {
+		events, err := latestRunEvents(inv.Layout, runID, limit)
+		if err != nil {
+			return controlSideChatContextSnapshot{}, err
+		}
+		recentEvents = sideChatEventSnapshots(events)
+	}
+
+	return controlSideChatContextSnapshot{
+		Available: true,
+		RepoPath:  repoRoot,
+		RunID:     runID,
+		VisibleContext: []string{
+			"current repo",
+			"latest run/status",
+			"planner status summary",
+			"executor status summary",
+			"pending action and approval state",
+			"worker/sub-agent status",
+			"timeout settings",
+			"permission mode",
+			"update/model health status",
+			"recent observable events",
+		},
+		Status:         status,
+		RecentMessages: messages.Items,
+		RecentEvents:   recentEvents,
+		Message:        "side chat context snapshot contains only observable runtime state and persisted user-visible messages",
+	}, nil
+}
+
+func requestSideChatAction(ctx context.Context, inv Invocation, request control.SideChatActionRequest) (controlSideChatActionSnapshot, error) {
+	repoRoot, err := resolveRequestedRepoRoot(inv.RepoRoot, request.RepoPath)
+	if err != nil {
+		return controlSideChatActionSnapshot{}, err
+	}
+	action := normalizeSideChatAction(request.Action)
+	if action == "" {
+		return controlSideChatActionSnapshot{}, errors.New("side chat action is required")
+	}
+	if !pathExists(inv.Layout.DBPath) {
+		return controlSideChatActionSnapshot{
+			Available: false,
+			Stored:    false,
+			Action:    action,
+			Status:    string(state.SideChatActionUnsupported),
+			Message:   "side chat actions are unavailable because runtime state has not been initialized yet",
+		}, nil
+	}
+
+	store, err := openExistingStore(inv.Layout)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return controlSideChatActionSnapshot{
+				Available: false,
+				Stored:    false,
+				Action:    action,
+				Status:    string(state.SideChatActionUnsupported),
+				Message:   "side chat actions are unavailable because runtime state has not been initialized yet",
+			}, nil
+		}
+		return controlSideChatActionSnapshot{}, err
+	}
+	defer store.Close()
+	if err := store.EnsureSchema(ctx); err != nil {
+		return controlSideChatActionSnapshot{}, err
+	}
+
+	source := strings.TrimSpace(request.Source)
+	if source == "" {
+		source = "side_chat"
+	}
+	reason := strings.TrimSpace(request.Reason)
+	if reason == "" {
+		reason = "side_chat_action_request"
+	}
+	runID := strings.TrimSpace(request.RunID)
+	if runID == "" {
+		if run, found, err := store.LatestRun(ctx); err != nil {
+			return controlSideChatActionSnapshot{}, err
+		} else if found && strings.EqualFold(strings.TrimSpace(run.RepoPath), strings.TrimSpace(repoRoot)) {
+			runID = strings.TrimSpace(run.ID)
+		}
+	}
+
+	switch action {
+	case "request_latest_status", "context_snapshot":
+		snapshot, err := sideChatContextSnapshot(ctx, inv, control.SideChatContextSnapshotRequest{
+			RepoPath: repoRoot,
+			RunID:    runID,
+			Limit:    10,
+		})
+		if err != nil {
+			return controlSideChatActionSnapshot{}, err
+		}
+		recorded, err := store.RecordSideChatAction(ctx, state.CreateSideChatActionParams{
+			RepoPath:      repoRoot,
+			RunID:         snapshot.RunID,
+			Action:        action,
+			RequestText:   request.Message,
+			Source:        source,
+			Reason:        reason,
+			Status:        state.SideChatActionCompleted,
+			ResultMessage: "returned current side-chat context snapshot",
+			CreatedAt:     time.Now().UTC(),
+		})
+		if err != nil {
+			return controlSideChatActionSnapshot{}, err
+		}
+		entry := controlSideChatActionSnapshotFromState(recorded)
+		return controlSideChatActionSnapshot{
+			Available: true,
+			Stored:    true,
+			Action:    action,
+			Status:    string(recorded.Status),
+			Message:   recorded.ResultMessage,
+			Entry:     &entry,
+			Context:   &snapshot,
+		}, nil
+	case "queue_planner_note", "ask_planner_question", "ask_planner_reconsider", "inject_control_message":
+		if strings.TrimSpace(request.Message) == "" {
+			return controlSideChatActionSnapshot{}, errors.New("side chat planner action message is required")
+		}
+		cfg := currentConfig(inv)
+		if cfg.Permissions.AskBeforePlannerDirection && !request.Approved {
+			recorded, err := store.RecordSideChatAction(ctx, state.CreateSideChatActionParams{
+				RepoPath:      repoRoot,
+				RunID:         runID,
+				Action:        action,
+				RequestText:   request.Message,
+				Source:        source,
+				Reason:        reason,
+				Status:        state.SideChatActionApprovalRequired,
+				ResultMessage: "permission profile requires explicit approval before side chat forwards planner-direction notes",
+				CreatedAt:     time.Now().UTC(),
+			})
+			if err != nil {
+				return controlSideChatActionSnapshot{}, err
+			}
+			entry := controlSideChatActionSnapshotFromState(recorded)
+			return controlSideChatActionSnapshot{
+				Available:        true,
+				Stored:           true,
+				RequiresApproval: true,
+				Action:           action,
+				Status:           string(recorded.Status),
+				Message:          recorded.ResultMessage,
+				Entry:            &entry,
+			}, nil
+		}
+		message, err := injectControlMessage(ctx, inv, control.InjectControlMessageRequest{
+			RunID:   runID,
+			Message: request.Message,
+			Source:  source,
+			Reason:  reason,
+		})
+		if err != nil {
+			recorded, recordErr := store.RecordSideChatAction(ctx, state.CreateSideChatActionParams{
+				RepoPath:      repoRoot,
+				RunID:         runID,
+				Action:        action,
+				RequestText:   request.Message,
+				Source:        source,
+				Reason:        reason,
+				Status:        state.SideChatActionFailed,
+				ResultMessage: err.Error(),
+				CreatedAt:     time.Now().UTC(),
+			})
+			if recordErr != nil {
+				return controlSideChatActionSnapshot{}, recordErr
+			}
+			entry := controlSideChatActionSnapshotFromState(recorded)
+			return controlSideChatActionSnapshot{
+				Available: true,
+				Stored:    true,
+				Action:    action,
+				Status:    string(recorded.Status),
+				Message:   recorded.ResultMessage,
+				Entry:     &entry,
+			}, nil
+		}
+		recorded, err := store.RecordSideChatAction(ctx, state.CreateSideChatActionParams{
+			RepoPath:         repoRoot,
+			RunID:            message.RunID,
+			Action:           action,
+			RequestText:      request.Message,
+			Source:           source,
+			Reason:           reason,
+			Status:           state.SideChatActionCompleted,
+			ResultMessage:    "queued raw side-chat note for planner-visible control chat at the next safe point",
+			ControlMessageID: message.ID,
+			CreatedAt:        time.Now().UTC(),
+		})
+		if err != nil {
+			return controlSideChatActionSnapshot{}, err
+		}
+		entry := controlSideChatActionSnapshotFromState(recorded)
+		return controlSideChatActionSnapshot{
+			Available:      true,
+			Stored:         true,
+			Action:         action,
+			Status:         string(recorded.Status),
+			Message:        recorded.ResultMessage,
+			Entry:          &entry,
+			ControlMessage: &message,
+		}, nil
+	case "request_safe_stop", "safe_stop":
+		stopFlag, err := setControlStopFlag(inv, firstNonEmpty(strings.TrimSpace(request.Message), "side_chat_requested_safe_stop"))
+		if err != nil {
+			return controlSideChatActionSnapshot{}, err
+		}
+		recorded, err := store.RecordSideChatAction(ctx, state.CreateSideChatActionParams{
+			RepoPath:      repoRoot,
+			RunID:         runID,
+			Action:        action,
+			RequestText:   request.Message,
+			Source:        source,
+			Reason:        reason,
+			Status:        state.SideChatActionCompleted,
+			ResultMessage: "requested safe stop; the loop will stop at the next planner-safe pause point",
+			CreatedAt:     time.Now().UTC(),
+		})
+		if err != nil {
+			return controlSideChatActionSnapshot{}, err
+		}
+		entry := controlSideChatActionSnapshotFromState(recorded)
+		return controlSideChatActionSnapshot{
+			Available: true,
+			Stored:    true,
+			Action:    action,
+			Status:    string(recorded.Status),
+			Message:   recorded.ResultMessage,
+			Entry:     &entry,
+			StopFlag:  &stopFlag,
+		}, nil
+	case "clear_safe_stop":
+		stopFlag, err := clearControlStopFlag(inv)
+		if err != nil {
+			return controlSideChatActionSnapshot{}, err
+		}
+		recorded, err := store.RecordSideChatAction(ctx, state.CreateSideChatActionParams{
+			RepoPath:      repoRoot,
+			RunID:         runID,
+			Action:        action,
+			RequestText:   request.Message,
+			Source:        source,
+			Reason:        reason,
+			Status:        state.SideChatActionCompleted,
+			ResultMessage: "cleared the pending safe-stop flag",
+			CreatedAt:     time.Now().UTC(),
+		})
+		if err != nil {
+			return controlSideChatActionSnapshot{}, err
+		}
+		entry := controlSideChatActionSnapshotFromState(recorded)
+		return controlSideChatActionSnapshot{
+			Available: true,
+			Stored:    true,
+			Action:    action,
+			Status:    string(recorded.Status),
+			Message:   recorded.ResultMessage,
+			Entry:     &entry,
+			StopFlag:  &stopFlag,
+		}, nil
+	default:
+		recorded, err := store.RecordSideChatAction(ctx, state.CreateSideChatActionParams{
+			RepoPath:      repoRoot,
+			RunID:         runID,
+			Action:        action,
+			RequestText:   request.Message,
+			Source:        source,
+			Reason:        reason,
+			Status:        state.SideChatActionUnsupported,
+			ResultMessage: fmt.Sprintf("side chat action %q is not supported by this backend", action),
+			CreatedAt:     time.Now().UTC(),
+		})
+		if err != nil {
+			return controlSideChatActionSnapshot{}, err
+		}
+		entry := controlSideChatActionSnapshotFromState(recorded)
+		return controlSideChatActionSnapshot{
+			Available: true,
+			Stored:    true,
+			Action:    action,
+			Status:    string(recorded.Status),
+			Message:   recorded.ResultMessage,
+			Entry:     &entry,
+		}, nil
+	}
 }
 
 func buildSideChatAgentReply(inv Invocation, run *state.Run, question string) string {
@@ -274,5 +595,42 @@ func controlSideChatSnapshotFromState(message state.SideChatMessage) controlSide
 		ResponseMessage: strings.TrimSpace(message.ResponseMessage),
 		CreatedAt:       formatSnapshotTime(message.CreatedAt),
 		UpdatedAt:       formatSnapshotTime(message.UpdatedAt),
+	}
+}
+
+func normalizeSideChatAction(action string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(action), "-", "_"))
+}
+
+func sideChatEventSnapshots(events []journal.Event) []controlSideChatEventSnapshot {
+	items := make([]controlSideChatEventSnapshot, 0, len(events))
+	for _, event := range events {
+		items = append(items, controlSideChatEventSnapshot{
+			At:                 formatSnapshotTime(event.At),
+			Type:               strings.TrimSpace(event.Type),
+			Message:            previewString(strings.TrimSpace(event.Message), 240),
+			PlannerOutcome:     strings.TrimSpace(event.PlannerOutcome),
+			ExecutorTurnStatus: strings.TrimSpace(event.ExecutorTurnStatus),
+			ArtifactPath:       strings.TrimSpace(event.ArtifactPath),
+			StopReason:         strings.TrimSpace(event.StopReason),
+		})
+	}
+	return items
+}
+
+func controlSideChatActionSnapshotFromState(action state.SideChatAction) controlSideChatActionEntrySnapshot {
+	return controlSideChatActionEntrySnapshot{
+		ID:               action.ID,
+		RepoPath:         strings.TrimSpace(action.RepoPath),
+		RunID:            strings.TrimSpace(action.RunID),
+		Action:           strings.TrimSpace(action.Action),
+		RequestText:      action.RequestText,
+		Source:           strings.TrimSpace(action.Source),
+		Reason:           strings.TrimSpace(action.Reason),
+		Status:           string(action.Status),
+		ResultMessage:    strings.TrimSpace(action.ResultMessage),
+		ControlMessageID: strings.TrimSpace(action.ControlMessageID),
+		CreatedAt:        formatSnapshotTime(action.CreatedAt),
+		UpdatedAt:        formatSnapshotTime(action.UpdatedAt),
 	}
 }

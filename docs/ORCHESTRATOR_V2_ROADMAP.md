@@ -4,8 +4,8 @@ Status: Proposed phased V2 implementation roadmap with several dogfood foundatio
 
 Current implementation note:
 
-- The V2 shell/control stack now includes runtime-configurable timeouts, active-only Total Build Time tracking, a non-interfering Side Chat context-agent foundation, persisted permission/autonomy profile settings, and GitHub Releases update-check/changelog support.
-- Safe Windows self-install, the final LLM-backed side-chat tool/escalation backend, and broad permission-profile enforcement across every future installer/test/Git workflow remain staged follow-up work.
+- The V2 shell/control stack now includes runtime-configurable timeouts, active-only Total Build Time tracking, a Side Chat context-agent foundation with explicit audited action requests, persisted permission/autonomy profile settings, and GitHub Releases update-check/changelog support.
+- Safe Windows self-install, the final LLM-backed side-chat tooling backend, and broad permission-profile enforcement across every future installer/test/Git workflow remain staged follow-up work.
 
 ## Purpose
 
@@ -124,7 +124,7 @@ Acceptance:
 
 Goal:
 
-- add non-interfering side chat with explicit promotion into control chat
+- add Side Chat with normal context-only messages and explicit promotion/action requests into control chat
 
 Deliver:
 
@@ -134,7 +134,7 @@ Deliver:
 
 Acceptance:
 
-- side chat does not affect the active run unless promoted
+- side chat does not affect the active run unless the operator uses an explicit audited action
 
 ### Phase 7: Console Shell
 
@@ -191,7 +191,7 @@ Deliver:
 Acceptance:
 
 - distinction is obvious in UX
-- live run remains unaffected by side chat
+- live run remains unaffected by normal side chat messages
 
 ### Phase 10: Contract Editor
 
