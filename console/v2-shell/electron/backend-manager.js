@@ -1,6 +1,8 @@
 const fs = require("node:fs");
 const crypto = require("node:crypto");
-const { spawn } = require("node:child_process");
+const net = require("node:net");
+const path = require("node:path");
+const { execFile, spawn } = require("node:child_process");
 
 const ownerMarker = "orchestrator-v2-dogfood";
 
@@ -82,6 +84,84 @@ function parseControlPort(address) {
   const portText = text.split(":").pop();
   const port = Number.parseInt(portText, 10);
   return Number.isInteger(port) && port > 0 ? port : 0;
+}
+
+function execFilePromise(command, args, options = {}) {
+  const execFileImpl = options.execFileImpl || execFile;
+  return new Promise((resolve, reject) => {
+    execFileImpl(command, args, { windowsHide: true, ...options.execOptions }, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+function resolveBackendBinary(options = {}) {
+  const metadata = loadBackendMetadata(options.metaPath || process.env.ORCHESTRATOR_V2_BACKEND_META || "");
+  const fromMetadata = String(metadata && metadata.binary_path || "").trim();
+  if (fromMetadata && fs.existsSync(fromMetadata)) {
+    return fromMetadata;
+  }
+  const candidate = path.resolve(__dirname, "..", "..", "dist", process.platform === "win32" ? "orchestrator.exe" : "orchestrator");
+  if (fs.existsSync(candidate)) {
+    return candidate;
+  }
+  return fromMetadata || candidate;
+}
+
+async function allocateLoopbackAddress(preferredPort = 0) {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen({ host: "127.0.0.1", port: preferredPort }, () => {
+      const address = server.address();
+      const port = address && address.port ? address.port : preferredPort;
+      server.close(() => resolve(`127.0.0.1:${port}`));
+    });
+  });
+}
+
+async function startBackendForRepo(options = {}) {
+  const repoPath = String(options.repoPath || "").trim();
+  if (repoPath === "") {
+    throw new Error("repo path is required");
+  }
+  if (!fs.existsSync(repoPath)) {
+    throw new Error(`repo path does not exist: ${repoPath}`);
+  }
+  const binaryPath = resolveBackendBinary(options);
+  if (!fs.existsSync(binaryPath)) {
+    throw new Error(`orchestrator backend binary was not found at ${binaryPath}. Build it with: go build -o .\\dist\\orchestrator.exe .\\cmd\\orchestrator`);
+  }
+  await execFilePromise(binaryPath, ["init"], {
+    execFileImpl: options.execFileImpl,
+    execOptions: { cwd: repoPath },
+  });
+  const controlAddr = options.controlAddr || await allocateLoopbackAddress(0);
+  const child = (options.spawnImpl || spawn)(binaryPath, ["control", "serve", "--addr", controlAddr], {
+    cwd: repoPath,
+    detached: false,
+    windowsHide: true,
+    stdio: "ignore",
+  });
+  if (child.unref) {
+    child.unref();
+  }
+  return {
+    repoPath,
+    address: normalizeHTTPAddress(controlAddr),
+    controlAddr,
+    binaryPath,
+    pid: child.pid,
+    ownedBackend: true,
+    label: path.basename(repoPath),
+  };
 }
 
 function normalizePathText(pathValue) {
@@ -330,4 +410,5 @@ module.exports = {
   listPortListeners,
   clearOwnedBackendPort,
   restartOwnedBackend,
+  startBackendForRepo,
 };

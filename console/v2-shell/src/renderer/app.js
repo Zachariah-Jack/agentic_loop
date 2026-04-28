@@ -20,6 +20,51 @@ const defaultAutofillTargets = [
   ".orchestrator/goal.md",
   ".orchestrator/human-notes.md",
 ];
+
+function basenameFromPath(value, fallback = "Aurora Session") {
+  const text = String(value || "").trim().replace(/[\\/]+$/, "");
+  if (!text) {
+    return fallback;
+  }
+  const parts = text.split(/[\\/]+/);
+  return parts[parts.length - 1] || fallback;
+}
+
+function nextSessionID() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  return `session_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function createSessionRecord(input = {}) {
+  const expectedRepoPath = String(input.expectedRepoPath || input.repoPath || bootstrapExpectedRepoPath || "").trim();
+  const address = String(input.address || defaultAddress || bootstrapAddress).trim();
+  return {
+    id: String(input.id || nextSessionID()).trim(),
+    label: String(input.label || basenameFromPath(expectedRepoPath, "Current Repo")).trim(),
+    address,
+    expectedRepoPath,
+    repoPath: String(input.repoPath || expectedRepoPath).trim(),
+    pid: Number(input.pid) || 0,
+    ownedBackend: Boolean(input.ownedBackend),
+    createdAt: String(input.createdAt || new Date().toISOString()).trim(),
+    snapshotState: null,
+  };
+}
+
+const initialSessions = persistedShellSession.sessions && persistedShellSession.sessions.length > 0
+  ? persistedShellSession.sessions.map((session) => createSessionRecord(session))
+  : [createSessionRecord({
+    address: defaultAddress,
+    expectedRepoPath: bootstrapExpectedRepoPath,
+    label: basenameFromPath(bootstrapExpectedRepoPath, "Current Repo"),
+  })];
+const initialActiveSessionID = persistedShellSession.activeSessionID
+  && initialSessions.some((session) => session.id === persistedShellSession.activeSessionID)
+  ? persistedShellSession.activeSessionID
+  : initialSessions[0].id;
+const initialActiveSession = initialSessions.find((session) => session.id === initialActiveSessionID) || initialSessions[0];
 const softRefreshEvents = new Set([
   "run_started",
   "planner_turn_completed",
@@ -50,8 +95,11 @@ const softRefreshEvents = new Set([
 ]);
 
 const state = {
-  address: persistedShellSession.address || defaultAddress,
-  expectedRepoPath: bootstrapExpectedRepoPath,
+  sessions: initialSessions,
+  activeSessionID: initialActiveSessionID,
+  sessionMenu: { open: false, sessionID: "", x: 0, y: 0 },
+  address: initialActiveSession.address || persistedShellSession.address || defaultAddress,
+  expectedRepoPath: initialActiveSession.expectedRepoPath || bootstrapExpectedRepoPath,
   connection: {
     connected: false,
     status: "disconnected",
@@ -75,12 +123,17 @@ const state = {
     exists: false,
     dirty: false,
     status: "not_loaded",
+    expanded: false,
+    editing: false,
+    draft: "",
   },
   setupHealth: null,
   setupActionInFlight: "",
   latestSnapshotCapture: null,
   autofill: {
     step: 0,
+    homeExpanded: false,
+    homeFirstMessage: "",
     answers: {
       project_summary: "",
       desired_outcome: "",
@@ -93,6 +146,12 @@ const state = {
     targets: [...defaultAutofillTargets],
     result: null,
     selectedDraftPath: "",
+  },
+  ntfy: {
+    dirty: false,
+    inFlight: false,
+    lastTest: null,
+    error: "",
   },
   sideChat: { available: true, count: 0, items: [], message: "No side chat messages loaded yet." },
   dogfoodIssues: { available: true, count: 0, items: [], message: "No dogfood issues loaded yet." },
@@ -172,6 +231,11 @@ const state = {
 const refs = {};
 
 function initializeRefs() {
+  refs.sessionTabs = document.getElementById("session-tabs");
+  refs.sessionNew = document.getElementById("session-new");
+  refs.sessionContextMenu = document.getElementById("session-context-menu");
+  refs.sessionRename = document.getElementById("session-rename");
+  refs.sessionCloseMenu = document.getElementById("session-close-menu");
   refs.addressInput = document.getElementById("address-input");
   refs.autoReconnect = document.getElementById("auto-reconnect");
   refs.connectButton = document.getElementById("connect-button");
@@ -220,12 +284,24 @@ function initializeRefs() {
   refs.homeErrorBody = document.getElementById("home-error-body");
   refs.homeGoal = document.getElementById("home-goal");
   refs.goalSaveButton = document.getElementById("save-goal");
+  refs.goalEditShell = document.getElementById("goal-edit-shell");
+  refs.goalEditButton = document.getElementById("edit-goal");
+  refs.goalCancelButton = document.getElementById("cancel-goal-edit");
   refs.goalStatus = document.getElementById("goal-status");
   refs.savedGoalBody = document.getElementById("saved-goal-body");
   refs.projectSystemBody = document.getElementById("project-system-body");
   refs.setupHealthBody = document.getElementById("setup-health-body");
   refs.setupRefreshButton = document.getElementById("setup-refresh");
   refs.useAIGenerateButton = document.getElementById("use-ai-generate");
+  refs.aiSetupFirstMessage = document.getElementById("ai-setup-first-message");
+  refs.aiSetupMessage = document.getElementById("ai-setup-message");
+  refs.aiSetupSubmit = document.getElementById("ai-setup-submit");
+  refs.aiSetupCancel = document.getElementById("ai-setup-cancel");
+  refs.ntfyServerURL = document.getElementById("ntfy-server-url");
+  refs.ntfyTopic = document.getElementById("ntfy-topic");
+  refs.ntfyAuthToken = document.getElementById("ntfy-auth-token");
+  refs.ntfySaveTestButton = document.getElementById("save-test-ntfy");
+  refs.ntfyStatus = document.getElementById("ntfy-status");
   refs.auroraGauge = document.getElementById("aurora-gauge");
   refs.auroraProgressLabel = document.getElementById("aurora-progress-label");
   refs.auroraProgressSubtitle = document.getElementById("aurora-progress-subtitle");
@@ -235,8 +311,12 @@ function initializeRefs() {
   refs.auroraRunId = document.getElementById("aurora-run-id");
   refs.auroraStage = document.getElementById("aurora-stage");
   refs.auroraAction = document.getElementById("aurora-action");
+  refs.cycleLabel = document.getElementById("cycle-label");
+  refs.cycleCurrentTime = document.getElementById("cycle-current-time");
+  refs.cycleNarration = document.getElementById("cycle-narration");
   refs.auroraStatusChips = document.getElementById("aurora-status-chips");
   refs.auroraTimers = document.getElementById("aurora-timers");
+  refs.cycleHistory = document.getElementById("cycle-history");
   refs.auroraMeta = document.getElementById("aurora-meta");
   refs.auroraTimelineBody = document.getElementById("aurora-timeline-body");
   refs.auroraTimelineFilter = document.getElementById("aurora-timeline-filter");
@@ -248,7 +328,6 @@ function initializeRefs() {
   refs.auroraContinueButton = document.getElementById("aurora-continue");
   refs.auroraInjectNoteButton = document.getElementById("aurora-inject-note");
   refs.auroraViewLogsButton = document.getElementById("aurora-view-logs");
-  refs.homeUseDefaultGoal = document.getElementById("home-use-default-goal");
   refs.homeStartRun = document.getElementById("home-start-run");
   refs.homeContinueRun = document.getElementById("home-continue-run");
   refs.homeRunControlNote = document.getElementById("home-run-control-note");
@@ -379,7 +458,7 @@ function activeRunID() {
 }
 
 function activeRepoPath() {
-  return state.snapshot && state.snapshot.runtime ? state.snapshot.runtime.repo_root || "" : "";
+  return state.snapshot && state.snapshot.runtime ? state.snapshot.runtime.repo_root || "" : (currentSession() ? currentSession().repoPath || currentSession().expectedRepoPath || "" : "");
 }
 
 function viewModelOptions(extra = {}) {
@@ -393,6 +472,113 @@ function currentRepoBinding() {
   return window.OrchestratorViewModel.buildRepoBindingViewModel(state.snapshot, viewModelOptions({
     connection: state.connection,
   }));
+}
+
+function currentSession() {
+  return state.sessions.find((session) => session.id === state.activeSessionID) || state.sessions[0] || null;
+}
+
+function captureActiveSessionState() {
+  return {
+    address: state.address,
+    expectedRepoPath: state.expectedRepoPath,
+    repoPath: activeRepoPath(),
+    connection: state.connection,
+    snapshot: state.snapshot,
+    artifacts: state.artifacts,
+    artifactContent: state.artifactContent,
+    selectedArtifactPath: state.selectedArtifactPath,
+    repoTree: state.repoTree,
+    repoFile: state.repoFile,
+    selectedRepoPath: state.selectedRepoPath,
+    contractFiles: state.contractFiles,
+    selectedContractPath: state.selectedContractPath,
+    contractOpenFile: state.contractOpenFile,
+    savedGoal: state.savedGoal,
+    setupHealth: state.setupHealth,
+    setupActionInFlight: state.setupActionInFlight,
+    latestSnapshotCapture: state.latestSnapshotCapture,
+    autofill: state.autofill,
+    sideChat: state.sideChat,
+    dogfoodIssues: state.dogfoodIssues,
+    selectedDogfoodIssueID: state.selectedDogfoodIssueID,
+    workers: state.workers,
+    selectedWorkerID: state.selectedWorkerID,
+    workerActionResult: state.workerActionResult,
+    events: state.events,
+    localEventSequence: state.localEventSequence,
+    lastRefreshedAt: state.lastRefreshedAt,
+    connectionTiming: state.connectionTiming,
+    homeError: state.homeError,
+    preparedCommand: state.preparedCommand,
+    runLaunch: state.runLaunch,
+    actionRequired: state.actionRequired,
+    modelTests: state.modelTests,
+    runtimeConfig: state.runtimeConfig,
+    updateStatus: state.updateStatus,
+    lastIssue: state.lastIssue,
+    flash: state.flash,
+    ntfy: state.ntfy,
+  };
+}
+
+function saveActiveSessionState() {
+  const session = currentSession();
+  if (!session) {
+    return;
+  }
+  session.address = state.address;
+  session.expectedRepoPath = state.expectedRepoPath;
+  session.repoPath = activeRepoPath() || session.repoPath || session.expectedRepoPath;
+  session.snapshotState = captureActiveSessionState();
+}
+
+function applySessionState(session) {
+  const snapshotState = session && session.snapshotState ? session.snapshotState : {};
+  state.address = snapshotState.address || session.address || defaultAddress;
+  state.expectedRepoPath = snapshotState.expectedRepoPath || session.expectedRepoPath || "";
+  state.connection = snapshotState.connection || {
+    connected: false,
+    status: "disconnected",
+    address: state.address,
+    message: "not connected",
+    expectedRepoPath: state.expectedRepoPath,
+  };
+  state.snapshot = snapshotState.snapshot || null;
+  state.artifacts = snapshotState.artifacts || { count: 0, latest_path: "", items: [], message: "No artifacts yet. Artifacts appear after planner/executor turns complete." };
+  state.artifactContent = snapshotState.artifactContent || null;
+  state.selectedArtifactPath = snapshotState.selectedArtifactPath || "";
+  state.repoTree = snapshotState.repoTree || { path: "", parent_path: "", count: 0, items: [], message: "Repo tree is empty because the shell is disconnected or no repo root is loaded." };
+  state.repoFile = snapshotState.repoFile || null;
+  state.selectedRepoPath = snapshotState.selectedRepoPath || "";
+  state.contractFiles = snapshotState.contractFiles || { count: 0, files: [] };
+  state.selectedContractPath = snapshotState.selectedContractPath || "";
+  state.contractOpenFile = snapshotState.contractOpenFile || null;
+  state.savedGoal = snapshotState.savedGoal || { content: "", modifiedAt: "", exists: false, dirty: false, status: "not_loaded", expanded: false, editing: false, draft: "" };
+  state.setupHealth = snapshotState.setupHealth || null;
+  state.setupActionInFlight = snapshotState.setupActionInFlight || "";
+  state.latestSnapshotCapture = snapshotState.latestSnapshotCapture || null;
+  state.autofill = snapshotState.autofill || { step: 0, homeExpanded: false, homeFirstMessage: "", answers: { project_summary: "", desired_outcome: "", users_platform: "", constraints: "", milestones: "", decisions: "", notes: "" }, targets: [...defaultAutofillTargets], result: null, selectedDraftPath: "" };
+  state.sideChat = snapshotState.sideChat || { available: true, count: 0, items: [], message: "No side chat messages loaded yet." };
+  state.dogfoodIssues = snapshotState.dogfoodIssues || { available: true, count: 0, items: [], message: "No dogfood issues loaded yet." };
+  state.selectedDogfoodIssueID = snapshotState.selectedDogfoodIssueID || "";
+  state.workers = snapshotState.workers || { count: 0, counts_by_status: {}, items: [], message: "No workers exist for the current run yet. Workers appear after the planner creates or dispatches them, or after you create one through this panel." };
+  state.selectedWorkerID = snapshotState.selectedWorkerID || "";
+  state.workerActionResult = snapshotState.workerActionResult || null;
+  state.events = Array.isArray(snapshotState.events) ? snapshotState.events : [];
+  state.localEventSequence = snapshotState.localEventSequence || 0;
+  state.lastRefreshedAt = snapshotState.lastRefreshedAt || "";
+  state.connectionTiming = snapshotState.connectionTiming || { connectedAt: "", connectingAt: "", disconnectedAt: new Date().toISOString() };
+  state.homeError = snapshotState.homeError || "";
+  state.preparedCommand = snapshotState.preparedCommand || "";
+  state.runLaunch = snapshotState.runLaunch || { inFlight: false, message: "", error: "" };
+  state.actionRequired = snapshotState.actionRequired || { inFlight: false, status: "", queuedAskHumanAnswer: null };
+  state.modelTests = snapshotState.modelTests || { planner: null, executor: null, inFlight: "", error: "" };
+  state.runtimeConfig = snapshotState.runtimeConfig || null;
+  state.updateStatus = snapshotState.updateStatus || null;
+  state.lastIssue = snapshotState.lastIssue || null;
+  state.flash = snapshotState.flash || state.flash;
+  state.ntfy = snapshotState.ntfy || { dirty: false, inFlight: false, lastTest: null, error: "" };
 }
 
 function latestArtifactPath() {
@@ -465,9 +651,11 @@ function suggestedDefaultGoal() {
 }
 
 function buildStartRunCommand() {
-  const goal = refs.homeGoal && refs.homeGoal.value.trim() !== ""
+  const editableGoal = state.savedGoal.editing && refs.homeGoal && refs.homeGoal.value.trim() !== ""
     ? refs.homeGoal.value.trim()
-    : suggestedDefaultGoal();
+    : "";
+  const savedGoal = String(state.savedGoal.content || "").trim();
+  const goal = editableGoal || savedGoal || suggestedDefaultGoal();
   return `orchestrator run --goal ${quotePowerShellArgument(goal)}`;
 }
 
@@ -615,8 +803,20 @@ function recordLocalActivity(eventName, payload = {}, summary = "") {
 }
 
 function persistShellSession() {
+  saveActiveSessionState();
   const normalized = shellHelpers.saveShellSession(window.localStorage, {
     address: state.address,
+    activeSessionID: state.activeSessionID,
+    sessions: state.sessions.map((session) => ({
+      id: session.id,
+      label: session.label,
+      address: session.address,
+      expectedRepoPath: session.expectedRepoPath,
+      repoPath: session.repoPath,
+      pid: session.pid || 0,
+      ownedBackend: Boolean(session.ownedBackend),
+      createdAt: session.createdAt,
+    })),
     autoReconnect: state.reconnect.enabled,
     lastConnected: state.connection.connected,
     verbosity: refs.verbositySelect ? refs.verbositySelect.value : "normal",
@@ -905,7 +1105,7 @@ function renderHomeDashboard() {
     lastRefreshedAt: state.lastRefreshedAt ? new Date(state.lastRefreshedAt).toLocaleString() : "",
     homeError: state.homeError,
     preparedCommand: state.preparedCommand,
-    goalEntered: refs.homeGoal && refs.homeGoal.value.trim() !== "",
+    goalEntered: Boolean((state.savedGoal.content || "").trim() || (state.savedGoal.editing && refs.homeGoal && refs.homeGoal.value.trim())),
   }));
   const action = vm.recommendation.primaryAction || {};
   const progressLabel = vm.progress.progressPercent === null ? "Unavailable" : `${vm.progress.progressPercent}%`;
@@ -926,7 +1126,7 @@ function renderHomeDashboard() {
   refs.homeRecommendationTitle.textContent = vm.recommendation.title;
   refs.homeRecommendationDetail.textContent = vm.recommendation.detail;
   refs.homeRefreshMeta.textContent = `Last refreshed: ${vm.refreshedLabel}`;
-  const startGoal = refs.homeGoal ? refs.homeGoal.value.trim() : "";
+  const startGoal = (state.savedGoal.content || "").trim() || (state.savedGoal.editing && refs.homeGoal ? refs.homeGoal.value.trim() : "");
   const currentRun = state.snapshot && state.snapshot.run ? state.snapshot.run : null;
   const runControl = window.OrchestratorViewModel.buildRunControlStateViewModel(state.snapshot, viewModelOptions({
     connection: state.connection,
@@ -1002,8 +1202,8 @@ function renderHomeDashboard() {
     homeRow("Next Operator Action", vm.status.nextOperatorAction),
     homeRow("Total Build Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.total_build_time_label || "Unavailable" : "Unavailable"),
     homeRow("Current Run Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_run_time_label || "Unavailable" : "Unavailable"),
-    homeRow("Current Step", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_step_label || "Unavailable" : "Unavailable"),
-    homeRow("Current Step Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_step_time_label || "Unavailable" : "Unavailable"),
+    homeRow("Engine Step", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_step_label || "Unavailable" : "Unavailable"),
+    homeRow("Engine Step Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_step_time_label || "Unavailable" : "Unavailable"),
     homeRow("Run Elapsed", vm.status.elapsedLabel),
     homeRow("What Happened", vm.whatHappened.stop.title),
     homeRow("Next Action", vm.whatHappened.stop.nextAction),
@@ -1090,7 +1290,11 @@ function renderAuroraDashboard() {
   const runtime = state.snapshot && state.snapshot.runtime ? state.snapshot.runtime : {};
   const buildTime = state.snapshot && state.snapshot.build_time ? state.snapshot.build_time : {};
   const progressKnown = progressVM.progressPercent !== null;
-  const progressValue = progressKnown ? progressVM.progressPercent : 0;
+  const progressGeometry = progressVM.progressGeometry || window.OrchestratorViewModel.normalizeMissionProgress(progressKnown ? progressVM.progressPercent : null);
+  const cycleVM = window.OrchestratorViewModel.buildCycleTimingViewModel(state.snapshot, state.events, {
+    nowMs: Date.now(),
+    snapshotAtMs: state.lastRefreshedAt ? new Date(state.lastRefreshedAt).getTime() : Date.now(),
+  });
   const actionLabel = state.runLaunch.inFlight
     ? "Submitting explicit run action"
     : (pendingVM.present ? pendingVM.summary : (statusVM.nextOperatorAction || loopVM.detail || "Waiting for explicit operator action"));
@@ -1098,8 +1302,10 @@ function renderAuroraDashboard() {
     ? statusVM.checkpointStage
     : (run.activity_state || loopVM.state || "waiting");
 
-  refs.auroraGauge.style.setProperty("--gauge-progress", String(progressValue));
-  refs.auroraProgressLabel.textContent = progressKnown ? `${progressValue}%` : "Phase";
+  refs.auroraGauge.classList.toggle("is-indeterminate", !progressGeometry.known);
+  refs.auroraGauge.style.setProperty("--gauge-arc", `${progressGeometry.arcDegrees}deg`);
+  refs.auroraGauge.style.setProperty("--gauge-angle", `${progressGeometry.needleAngleDegrees}deg`);
+  refs.auroraProgressLabel.textContent = progressGeometry.known ? progressGeometry.percentLabel : "Phase";
   refs.auroraProgressSubtitle.textContent = progressKnown
     ? `${progressVM.progressConfidence} confidence from planner status`
     : `${loopVM.label}: ${loopVM.detail}`;
@@ -1109,6 +1315,15 @@ function renderAuroraDashboard() {
   refs.auroraRunId.textContent = statusVM.runID || "No active run";
   refs.auroraStage.textContent = currentStage;
   refs.auroraAction.textContent = actionLabel;
+  if (refs.cycleLabel) {
+    refs.cycleLabel.textContent = cycleVM.cycleLabel;
+  }
+  if (refs.cycleCurrentTime) {
+    refs.cycleCurrentTime.textContent = cycleVM.currentCycleTimeLabel;
+  }
+  if (refs.cycleNarration) {
+    refs.cycleNarration.textContent = cycleVM.narration;
+  }
 
   const executorActive = ["executor", "codex"].some((word) => String(currentStage).toLowerCase().includes(word))
     || String(run.activity_state || "").toLowerCase().includes("executor");
@@ -1124,10 +1339,21 @@ function renderAuroraDashboard() {
   ].join("");
 
   refs.auroraTimers.innerHTML = [
-    homeRow("Total Build Time", buildTime.total_build_time_label || "Unavailable"),
-    homeRow("Current Step Time", buildTime.current_step_time_label || "Unavailable"),
-    homeRow("Current Step", buildTime.current_step_label || currentStage),
+    homeRow("Total Build Time", cycleVM.totalBuildTimeLabel || buildTime.total_build_time_label || "00:00:00"),
+    homeRow("Current Cycle Time", cycleVM.currentCycleTimeLabel || "00:00:00"),
+    homeRow("Observable Step", buildTime.current_step_label || currentStage),
   ].join("");
+  if (refs.cycleHistory) {
+    refs.cycleHistory.innerHTML = cycleVM.recentCycles.length === 0
+      ? `<div class="cycle-history-empty">Recent cycle durations appear after cycle-tagged events complete.</div>`
+      : cycleVM.recentCycles.slice(-10).reverse().map((cycle) => `
+        <div class="cycle-history-row">
+          <span>${escapeHTML(cycle.label)}</span>
+          <strong>${escapeHTML(cycle.durationLabel)}</strong>
+          <small>${escapeHTML(cycle.outcome)}</small>
+        </div>
+      `).join("");
+  }
 
   refs.auroraMeta.innerHTML = [
     homeRow("Cycle", String(run.cycle || run.cycle_number || statusVM.cycle || "Unavailable")),
@@ -1179,16 +1405,97 @@ function renderSavedGoal() {
   if (!refs.savedGoalBody || !refs.goalStatus) {
     return;
   }
-  const statusText = state.savedGoal.dirty
+  const editing = Boolean(state.savedGoal.editing);
+  const statusText = editing && state.savedGoal.dirty
     ? "Unsaved edits"
     : state.savedGoal.exists
       ? "Goal saved"
       : "No saved goal";
+  const content = state.savedGoal.content || "";
+  const isLong = content.length > 360 || content.split(/\r?\n/).length > 6;
   refs.goalStatus.textContent = statusText;
   refs.goalStatus.className = `goal-status ${state.savedGoal.dirty ? "is-dirty" : state.savedGoal.exists ? "is-saved" : "is-missing"}`;
   refs.savedGoalBody.innerHTML = state.savedGoal.exists
-    ? `<div class="saved-goal-card"><strong>Saved Goal</strong><p>${escapeHTML(state.savedGoal.content || "Saved goal file is empty.")}</p><span>${escapeHTML(state.savedGoal.modifiedAt || "Last updated unavailable")}</span></div>`
-    : `<div class="saved-goal-card empty"><strong>No saved goal yet</strong><p>Write or generate a goal, then save it explicitly before starting a run.</p></div>`;
+    ? `
+      <div class="saved-goal-card ${state.savedGoal.expanded ? "is-expanded" : ""}">
+        <strong>Saved Goal</strong>
+        <p>${escapeHTML(content || "Saved goal file is empty.")}</p>
+        ${isLong ? `<button class="button button-mini goal-view-toggle" data-goal-view-toggle>${state.savedGoal.expanded ? "View less" : "View more"}</button>` : ""}
+        <span>${escapeHTML(state.savedGoal.modifiedAt || "Last updated unavailable")}</span>
+      </div>
+    `
+    : `<div class="saved-goal-card empty"><strong>No saved goal yet</strong><p>No goal is saved for this repo. Use AI setup or Edit Goal to create one explicitly.</p></div>`;
+  if (refs.goalEditShell) {
+    refs.goalEditShell.hidden = !editing;
+  }
+  if (refs.goalEditButton) {
+    refs.goalEditButton.hidden = editing;
+  }
+  if (refs.homeGoal && editing && refs.homeGoal.value !== state.savedGoal.draft) {
+    refs.homeGoal.value = state.savedGoal.draft || "";
+  }
+}
+
+function startGoalEdit() {
+  state.savedGoal.editing = true;
+  state.savedGoal.draft = state.savedGoal.content || "";
+  state.savedGoal.dirty = false;
+  renderSavedGoal();
+  if (refs.homeGoal) {
+    refs.homeGoal.focus();
+  }
+}
+
+function cancelGoalEdit() {
+  state.savedGoal.editing = false;
+  state.savedGoal.draft = state.savedGoal.content || "";
+  state.savedGoal.dirty = false;
+  if (refs.homeGoal) {
+    refs.homeGoal.value = state.savedGoal.draft;
+  }
+  renderSavedGoal();
+  renderAuroraDashboard();
+}
+
+function renderAIAutofillStarter() {
+  if (!refs.aiSetupFirstMessage) {
+    return;
+  }
+  refs.aiSetupFirstMessage.hidden = !state.autofill.homeExpanded;
+  if (refs.aiSetupMessage && document.activeElement !== refs.aiSetupMessage) {
+    refs.aiSetupMessage.value = state.autofill.homeFirstMessage || "";
+  }
+}
+
+function renderNtfyCard() {
+  if (!refs.ntfyStatus) {
+    return;
+  }
+  const cfg = state.runtimeConfig && state.runtimeConfig.ntfy ? state.runtimeConfig.ntfy : {};
+  if (!state.ntfy.dirty) {
+    if (refs.ntfyServerURL && document.activeElement !== refs.ntfyServerURL) {
+      refs.ntfyServerURL.value = cfg.server_url || "";
+    }
+    if (refs.ntfyTopic && document.activeElement !== refs.ntfyTopic) {
+      refs.ntfyTopic.value = cfg.topic || "";
+    }
+    if (refs.ntfyAuthToken && document.activeElement !== refs.ntfyAuthToken) {
+      refs.ntfyAuthToken.value = "";
+    }
+  }
+  const configured = Boolean(cfg.configured);
+  const listening = cfg.listening || (configured ? "active during planner ask-human waits" : "not listening");
+  const lastTest = state.ntfy.lastTest ? ` | last test: ${state.ntfy.lastTest.status || state.ntfy.lastTest.message || "sent"}` : "";
+  const tokenLabel = cfg.auth_token_saved ? " | auth token saved" : "";
+  const error = state.ntfy.error ? ` | ${state.ntfy.error}` : "";
+  refs.ntfyStatus.className = `ntfy-status ${configured ? "is-configured" : "is-missing"} ${state.ntfy.error ? "is-error" : ""}`;
+  refs.ntfyStatus.textContent = configured
+    ? `configured | listening: ${listening}${tokenLabel}${lastTest}${error}`
+    : `not configured | listening: not listening${error}`;
+  if (refs.ntfySaveTestButton) {
+    refs.ntfySaveTestButton.disabled = Boolean(state.ntfy.inFlight);
+    refs.ntfySaveTestButton.textContent = state.ntfy.inFlight ? "Testing..." : "Save & Test ntfy";
+  }
 }
 
 function renderSetupHealth() {
@@ -1266,6 +1573,163 @@ function renderAuroraTimeline() {
       <button class="button button-mini event-copy" data-event-index="${escapeHTML(String(index))}">Copy</button>
     </div>
   `).join("");
+}
+
+function renderSessionTabs() {
+  if (!refs.sessionTabs) {
+    return;
+  }
+  refs.sessionTabs.innerHTML = state.sessions.map((session) => {
+    const active = session.id === state.activeSessionID;
+    const repoLabel = session.repoPath || session.expectedRepoPath || "No repo selected";
+    const status = sessionStatusLabel(session);
+    return `
+      <button class="session-tab ${active ? "active" : ""}" role="tab" aria-selected="${active ? "true" : "false"}" data-session-id="${escapeHTML(session.id)}" title="${escapeHTML(repoLabel)}">
+        <span class="session-tab-label">${escapeHTML(session.label || basenameFromPath(repoLabel, "Aurora Session"))}</span>
+        <span class="session-tab-status">${escapeHTML(status)}</span>
+        <span class="session-tab-close" data-session-close="${escapeHTML(session.id)}">x</span>
+      </button>
+    `;
+  }).join("");
+  if (refs.sessionContextMenu) {
+    refs.sessionContextMenu.hidden = !state.sessionMenu.open;
+    refs.sessionContextMenu.style.left = `${state.sessionMenu.x}px`;
+    refs.sessionContextMenu.style.top = `${state.sessionMenu.y}px`;
+  }
+}
+
+function sessionStatusLabel(session) {
+  const snapshotState = session && session.snapshotState ? session.snapshotState : null;
+  const snapshot = snapshotState ? snapshotState.snapshot : (session && session.id === state.activeSessionID ? state.snapshot : null);
+  if (!snapshot) {
+    return "not loaded";
+  }
+  const run = snapshot.run || null;
+  if (!run) {
+    return "ready";
+  }
+  if (run.completed) {
+    return "complete";
+  }
+  if (run.actively_processing || (snapshot.active_run_guard && snapshot.active_run_guard.currently_processing)) {
+    return "running";
+  }
+  if (run.waiting_at_safe_point || (snapshot.active_run_guard && snapshot.active_run_guard.waiting_at_safe_point)) {
+    return "safe point";
+  }
+  return run.status || run.stop_reason || "run";
+}
+
+function sessionHasActiveWork(session) {
+  const snapshotState = session && session.snapshotState ? session.snapshotState : null;
+  const snapshot = snapshotState ? snapshotState.snapshot : (session && session.id === state.activeSessionID ? state.snapshot : null);
+  const run = snapshot && snapshot.run ? snapshot.run : null;
+  const guard = snapshot && snapshot.active_run_guard ? snapshot.active_run_guard : {};
+  return Boolean((run && run.actively_processing) || guard.currently_processing);
+}
+
+async function switchAuroraSession(sessionID) {
+  const next = state.sessions.find((session) => session.id === sessionID);
+  if (!next || next.id === state.activeSessionID) {
+    return;
+  }
+  saveActiveSessionState();
+  state.activeSessionID = next.id;
+  applySessionState(next);
+  refs.addressInput.value = state.address;
+  renderAll();
+  persistShellSession();
+  if (state.address) {
+    await connect({ quiet: true, automatic: true, trigger: "switch_session" });
+  }
+}
+
+async function openNewAuroraSession() {
+  if (!window.orchestratorConsole.openRepoSession) {
+    setFlash("error", "This shell build cannot open a second repo session yet.");
+    return;
+  }
+  try {
+    const result = await window.orchestratorConsole.openRepoSession();
+    if (!result || result.cancelled) {
+      return;
+    }
+    const session = createSessionRecord({
+      label: result.label || basenameFromPath(result.repoPath, "Aurora Session"),
+      address: result.address,
+      expectedRepoPath: result.repoPath,
+      repoPath: result.repoPath,
+      pid: result.pid,
+      ownedBackend: result.ownedBackend !== false,
+    });
+    state.sessions.push(session);
+    await switchAuroraSession(session.id);
+    setFlash("success", `Opened ${session.label}.`);
+  } catch (error) {
+    reportIssue("open repo session", error, "Aurora could not start a backend for the selected folder.");
+  }
+}
+
+async function closeAuroraSession(sessionID) {
+  const session = state.sessions.find((item) => item.id === sessionID);
+  if (!session) {
+    return;
+  }
+  const activeWork = sessionHasActiveWork(session);
+  if (activeWork && !window.confirm("This tab has active work. Close the tab without stopping backend work?")) {
+    return;
+  }
+  const wasActive = session.id === state.activeSessionID;
+  state.sessions = state.sessions.filter((item) => item.id !== session.id);
+  if (!activeWork && window.orchestratorConsole.closeRepoSession && session.ownedBackend && session.pid) {
+    try {
+      await window.orchestratorConsole.closeRepoSession({ pid: session.pid });
+    } catch (_error) {
+      // The tab should close even if the helper backend has already exited.
+    }
+  }
+  if (state.sessions.length === 0) {
+    const fallback = createSessionRecord({ address: defaultAddress, expectedRepoPath: bootstrapExpectedRepoPath });
+    state.sessions.push(fallback);
+  }
+  if (wasActive) {
+    state.activeSessionID = state.sessions[0].id;
+    applySessionState(state.sessions[0]);
+    if (state.address) {
+      await connect({ quiet: true, automatic: true, trigger: "close_session" });
+    }
+  }
+  state.sessionMenu.open = false;
+  renderAll();
+  persistShellSession();
+}
+
+function openSessionContextMenu(sessionID, event) {
+  state.sessionMenu = {
+    open: true,
+    sessionID,
+    x: event.clientX,
+    y: event.clientY,
+  };
+  renderSessionTabs();
+}
+
+function renameSessionFromMenu() {
+  const session = state.sessions.find((item) => item.id === state.sessionMenu.sessionID);
+  if (!session) {
+    return;
+  }
+  const next = window.prompt("Rename Aurora session", session.label || "");
+  if (next === null) {
+    return;
+  }
+  const trimmed = next.trim();
+  if (trimmed !== "") {
+    session.label = trimmed;
+    state.sessionMenu.open = false;
+    persistShellSession();
+    renderSessionTabs();
+  }
 }
 
 function renderConnection() {
@@ -1352,8 +1816,8 @@ function renderStatus() {
     ["Started At", vm.startedAt],
     ["Stopped / Last Updated", vm.stoppedAt],
     ["Total Build Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.total_build_time_label || "Unavailable" : "Unavailable"],
-    ["Current Step", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_step_label || "Unavailable" : "Unavailable"],
-    ["Current Step Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_step_time_label || "Unavailable" : "Unavailable"],
+    ["Engine Step", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_step_label || "Unavailable" : "Unavailable"],
+    ["Engine Step Time", state.snapshot && state.snapshot.build_time ? state.snapshot.build_time.current_step_time_label || "Unavailable" : "Unavailable"],
     ["Completed", vm.completed ? "true" : "false"],
     ["Verbosity", vm.verbosity],
     ["Planner Model", `${vm.plannerModelConfigured} (${vm.plannerModelVerification})`],
@@ -2031,6 +2495,7 @@ function renderTerminal() {
 }
 
 function renderAll() {
+  renderSessionTabs();
   renderFlash();
   renderIssue();
   renderTopStatus();
@@ -2040,6 +2505,8 @@ function renderAll() {
   renderConnection();
   renderHomeDashboard();
   renderAuroraDashboard();
+  renderAIAutofillStarter();
+  renderNtfyCard();
   renderProgressPanel();
   renderStatus();
   renderModelHealth();
@@ -2074,12 +2541,26 @@ async function connect(options = {}) {
     setFlash("info", options.automatic ? `Reconnecting to ${state.address} ...` : `Connecting to ${state.address} ...`);
     const response = await window.orchestratorConsole.connect(state.address);
     state.connection = response.connection;
-    state.expectedRepoPath = response.expectedRepoPath || (response.connection && response.connection.expectedRepoPath) || state.expectedRepoPath;
+    const responseExpectedRepo = response.expectedRepoPath || (response.connection && response.connection.expectedRepoPath) || "";
+    if (!state.expectedRepoPath && responseExpectedRepo) {
+      state.expectedRepoPath = responseExpectedRepo;
+    }
+    state.connection.expectedRepoPath = state.expectedRepoPath;
     state.connectionTiming.connectedAt = new Date().toISOString();
     state.snapshot = response.snapshot;
     applyModelHealthNormalization();
     state.lastRefreshedAt = new Date().toISOString();
     await hydrateProtocolBackedPanels(true);
+    const session = currentSession();
+    if (session) {
+      session.address = state.address;
+      session.expectedRepoPath = state.expectedRepoPath || session.expectedRepoPath;
+      session.repoPath = activeRepoPath() || session.repoPath || session.expectedRepoPath;
+      if (!session.label || session.label === "Current Repo") {
+        session.label = basenameFromPath(session.repoPath || session.expectedRepoPath, "Aurora Session");
+      }
+      saveActiveSessionState();
+    }
     clearReconnectTimer();
     state.reconnect.attempts = 0;
     clearIssue();
@@ -2270,9 +2751,12 @@ async function loadSavedGoal(options = {}) {
       exists: goalFile.exists !== false,
       dirty: false,
       status: "loaded",
+      expanded: state.savedGoal.expanded || false,
+      editing: false,
+      draft: goalFile.content || "",
     };
-    if (refs.homeGoal && !refs.homeGoal.value.trim()) {
-      refs.homeGoal.value = state.savedGoal.content || "";
+    if (refs.homeGoal) {
+      refs.homeGoal.value = state.savedGoal.draft || "";
     }
     renderSavedGoal();
     if (!options.quiet) {
@@ -2285,6 +2769,9 @@ async function loadSavedGoal(options = {}) {
       exists: false,
       dirty: false,
       status: "missing",
+      expanded: false,
+      editing: false,
+      draft: "",
     };
     renderSavedGoal();
   }
@@ -2316,6 +2803,9 @@ async function saveGoalFromHome() {
       exists: true,
       dirty: false,
       status: "saved",
+      expanded: state.savedGoal.expanded || false,
+      editing: false,
+      draft: content,
     };
     state.contractFiles = await window.orchestratorConsole.listContractFiles(activeRepoPath(), state.address);
     renderAll();
@@ -2348,9 +2838,82 @@ async function pauseAtSafePoint() {
 }
 
 function openSetupAutofill() {
+  state.autofill.homeExpanded = true;
+  renderAIAutofillStarter();
+  if (refs.aiSetupMessage) {
+    refs.aiSetupMessage.focus();
+  }
+  setFlash("info", "Describe the setup goal. Aurora will draft project files only; it will not start a build run.");
+}
+
+function cancelHomeSetupAutofill() {
+  state.autofill.homeExpanded = false;
+  state.autofill.homeFirstMessage = "";
+  if (refs.aiSetupMessage) {
+    refs.aiSetupMessage.value = "";
+  }
+  renderAIAutofillStarter();
+}
+
+async function submitHomeSetupAutofill() {
+  const message = refs.aiSetupMessage ? refs.aiSetupMessage.value.trim() : "";
+  if (message === "") {
+    setFlash("error", "Tell the planner what you want to build before submitting.");
+    return;
+  }
+  state.autofill.homeFirstMessage = message;
+  state.autofill.answers.project_summary = message;
+  state.autofill.answers.desired_outcome = state.autofill.answers.desired_outcome || message;
+  state.autofill.step = 0;
+  if (refs.autofillProjectSummary) {
+    refs.autofillProjectSummary.value = message;
+  }
   setActiveTab("files", { noScroll: true });
   scrollToSection("autofill-setup-panel");
-  setFlash("info", "AI setup drafts project files and goal only. It previews generated content and does not start a build run.");
+  setFlash("info", "Submitting this as the first setup-planner message. Drafts preview before any save.");
+  await runAutofill();
+}
+
+async function saveAndTestNtfy() {
+  const serverURL = refs.ntfyServerURL ? refs.ntfyServerURL.value.trim() : "";
+  const topic = refs.ntfyTopic ? refs.ntfyTopic.value.trim() : "";
+  const authToken = refs.ntfyAuthToken ? refs.ntfyAuthToken.value.trim() : "";
+  if (!serverURL || !topic) {
+    setFlash("error", "ntfy server URL and topic are required before testing.");
+    return;
+  }
+  state.ntfy.inFlight = true;
+  state.ntfy.error = "";
+  renderNtfyCard();
+  try {
+    const ntfyPatch = {
+      server_url: serverURL,
+      topic,
+    };
+    if (authToken !== "") {
+      ntfyPatch.auth_token = authToken;
+    }
+    state.runtimeConfig = await window.orchestratorConsole.setRuntimeConfig({
+      address: state.address,
+      ntfy: ntfyPatch,
+    });
+    if (state.snapshot && state.snapshot.runtime) {
+      state.snapshot.runtime.ntfy_ready = Boolean(state.runtimeConfig.ntfy && state.runtimeConfig.ntfy.configured);
+    }
+    state.ntfy.lastTest = await window.orchestratorConsole.testNtfy(state.address);
+    state.ntfy.dirty = false;
+    if (refs.ntfyAuthToken) {
+      refs.ntfyAuthToken.value = "";
+    }
+    renderNtfyCard();
+    setFlash("success", state.ntfy.lastTest.message || "ntfy config saved and test notification sent.");
+  } catch (error) {
+    state.ntfy.error = error.message || "ntfy test failed";
+    reportIssue("ntfy test", error, "Configuration was not marked verified. Check the server URL, topic, and optional token.");
+  } finally {
+    state.ntfy.inFlight = false;
+    renderNtfyCard();
+  }
 }
 
 async function refreshSideChat(options = {}) {
@@ -3262,9 +3825,7 @@ function handleSummaryAction(action) {
       return;
     case "start_run":
       setActiveTab("home");
-      if (refs.homeGoal) {
-        refs.homeGoal.focus();
-      }
+      startGoalEdit();
       return;
     default:
       setFlash("info", "That summary action is not wired yet.");
@@ -3557,12 +4118,6 @@ function scheduleSoftRefresh() {
   }, 300);
 }
 
-function fillSuggestedGoal() {
-  refs.homeGoal.value = suggestedDefaultGoal();
-  renderHomeDashboard();
-  setFlash("info", "Suggested default goal filled. Edit it before starting the run if needed.");
-}
-
 async function openLatestArtifactFromHome() {
   const artifactPath = latestArtifactPath();
   if (!artifactPath) {
@@ -3631,7 +4186,7 @@ async function ensureModelHealthPreflight() {
 }
 
 async function startRunFromHome() {
-  const goal = refs.homeGoal.value.trim();
+  const goal = (state.savedGoal.content || "").trim() || (state.savedGoal.editing && refs.homeGoal ? refs.homeGoal.value.trim() : "");
   const repoBinding = currentRepoBinding();
   if (repoBinding.mismatch) {
     state.runLaunch = { inFlight: false, message: "", error: repoBinding.message };
@@ -3909,6 +4464,35 @@ function handleTerminalData(payload) {
 }
 
 function wireEvents() {
+  refs.sessionNew.addEventListener("click", () => void openNewAuroraSession());
+  refs.sessionTabs.addEventListener("click", (event) => {
+    const close = event.target.closest("[data-session-close]");
+    if (close) {
+      event.stopPropagation();
+      void closeAuroraSession(close.getAttribute("data-session-close") || "");
+      return;
+    }
+    const tab = event.target.closest("[data-session-id]");
+    if (tab) {
+      void switchAuroraSession(tab.getAttribute("data-session-id") || "");
+    }
+  });
+  refs.sessionTabs.addEventListener("contextmenu", (event) => {
+    const tab = event.target.closest("[data-session-id]");
+    if (!tab) {
+      return;
+    }
+    event.preventDefault();
+    openSessionContextMenu(tab.getAttribute("data-session-id") || "", event);
+  });
+  document.addEventListener("click", (event) => {
+    if (refs.sessionContextMenu && !refs.sessionContextMenu.contains(event.target)) {
+      state.sessionMenu.open = false;
+      renderSessionTabs();
+    }
+  });
+  refs.sessionRename.addEventListener("click", renameSessionFromMenu);
+  refs.sessionCloseMenu.addEventListener("click", () => void closeAuroraSession(state.sessionMenu.sessionID));
   refs.connectButton.addEventListener("click", () => void connect());
   refs.topReconnectButton.addEventListener("click", () => void connect());
   refs.topRefreshButton.addEventListener("click", () => void refreshStatus({ refreshContracts: true }));
@@ -3919,20 +4503,41 @@ function wireEvents() {
   refs.homeRecoverBackend.addEventListener("click", () => void restartBackend());
   refs.homeClearStopContinue.addEventListener("click", () => void clearStopAndContinue());
   refs.homeSafeStop.addEventListener("click", () => void safeStop());
-  refs.homeUseDefaultGoal.addEventListener("click", fillSuggestedGoal);
   refs.homeStartRun.addEventListener("click", () => void startRunFromHome());
   refs.homeContinueRun.addEventListener("click", () => void continueRunFromHome());
   refs.homePrepareStartCommand.addEventListener("click", prepareStartRunCommand);
   refs.homePrepareContinueCommand.addEventListener("click", prepareContinueRunCommand);
   refs.homeGoal.addEventListener("input", () => {
+    state.savedGoal.draft = refs.homeGoal.value;
     state.savedGoal.dirty = refs.homeGoal.value.trim() !== (state.savedGoal.content || "").trim();
     renderHomeDashboard();
     renderSavedGoal();
     renderAuroraDashboard();
   });
   refs.goalSaveButton.addEventListener("click", () => void saveGoalFromHome());
+  refs.goalEditButton.addEventListener("click", startGoalEdit);
+  refs.goalCancelButton.addEventListener("click", cancelGoalEdit);
+  refs.savedGoalBody.addEventListener("click", (event) => {
+    const toggle = event.target.closest("[data-goal-view-toggle]");
+    if (toggle) {
+      state.savedGoal.expanded = !state.savedGoal.expanded;
+      renderSavedGoal();
+    }
+  });
   refs.setupRefreshButton.addEventListener("click", () => void refreshSetupHealth());
   refs.useAIGenerateButton.addEventListener("click", openSetupAutofill);
+  refs.aiSetupMessage.addEventListener("input", () => {
+    state.autofill.homeFirstMessage = refs.aiSetupMessage.value;
+  });
+  refs.aiSetupSubmit.addEventListener("click", () => void submitHomeSetupAutofill());
+  refs.aiSetupCancel.addEventListener("click", cancelHomeSetupAutofill);
+  [refs.ntfyServerURL, refs.ntfyTopic, refs.ntfyAuthToken].forEach((element) => {
+    element.addEventListener("input", () => {
+      state.ntfy.dirty = true;
+      renderNtfyCard();
+    });
+  });
+  refs.ntfySaveTestButton.addEventListener("click", () => void saveAndTestNtfy());
   refs.timelineViewLogsButton.addEventListener("click", openLiveOutput);
   refs.captureSnapshotButton.addEventListener("click", () => void captureRunSnapshot());
   refs.auroraPauseButton.addEventListener("click", () => void pauseAtSafePoint());
@@ -4243,6 +4848,7 @@ async function initialize() {
   renderAll();
   window.setInterval(() => {
     renderConnectionTimers();
+    renderAuroraDashboard();
   }, 1000);
   if (persistedShellSession.lastConnected && state.reconnect.enabled) {
     void connect({ quiet: true, automatic: true, trigger: "startup_resume" });

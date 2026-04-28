@@ -17,6 +17,15 @@
       <div id="connection-badge" class="badge badge-disconnected">disconnected: not connected</div>
     </header>
 
+    <section class="session-tab-strip" aria-label="Open Aurora project sessions">
+      <div id="session-tabs" class="session-tabs" role="tablist"></div>
+      <button id="session-new" class="button button-mini session-new-button">+ New</button>
+      <div id="session-context-menu" class="session-context-menu" hidden>
+        <button id="session-rename" class="session-menu-item" type="button">Rename</button>
+        <button id="session-close-menu" class="session-menu-item" type="button">Close</button>
+      </div>
+    </section>
+
     <section class="top-status-strip" aria-label="Current connection and run status">
       <div id="top-status-bar" class="top-status-grid">
         <div class="top-status-item"><span>Connection</span><strong>Disconnected</strong></div>
@@ -83,22 +92,57 @@
               </div>
               <button id="use-ai-generate" class="button button-primary">Use AI to Generate Files &amp; Goal</button>
             </div>
+            <div id="ai-setup-first-message" class="ai-setup-first-message" hidden>
+              <label class="field">
+                <span>Tell the planner what you want to build</span>
+                <textarea id="ai-setup-message" rows="5" placeholder="Describe the app, repo, feature, or outcome you want the setup planner to prepare. This drafts project files only; it does not start a build run."></textarea>
+              </label>
+              <div class="button-row button-row-wrap">
+                <button id="ai-setup-submit" class="button button-primary">Submit to Planner Setup</button>
+                <button id="ai-setup-cancel" class="button">Cancel</button>
+              </div>
+            </div>
             <div id="project-system-body" class="project-file-list"></div>
             <div class="goal-editor">
               <div class="panel-header">
-                <h3>Goal</h3>
+                <h3>Saved Goal</h3>
                 <span id="goal-status" class="goal-status">No saved goal</span>
               </div>
               <div id="saved-goal-body" class="saved-goal-body"></div>
-              <label class="field">
-                <span>Edit goal separately from saved state</span>
-                <textarea id="home-goal" rows="5" placeholder="Build the next highest-value slice from the repo contract files."></textarea>
-              </label>
-              <div class="button-row button-row-wrap">
-                <button id="save-goal" class="button button-primary">Save Goal</button>
-                <button id="home-use-default-goal" class="button">Fill Starter Goal</button>
+              <button id="edit-goal" class="button">Edit Goal</button>
+              <div id="goal-edit-shell" class="goal-edit-shell" hidden>
+                <label class="field">
+                  <span>Goal draft</span>
+                  <textarea id="home-goal" rows="7" placeholder="Build the next highest-value slice from the repo contract files."></textarea>
+                </label>
+                <div class="button-row button-row-wrap">
+                  <button id="save-goal" class="button button-primary">Save</button>
+                  <button id="cancel-goal-edit" class="button">Cancel</button>
+                </div>
               </div>
               <p id="home-run-control-note" class="panel-note">Start and Continue use explicit engine protocol actions.</p>
+            </div>
+            <div class="ntfy-card">
+              <div class="panel-header">
+                <div>
+                  <h3>ntfy Mobile Bridge</h3>
+                  <div class="panel-meta">Human replies stay raw and are consumed through the existing planner ask-human path.</div>
+                </div>
+              </div>
+              <label class="field">
+                <span>ntfy server URL</span>
+                <input id="ntfy-server-url" type="text" placeholder="https://ntfy.sh" />
+              </label>
+              <label class="field">
+                <span>ntfy topic</span>
+                <input id="ntfy-topic" type="text" placeholder="aurora-your-private-topic" />
+              </label>
+              <label class="field">
+                <span>Auth token (optional)</span>
+                <input id="ntfy-auth-token" type="password" placeholder="Leave blank to keep existing token" autocomplete="off" />
+              </label>
+              <button id="save-test-ntfy" class="button button-primary">Save &amp; Test ntfy</button>
+              <div id="ntfy-status" class="ntfy-status">Not configured.</div>
             </div>
             <div class="setup-health">
               <div class="panel-header">
@@ -118,8 +162,21 @@
               </div>
               <button id="home-primary-action" class="button button-primary">Connect</button>
             </div>
+            <div class="cycle-explainer">
+              <div>
+                <span id="cycle-label" class="cycle-label">Cycle unavailable</span>
+                <strong id="cycle-current-time">00:00:00</strong>
+              </div>
+              <p id="cycle-narration">Connect to the control server to load the current cycle state.</p>
+            </div>
             <div class="mission-gauge-zone">
               <div id="aurora-gauge" class="aurora-gauge" style="--gauge-progress:0">
+                <span class="gauge-tick gauge-tick-0">0%</span>
+                <span class="gauge-tick gauge-tick-25">25%</span>
+                <span class="gauge-tick gauge-tick-50">50%</span>
+                <span class="gauge-tick gauge-tick-75">75%</span>
+                <span class="gauge-tick gauge-tick-100">100%</span>
+                <span class="gauge-needle"></span>
                 <div class="aurora-gauge-inner">
                   <strong id="aurora-progress-label">Phase</strong>
                   <span id="aurora-progress-subtitle">No planner progress available yet.</span>
@@ -128,6 +185,7 @@
               <div class="mission-facts">
                 <div class="home-kv"><span>Run ID</span><strong id="aurora-run-id">No active run</strong></div>
                 <div id="aurora-timers" class="mission-timers"></div>
+                <div id="cycle-history" class="cycle-history"></div>
                 <div id="aurora-meta" class="mission-meta-grid"></div>
               </div>
             </div>

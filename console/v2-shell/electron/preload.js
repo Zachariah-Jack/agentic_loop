@@ -22,6 +22,12 @@ contextBridge.exposeInMainWorld("orchestratorConsole", {
   restartBackend(address = "") {
     return ipcRenderer.invoke("shell:restart-backend", { address });
   },
+  openRepoSession() {
+    return ipcRenderer.invoke("shell:open-repo-session");
+  },
+  closeRepoSession(payload = {}) {
+    return ipcRenderer.invoke("shell:close-repo-session", payload);
+  },
   getStatusSnapshot(runId = "", address = "") {
     return ipcRenderer.invoke("protocol:get-status", { runId, address });
   },
@@ -123,6 +129,9 @@ contextBridge.exposeInMainWorld("orchestratorConsole", {
   },
   setRuntimeConfig(patch) {
     return ipcRenderer.invoke("protocol:set-runtime-config", patch);
+  },
+  testNtfy(address = "") {
+    return ipcRenderer.invoke("protocol:test-ntfy", { address });
   },
   checkForUpdates(includePrereleases = false, address = "") {
     return ipcRenderer.invoke("protocol:check-for-updates", { includePrereleases, address });

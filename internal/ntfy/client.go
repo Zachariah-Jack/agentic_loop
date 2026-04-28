@@ -115,15 +115,19 @@ func (c *Client) Topic() string {
 }
 
 func (c *Client) PublishQuestion(ctx context.Context, question Question) (PublishedMessage, error) {
+	return c.PublishMessage(ctx, defaultQuestionTitle, renderQuestionMessage(question), []string{defaultQuestionTag, defaultAskHumanTag})
+}
+
+func (c *Client) PublishMessage(ctx context.Context, title string, message string, tags []string) (PublishedMessage, error) {
 	if c == nil {
 		return PublishedMessage{}, errors.New("ntfy client is required")
 	}
 
 	payload, err := json.Marshal(publishRequest{
 		Topic:   c.topic,
-		Title:   defaultQuestionTitle,
-		Message: renderQuestionMessage(question),
-		Tags:    []string{defaultQuestionTag, defaultAskHumanTag},
+		Title:   strings.TrimSpace(title),
+		Message: strings.TrimSpace(message),
+		Tags:    tags,
 	})
 	if err != nil {
 		return PublishedMessage{}, err

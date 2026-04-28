@@ -18,6 +18,7 @@ type Patch struct {
 	PermissionProfile *string         `json:"permission_profile,omitempty"`
 	Permissions       PermissionPatch `json:"permissions,omitempty"`
 	Updates           UpdatePatch     `json:"updates,omitempty"`
+	NTFY              NTFYPatch       `json:"ntfy,omitempty"`
 }
 
 type OptionalString struct {
@@ -58,6 +59,12 @@ type UpdatePatch struct {
 	IncludePrereleases  *bool          `json:"include_prereleases,omitempty"`
 	UpdateCheckInterval OptionalString `json:"update_check_interval,omitempty"`
 	SkippedVersions     []string       `json:"skipped_versions,omitempty"`
+}
+
+type NTFYPatch struct {
+	ServerURL *string `json:"server_url,omitempty"`
+	Topic     *string `json:"topic,omitempty"`
+	AuthToken *string `json:"auth_token,omitempty"`
 }
 
 type PermissionPatch struct {
@@ -187,6 +194,7 @@ func (m *Manager) ApplyPatch(patch Patch) (config.Config, bool, error) {
 	}
 	applyPermissionPatch(&cfg, patch.Permissions)
 	applyUpdatePatch(&cfg, patch.Updates)
+	applyNTFYPatch(&cfg, patch.NTFY)
 
 	cfg = config.WithDefaults(cfg)
 	changed := !reflect.DeepEqual(before, cfg)
@@ -212,7 +220,8 @@ func (p Patch) HasChanges() bool {
 		p.Timeouts.HasChanges() ||
 		p.PermissionProfile != nil ||
 		p.Permissions.HasChanges() ||
-		p.Updates.HasChanges()
+		p.Updates.HasChanges() ||
+		p.NTFY.HasChanges()
 }
 
 func (p TimeoutPatch) HasChanges() bool {
@@ -234,6 +243,12 @@ func (p UpdatePatch) HasChanges() bool {
 		p.IncludePrereleases != nil ||
 		p.UpdateCheckInterval.Set ||
 		p.SkippedVersions != nil
+}
+
+func (p NTFYPatch) HasChanges() bool {
+	return p.ServerURL != nil ||
+		p.Topic != nil ||
+		p.AuthToken != nil
 }
 
 func (p PermissionPatch) HasChanges() bool {
@@ -352,4 +367,21 @@ func applyUpdatePatch(cfg *config.Config, patch UpdatePatch) {
 		updates.SkippedVersions = append([]string(nil), patch.SkippedVersions...)
 	}
 	cfg.Updates = config.NormalizeUpdates(updates)
+}
+
+func applyNTFYPatch(cfg *config.Config, patch NTFYPatch) {
+	if cfg == nil || !patch.HasChanges() {
+		return
+	}
+	ntfy := cfg.NTFY
+	if patch.ServerURL != nil {
+		ntfy.ServerURL = strings.TrimSpace(*patch.ServerURL)
+	}
+	if patch.Topic != nil {
+		ntfy.Topic = strings.TrimSpace(*patch.Topic)
+	}
+	if patch.AuthToken != nil {
+		ntfy.AuthToken = strings.TrimSpace(*patch.AuthToken)
+	}
+	cfg.NTFY = ntfy
 }

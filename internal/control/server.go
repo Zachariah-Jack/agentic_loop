@@ -253,6 +253,7 @@ type ActionSet struct {
 	IntegrateWorkers        func(context.Context, IntegrateWorkersRequest) (any, error)
 	GetRuntimeConfig        func(context.Context) (any, error)
 	SetRuntimeConfig        func(context.Context, runtimecfg.Patch) (any, error)
+	TestNTFY                func(context.Context) (any, error)
 	CheckForUpdates         func(context.Context, UpdateRequest) (any, error)
 	GetUpdateStatus         func(context.Context) (any, error)
 	InstallUpdate           func(context.Context, UpdateRequest) (any, error)
@@ -888,6 +889,19 @@ func (s Server) dispatch(ctx context.Context, req RequestEnvelope) ResponseEnvel
 			})
 		}
 		return okResponse(req, cfg)
+	case "test_ntfy":
+		handler := s.Actions.TestNTFY
+		if handler == nil {
+			return unsupportedAction(req, "test_ntfy")
+		}
+		response, err := handler(ctx)
+		if err != nil {
+			return actionError(req, "test_ntfy_failed", err)
+		}
+		s.publish("ntfy_test_completed", map[string]any{
+			"status": "sent",
+		})
+		return okResponse(req, response)
 	case "check_for_updates":
 		handler := s.Actions.CheckForUpdates
 		if handler == nil {

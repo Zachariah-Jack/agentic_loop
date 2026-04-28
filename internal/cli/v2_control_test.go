@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -3198,6 +3199,89 @@ func TestLocalControlServerContinueRunRepairsMissingArtifactsBeforeReadiness(t *
 	}
 	if _, err := os.Stat(filepath.Join(repoRoot, ".orchestrator", "artifacts")); err != nil {
 		t.Fatalf("continue_run should repair missing artifacts directory: %v", err)
+	}
+}
+
+func TestLocalControlServerRuntimeConfigNtfySaveAndTest(t *testing.T) {
+	t.Parallel()
+
+	var publishBody string
+	ntfyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("ntfy method = %s, want POST", r.Method)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll(ntfy body) error = %v", err)
+		}
+		publishBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ntfy_test_1","event":"message","topic":"aurora-test","message":"ok"}`))
+	}))
+	defer ntfyServer.Close()
+
+	repoRoot := t.TempDir()
+	writeRepoMarkerFiles(t, repoRoot)
+	layout := state.ResolveLayout(repoRoot)
+	configPath := filepathJoin(t, repoRoot, "config.json")
+	cfg := config.Default()
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("config.Save() error = %v", err)
+	}
+
+	inv := Invocation{
+		Stdout:     &bytes.Buffer{},
+		Stderr:     &bytes.Buffer{},
+		RepoRoot:   repoRoot,
+		Layout:     layout,
+		Config:     cfg,
+		ConfigPath: configPath,
+		RuntimeCfg: runtimecfg.NewManager(configPath, cfg),
+		Events:     activity.NewBroker(activity.DefaultHistoryLimit),
+		Version:    "test",
+	}
+	server := httptest.NewServer(newLocalControlServer(inv).Handler())
+	defer server.Close()
+
+	setResponse := postControlAction(t, server.URL, `{
+		"id":"req_ntfy_config",
+		"type":"request",
+		"action":"set_runtime_config",
+		"payload":{"ntfy":{"server_url":"`+ntfyServer.URL+`","topic":"aurora-test","auth_token":"secret-token"}}
+	}`)
+	if !setResponse.OK {
+		t.Fatalf("set_runtime_config response failed: %#v", setResponse.Error)
+	}
+	setPayload := setResponse.Payload.(map[string]any)
+	ntfySnapshot := setPayload["ntfy"].(map[string]any)
+	if ntfySnapshot["configured"] != true {
+		t.Fatalf("ntfy.configured = %#v, want true", ntfySnapshot["configured"])
+	}
+	if ntfySnapshot["auth_token_saved"] != true {
+		t.Fatalf("ntfy.auth_token_saved = %#v, want true", ntfySnapshot["auth_token_saved"])
+	}
+	if _, exposed := ntfySnapshot["auth_token"]; exposed {
+		t.Fatal("ntfy runtime snapshot must not expose auth_token")
+	}
+
+	testResponse := postControlAction(t, server.URL, `{
+		"id":"req_ntfy_test",
+		"type":"request",
+		"action":"test_ntfy",
+		"payload":{}
+	}`)
+	if !testResponse.OK {
+		t.Fatalf("test_ntfy response failed: %#v", testResponse.Error)
+	}
+	testPayload := testResponse.Payload.(map[string]any)
+	if testPayload["test_sent"] != true {
+		t.Fatalf("test_sent = %#v, want true", testPayload["test_sent"])
+	}
+	if !strings.Contains(publishBody, `"topic":"aurora-test"`) {
+		t.Fatalf("publish body = %s, want aurora-test topic", publishBody)
+	}
+	if strings.Contains(publishBody, "secret-token") {
+		t.Fatal("ntfy publish body must not include auth token")
 	}
 }
 

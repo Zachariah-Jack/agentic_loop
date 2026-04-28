@@ -15,6 +15,7 @@ import (
 	"orchestrator/internal/config"
 	"orchestrator/internal/control"
 	"orchestrator/internal/journal"
+	"orchestrator/internal/ntfy"
 	"orchestrator/internal/orchestration"
 	"orchestrator/internal/runtimecfg"
 	"orchestrator/internal/state"
@@ -142,6 +143,16 @@ type controlPermissionSnapshot struct {
 	AskBeforeExecutorSteering       bool   `json:"ask_before_executor_steering"`
 	AskBeforePlannerDirection       bool   `json:"ask_before_planner_direction_changes"`
 	Message                         string `json:"message,omitempty"`
+}
+
+type controlNTFYConfigSnapshot struct {
+	Configured     bool   `json:"configured"`
+	ServerURL      string `json:"server_url,omitempty"`
+	Topic          string `json:"topic,omitempty"`
+	AuthTokenSaved bool   `json:"auth_token_saved"`
+	Listening      string `json:"listening"`
+	LastReplyTime  string `json:"last_reply_time,omitempty"`
+	Message        string `json:"message,omitempty"`
 }
 
 type controlPlannerStatusSnapshot struct {
@@ -387,6 +398,7 @@ type controlRuntimeConfigSnapshot struct {
 	Timeouts               controlTimeoutSettingsSnapshot `json:"timeouts"`
 	Permissions            controlPermissionSnapshot      `json:"permissions"`
 	Updates                controlUpdateSettingsSnapshot  `json:"updates"`
+	NTFY                   controlNTFYConfigSnapshot      `json:"ntfy"`
 	MutableFields          []string                       `json:"mutable_fields"`
 }
 
@@ -759,6 +771,9 @@ func newLocalControlServer(inv Invocation) control.Server {
 			},
 			SetRuntimeConfig: func(ctx context.Context, patch runtimecfg.Patch) (any, error) {
 				return applyRuntimeConfigPatch(ctx, current, patch)
+			},
+			TestNTFY: func(ctx context.Context) (any, error) {
+				return testNTFYForControl(ctx, *current)
 			},
 			CheckForUpdates: func(ctx context.Context, request control.UpdateRequest) (any, error) {
 				return checkUpdateStatus(ctx, *current, updateActionRequest{
@@ -1137,6 +1152,7 @@ func buildRuntimeConfigSnapshot(inv Invocation) controlRuntimeConfigSnapshot {
 		Timeouts:               buildTimeoutSettingsSnapshot(cfg),
 		Permissions:            buildPermissionSnapshot(cfg.Permissions),
 		Updates:                buildUpdateSettingsSnapshot(cfg.Updates),
+		NTFY:                   buildNTFYConfigSnapshot(cfg.NTFY),
 		MutableFields: []string{
 			"verbosity",
 			"timeouts.planner_request_timeout",
@@ -1167,8 +1183,69 @@ func buildRuntimeConfigSnapshot(inv Invocation) controlRuntimeConfigSnapshot {
 			"updates.ask_before_update",
 			"updates.include_prereleases",
 			"updates.update_check_interval",
+			"ntfy.server_url",
+			"ntfy.topic",
+			"ntfy.auth_token",
 		},
 	}
+}
+
+func buildNTFYConfigSnapshot(cfg config.NTFYConfig) controlNTFYConfigSnapshot {
+	configured := ntfy.IsConfigured(cfg)
+	return controlNTFYConfigSnapshot{
+		Configured:     configured,
+		ServerURL:      strings.TrimSpace(cfg.ServerURL),
+		Topic:          strings.TrimSpace(cfg.Topic),
+		AuthTokenSaved: strings.TrimSpace(cfg.AuthToken) != "",
+		Listening: func() string {
+			if configured {
+				return "active during planner ask-human waits"
+			}
+			return "not listening"
+		}(),
+		Message: func() string {
+			if configured {
+				return "ntfy is configured. Replies are subscribed during planner ask-human waits and are forwarded raw."
+			}
+			return "ntfy is not configured for this repo/session."
+		}(),
+	}
+}
+
+func testNTFYForControl(ctx context.Context, inv Invocation) (map[string]any, error) {
+	cfg := currentConfig(inv).NTFY
+	if !ntfy.IsConfigured(cfg) {
+		return nil, errors.New("ntfy is not configured; set ntfy.server_url and ntfy.topic first")
+	}
+	client, err := ntfy.NewClient(cfg)
+	if err != nil {
+		return nil, err
+	}
+	published, err := client.PublishMessage(
+		ctx,
+		"Aurora Orchestrator ntfy test",
+		fmt.Sprintf("Aurora Orchestrator test notification for %s at %s.", filepath.Base(inv.RepoRoot), time.Now().UTC().Format(time.RFC3339)),
+		[]string{"orchestrator", "test"},
+	)
+	if err != nil {
+		return nil, err
+	}
+	emitEngineEvent(inv, "ntfy_test_completed", map[string]any{
+		"repo_path":  inv.RepoRoot,
+		"topic":      strings.TrimSpace(cfg.Topic),
+		"message_id": published.ID,
+	})
+	return map[string]any{
+		"configured":       true,
+		"test_sent":        true,
+		"status":           "sent",
+		"message_id":       published.ID,
+		"server_url":       strings.TrimSpace(cfg.ServerURL),
+		"topic":            strings.TrimSpace(cfg.Topic),
+		"auth_token_saved": strings.TrimSpace(cfg.AuthToken) != "",
+		"listening":        "active during planner ask-human waits",
+		"message":          "ntfy config saved and test notification sent. Planner ask-human replies on this topic are forwarded raw.",
+	}, nil
 }
 
 func plannerStatusSnapshotFromRun(run state.Run) controlPlannerStatusSnapshot {
@@ -1217,7 +1294,7 @@ func applyRuntimeConfigPatch(ctx context.Context, inv *Invocation, patch runtime
 		}
 		inv.Config.Verbosity = normalized
 	}
-	if patch.Timeouts.HasChanges() || patch.PermissionProfile != nil || patch.Permissions.HasChanges() || patch.Updates.HasChanges() {
+	if patch.Timeouts.HasChanges() || patch.PermissionProfile != nil || patch.Permissions.HasChanges() || patch.Updates.HasChanges() || patch.NTFY.HasChanges() {
 		manager := runtimecfg.NewManager("", inv.Config)
 		cfg, _, err := manager.ApplyPatch(patch)
 		if err != nil {

@@ -210,6 +210,10 @@ async function setRuntimeConfig(baseURL, payload, options = {}) {
   return callControlAction(baseURL, "set_runtime_config", payload, options);
 }
 
+async function testNtfy(baseURL, payload = {}, options = {}) {
+  return callControlAction(baseURL, "test_ntfy", payload, options);
+}
+
 async function checkForUpdates(baseURL, payload = {}, options = {}) {
   return callControlAction(baseURL, "check_for_updates", payload, options);
 }
@@ -366,6 +370,7 @@ module.exports = {
   integrateWorkers,
   getRuntimeConfig,
   setRuntimeConfig,
+  testNtfy,
   checkForUpdates,
   getUpdateStatus,
   installUpdate,

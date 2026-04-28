@@ -1,8 +1,8 @@
 const path = require("node:path");
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const { createTerminalManager } = require("./terminal-manager");
 const { shutdownWindowStateByKey, shutdownAllWindowStates } = require("./window-state-cleanup");
-const { restartOwnedBackend } = require("./backend-manager");
+const { killProcessTree, restartOwnedBackend, startBackendForRepo } = require("./backend-manager");
 
 const {
   normalizeControlBaseURL,
@@ -40,6 +40,7 @@ const {
   integrateWorkers,
   getRuntimeConfig,
   setRuntimeConfig,
+  testNtfy,
   checkForUpdates,
   getUpdateStatus,
   installUpdate,
@@ -277,6 +278,25 @@ ipcMain.handle("shell:restart-backend", async (event, payload = {}) => {
   return restartOwnedBackend({
     address: payload.address || requireConnectedAddress(browserWindow, ""),
   });
+});
+
+ipcMain.handle("shell:open-repo-session", async (event) => {
+  const browserWindow = browserWindowForEvent(event);
+  const result = await dialog.showOpenDialog(browserWindow, {
+    title: "Open Aurora project folder",
+    properties: ["openDirectory"],
+  });
+  if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+    return { cancelled: true };
+  }
+  return startBackendForRepo({ repoPath: result.filePaths[0] });
+});
+
+ipcMain.handle("shell:close-repo-session", async (_event, payload = {}) => {
+  if (!payload || !payload.pid) {
+    return { attempted: false, message: "no owned backend pid provided" };
+  }
+  return killProcessTree(payload.pid);
 });
 
 ipcMain.handle("protocol:get-status", async (event, payload = {}) => {
@@ -541,6 +561,11 @@ ipcMain.handle("protocol:set-runtime-config", async (event, payload = {}) => {
   const browserWindow = browserWindowForEvent(event);
   const { address, ...patch } = payload || {};
   return setRuntimeConfig(requireConnectedAddress(browserWindow, address), patch);
+});
+
+ipcMain.handle("protocol:test-ntfy", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return testNtfy(requireConnectedAddress(browserWindow, payload.address), {});
 });
 
 ipcMain.handle("protocol:check-for-updates", async (event, payload = {}) => {

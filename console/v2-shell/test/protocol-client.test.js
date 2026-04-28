@@ -39,6 +39,7 @@ const {
   integrateWorkers,
   getRuntimeConfig,
   setRuntimeConfig,
+  testNtfy,
   checkForUpdates,
   getUpdateStatus,
   getUpdateChangelog,
@@ -61,6 +62,8 @@ const {
 } = require("../electron/window-state-cleanup");
 const {
   buildStatusViewModel,
+  normalizeMissionProgress,
+  buildCycleTimingViewModel,
   buildConnectionStatusViewModel,
   buildRepoBindingViewModel,
   buildLoopStatusViewModel,
@@ -262,7 +265,9 @@ test("runtime config and update helpers use explicit protocol actions", async ()
   await setRuntimeConfig("127.0.0.1:44777", {
     timeouts: { executor_turn_timeout: "unlimited" },
     permission_profile: "autonomous",
+    ntfy: { server_url: "https://ntfy.sh", topic: "aurora-test" },
   }, { fetchImpl });
+  await testNtfy("127.0.0.1:44777", {}, { fetchImpl });
   await checkForUpdates("127.0.0.1:44777", {}, { fetchImpl });
   await getUpdateStatus("127.0.0.1:44777", { fetchImpl });
   await getUpdateChangelog("127.0.0.1:44777", {}, { fetchImpl });
@@ -271,9 +276,11 @@ test("runtime config and update helpers use explicit protocol actions", async ()
   assert.match(requestBodies[1], /"action":"set_runtime_config"/);
   assert.match(requestBodies[1], /"executor_turn_timeout":"unlimited"/);
   assert.match(requestBodies[1], /"permission_profile":"autonomous"/);
-  assert.match(requestBodies[2], /"action":"check_for_updates"/);
-  assert.match(requestBodies[3], /"action":"get_update_status"/);
-  assert.match(requestBodies[4], /"action":"get_update_changelog"/);
+  assert.match(requestBodies[1], /"ntfy"/);
+  assert.match(requestBodies[2], /"action":"test_ntfy"/);
+  assert.match(requestBodies[3], /"action":"check_for_updates"/);
+  assert.match(requestBodies[4], /"action":"get_update_status"/);
+  assert.match(requestBodies[5], /"action":"get_update_changelog"/);
 });
 
 test("renderer exposes every timeout field and side-chat quick actions", () => {
@@ -315,6 +322,21 @@ test("renderer exposes Aurora dashboard, setup, timeline, and goal controls", ()
     "use-ai-generate",
     "save-goal",
     "saved-goal-body",
+    "edit-goal",
+    "goal-edit-shell",
+    "cancel-goal-edit",
+    "ai-setup-first-message",
+    "ai-setup-message",
+    "ai-setup-submit",
+    "session-tabs",
+    "session-new",
+    "session-rename",
+    "ntfy-server-url",
+    "ntfy-topic",
+    "save-test-ntfy",
+    "cycle-label",
+    "cycle-current-time",
+    "cycle-history",
     "aurora-gauge",
     "aurora-status-chips",
     "aurora-timeline-body",
@@ -328,8 +350,11 @@ test("renderer exposes Aurora dashboard, setup, timeline, and goal controls", ()
   assert.match(app, /refreshSetupHealth/);
   assert.match(app, /captureRunSnapshot/);
   assert.match(app, /renderAuroraDashboard/);
+  assert.match(app, /switchAuroraSession/);
+  assert.match(app, /saveAndTestNtfy/);
   assert.match(app, /repair_project_setup/);
   assert.match(app, /friendlyRepoContractReadinessError/);
+  assert.doesNotMatch(html, /Fill Starter Goal/);
 });
 
 test("renderer keeps HTML element ids unique", () => {
@@ -344,6 +369,25 @@ test("renderer keeps HTML element ids unique", () => {
   assert.deepEqual(duplicates, []);
 });
 
+test("shell session persistence keeps multi-session tab metadata isolated", () => {
+  const storage = memoryStorage();
+  const saved = saveShellSession(storage, {
+    address: "http://127.0.0.1:44001",
+    activeSessionID: "session_b",
+    sessions: [
+      { id: "session_a", label: "Repo A", address: "http://127.0.0.1:44001", expectedRepoPath: "D:/repo-a" },
+      { id: "session_b", label: "Repo B", address: "http://127.0.0.1:44002", expectedRepoPath: "D:/repo-b", pid: 1234, ownedBackend: true },
+    ],
+  });
+  const loaded = loadShellSession(storage, { defaultAddress: "http://127.0.0.1:44777" });
+
+  assert.equal(saved.sessions.length, 2);
+  assert.equal(loaded.activeSessionID, "session_b");
+  assert.equal(loaded.sessions[0].label, "Repo A");
+  assert.equal(loaded.sessions[1].address, "http://127.0.0.1:44002");
+  assert.equal(loaded.sessions[1].ownedBackend, true);
+});
+
 test("Aurora styles keep light/error surfaces readable in dark mode", () => {
   const root = path.resolve(__dirname, "..");
   const css = fs.readFileSync(path.join(root, "src", "renderer", "styles.css"), "utf8");
@@ -352,7 +396,51 @@ test("Aurora styles keep light/error surfaces readable in dark mode", () => {
   assert.match(css, /select option\s*\{[\s\S]*background:\s*#07111f/i);
   assert.match(css, /::placeholder\s*\{[\s\S]*color:\s*#7790b0/i);
   assert.match(css, /\.issue-box[\s\S]*color:\s*#f8fbff/i);
+  assert.match(css, /button:active[\s\S]*color:\s*#eff7ff/i);
+  assert.match(css, /\.contract-item:active[\s\S]*color:\s*#eff7ff/i);
+  assert.match(css, /\.saved-goal-card\.is-expanded/);
   assert.match(css, /\.setup-auto-repair/);
+});
+
+test("Aurora gauge progress normalization uses the speedometer geometry", () => {
+  assert.deepEqual(normalizeMissionProgress(0), {
+    known: true,
+    value: 0,
+    percentLabel: "0%",
+    arcDegrees: 0,
+    needleAngleDegrees: 90,
+    progressBarWidth: "0%",
+  });
+  assert.equal(normalizeMissionProgress(25).needleAngleDegrees, 180);
+  assert.equal(normalizeMissionProgress(50).needleAngleDegrees, 270);
+  assert.equal(normalizeMissionProgress(75).needleAngleDegrees, 360);
+  assert.equal(normalizeMissionProgress(100).needleAngleDegrees, 450);
+  assert.equal(normalizeMissionProgress(120).value, 100);
+  assert.equal(normalizeMissionProgress("not available").known, false);
+});
+
+test("cycle timing view model stops total build time when run is paused", () => {
+  const paused = buildCycleTimingViewModel({
+    run: {
+      id: "run_1",
+      waiting_at_safe_point: true,
+      latest_checkpoint: { sequence: 4, stage: "planner", label: "safe pause" },
+      next_operator_action: "continue_existing_run",
+    },
+    active_run_guard: { waiting_at_safe_point: true, currently_processing: false },
+    build_time: {
+      total_build_time_ms: 90000,
+      current_step_time_ms: 12000,
+      current_step_started_at: "2026-04-28T10:00:00Z",
+    },
+  }, [], {
+    nowMs: new Date("2026-04-28T10:10:00Z").getTime(),
+    snapshotAtMs: new Date("2026-04-28T10:00:00Z").getTime(),
+  });
+
+  assert.equal(paused.totalBuildTimeLabel, "00:01:30");
+  assert.equal(paused.cycleLabel, "Cycle 4");
+  assert.match(paused.narration, /safe boundary/);
 });
 
 test("dogfood launcher preserves Electron environment assignments", () => {

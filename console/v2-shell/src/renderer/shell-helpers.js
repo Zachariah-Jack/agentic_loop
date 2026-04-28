@@ -30,6 +30,8 @@
   function defaultShellSession() {
     return {
       address: defaultAddress,
+      activeSessionID: "",
+      sessions: [],
       autoReconnect: true,
       lastConnected: false,
       verbosity: "normal",
@@ -54,12 +56,17 @@
     const defaults = defaultShellSession();
     const value = raw && typeof raw === "object" ? raw : {};
     const defaultAddr = safeString(options.defaultAddress, defaultAddress);
+    const sessions = Array.isArray(value.sessions)
+      ? value.sessions.map(normalizeRepoSession).filter((session) => session.id && session.address)
+      : [];
     const categories = value.activityFilters && typeof value.activityFilters === "object"
       ? value.activityFilters.categories || {}
       : {};
 
     return {
       address: safeString(value.address, defaultAddr),
+      activeSessionID: safeString(value.activeSessionID, sessions[0] ? sessions[0].id : ""),
+      sessions,
       autoReconnect: value.autoReconnect !== false,
       lastConnected: Boolean(value.lastConnected),
       verbosity: safeString(value.verbosity, defaults.verbosity),
@@ -87,6 +94,20 @@
           other: categories.other !== false,
         },
       },
+    };
+  }
+
+  function normalizeRepoSession(value) {
+    const session = value && typeof value === "object" ? value : {};
+    return {
+      id: safeString(session.id),
+      label: safeString(session.label, "Aurora Session"),
+      address: safeString(session.address, defaultAddress),
+      expectedRepoPath: safeString(session.expectedRepoPath || session.expected_repo_path),
+      repoPath: safeString(session.repoPath || session.repo_path || session.expectedRepoPath || session.expected_repo_path),
+      pid: Number.isFinite(Number(session.pid)) ? Number(session.pid) : 0,
+      ownedBackend: Boolean(session.ownedBackend || session.owned_backend),
+      createdAt: safeString(session.createdAt || session.created_at),
     };
   }
 
@@ -164,6 +185,7 @@
     defaultActivityCategories,
     sessionStorageKey,
     legacyAddressKey,
+    normalizeRepoSession,
     loadShellSession,
     saveShellSession,
     normalizeShellSession,

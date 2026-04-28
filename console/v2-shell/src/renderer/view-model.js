@@ -174,6 +174,42 @@
     return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
   }
 
+  function formatHMSFromMillis(value) {
+    const totalSeconds = Math.max(0, Math.floor((Number(value) || 0) / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return [
+      String(hours).padStart(2, "0"),
+      String(minutes).padStart(2, "0"),
+      String(seconds).padStart(2, "0"),
+    ].join(":");
+  }
+
+  function normalizeMissionProgress(value) {
+    const raw = Number(value);
+    if (!Number.isFinite(raw)) {
+      return {
+        known: false,
+        value: null,
+        percentLabel: "Phase",
+        arcDegrees: 0,
+        needleAngleDegrees: 90,
+        progressBarWidth: "0%",
+      };
+    }
+    const clamped = Math.max(0, Math.min(100, Math.round(raw)));
+    const arcDegrees = clamped * 3.6;
+    return {
+      known: true,
+      value: clamped,
+      percentLabel: `${clamped}%`,
+      arcDegrees,
+      needleAngleDegrees: 90 + arcDegrees,
+      progressBarWidth: `${clamped}%`,
+    };
+  }
+
   const stopReasonCopy = {
     planner_complete: {
       title: "The planner declared the run complete.",
@@ -1449,11 +1485,10 @@
   function buildProgressPanelViewModel(snapshot) {
     const plannerStatus = snapshot && snapshot.planner_status ? snapshot.planner_status : {};
     const roadmap = snapshot && snapshot.roadmap ? snapshot.roadmap : {};
-    const progressPercent = Number.isInteger(plannerStatus.progress_percent)
-      && plannerStatus.progress_percent >= 0
-      && plannerStatus.progress_percent <= 100
-      ? plannerStatus.progress_percent
-      : null;
+    const progress = Number.isFinite(Number(plannerStatus.progress_percent))
+      ? normalizeMissionProgress(Number(plannerStatus.progress_percent))
+      : normalizeMissionProgress(null);
+    const progressPercent = progress.known ? progress.value : null;
 
     const progressBasis = plannerStatus.present ? safeString(plannerStatus.progress_basis, "Unavailable") : "Unavailable";
     const currentFocus = plannerStatus.present ? safeString(plannerStatus.current_focus, "Unavailable") : "Unavailable";
@@ -1471,7 +1506,8 @@
     return {
       operatorMessage: plannerStatus.present ? safeString(plannerStatus.operator_message, "No operator message yet") : "No operator message yet",
       progressPercent,
-      progressBarWidth: progressPercent === null ? "0%" : `${progressPercent}%`,
+      progressBarWidth: progress.progressBarWidth,
+      progressGeometry: progress,
       progressConfidence: plannerStatus.present ? safeString(plannerStatus.progress_confidence, "Unavailable") : "Unavailable",
       progressBasis,
       progressBasisPreview: truncateText(progressBasis, 180),
@@ -1793,6 +1829,143 @@
         ? "No events received yet. Connect and use the controls to generate real protocol traffic."
         : "No events match the current filters.",
     };
+  }
+
+  function buildCycleTimingViewModel(snapshot, events = [], options = {}) {
+    const run = runSnapshot(snapshot) || {};
+    const checkpoint = latestCheckpoint(run);
+    const buildTime = snapshot && snapshot.build_time ? snapshot.build_time : {};
+    const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+    const snapshotAtMs = Number.isFinite(options.snapshotAtMs) ? options.snapshotAtMs : nowMs;
+    const active = activelyProcessing(snapshot);
+    const cycleNumber = Number.isFinite(Number(run.cycle || run.cycle_number))
+      ? Number(run.cycle || run.cycle_number)
+      : (Number.isFinite(Number(checkpoint.sequence)) && Number(checkpoint.sequence) > 0 ? Number(checkpoint.sequence) : null);
+    const cycleLabel = cycleNumber === null ? "Cycle unavailable" : `Cycle ${cycleNumber}`;
+    const baseTotal = Math.max(0, Number(buildTime.total_build_time_ms) || 0);
+    const liveTotal = baseTotal + (active ? Math.max(0, nowMs - snapshotAtMs) : 0);
+    const currentStartedAt = latestCycleStartedAt(events, cycleNumber)
+      || buildTime.current_active_session_started_at
+      || buildTime.current_step_started_at
+      || run.started_at
+      || "";
+    const currentStartedMs = parseTimeMillis(currentStartedAt);
+    const currentCycleMS = currentStartedMs > 0 && active ? Math.max(0, nowMs - currentStartedMs) : Math.max(0, Number(buildTime.current_step_time_ms) || 0);
+    const recentCycles = buildRecentCycleDurations(events, cycleNumber).slice(-10);
+    return {
+      active,
+      cycleNumber,
+      cycleLabel,
+      totalBuildTimeMS: liveTotal,
+      totalBuildTimeLabel: formatHMSFromMillis(liveTotal),
+      currentCycleStartedAt: currentStartedAt,
+      currentCycleTimeMS: currentCycleMS,
+      currentCycleTimeLabel: formatHMSFromMillis(currentCycleMS),
+      recentCycles,
+      narration: cycleNarration(snapshot, cycleLabel),
+    };
+  }
+
+  function eventCycleNumber(event) {
+    const payload = event && event.payload ? event.payload : {};
+    const candidates = [
+      payload.cycle_number,
+      payload.cycle,
+      payload.loop_number,
+      payload.loop,
+      payload.checkpoint_sequence,
+      payload.sequence,
+    ];
+    for (const value of candidates) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.trunc(parsed);
+      }
+    }
+    return null;
+  }
+
+  function latestCycleStartedAt(events, cycleNumber) {
+    if (!Array.isArray(events) || !Number.isFinite(cycleNumber)) {
+      return "";
+    }
+    const names = new Set(["cycle_started", "planner_turn_started", "run_started", "continue_run_started", "executor_dispatch_requested"]);
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (eventCycleNumber(event) !== cycleNumber) {
+        continue;
+      }
+      if (names.has(safeString(event.event, ""))) {
+        return safeString(event.at, "");
+      }
+    }
+    const first = events.find((event) => eventCycleNumber(event) === cycleNumber);
+    return first ? safeString(first.at, "") : "";
+  }
+
+  function buildRecentCycleDurations(events, activeCycleNumber) {
+    if (!Array.isArray(events) || events.length === 0) {
+      return [];
+    }
+    const byCycle = new Map();
+    for (const event of events) {
+      const cycle = eventCycleNumber(event);
+      const atMs = parseTimeMillis(event && event.at);
+      if (!Number.isFinite(cycle) || atMs <= 0 || cycle === activeCycleNumber) {
+        continue;
+      }
+      const existing = byCycle.get(cycle) || { cycle, startedMs: atMs, endedMs: atMs, outcome: "" };
+      existing.startedMs = Math.min(existing.startedMs, atMs);
+      existing.endedMs = Math.max(existing.endedMs, atMs);
+      const payload = event && event.payload ? event.payload : {};
+      existing.outcome = safeString(payload.planner_outcome || payload.status || event.event, existing.outcome);
+      byCycle.set(cycle, existing);
+    }
+    return [...byCycle.values()]
+      .sort((left, right) => left.cycle - right.cycle)
+      .map((item) => ({
+        label: `Cycle ${item.cycle}`,
+        durationMS: Math.max(0, item.endedMs - item.startedMs),
+        durationLabel: formatHMSFromMillis(Math.max(0, item.endedMs - item.startedMs)),
+        outcome: safeString(item.outcome, "completed"),
+      }));
+  }
+
+  function cycleNarration(snapshot, cycleLabel) {
+    const run = runSnapshot(snapshot);
+    const pending = buildPendingActionViewModel(snapshot);
+    const approval = buildApprovalViewModel(snapshot);
+    const status = buildStatusViewModel(snapshot);
+    if (!run) {
+      return "No active run is loaded. Start a build or continue an existing run when the project setup is ready.";
+    }
+    if (hasAskHumanPending(snapshot)) {
+      return `${cycleLabel} is waiting for human input. Reply in the GUI or through ntfy; the raw reply is routed to the planner.`;
+    }
+    if (approval.needsAttention) {
+      return `${cycleLabel} needs explicit operator approval before executor work can proceed.`;
+    }
+    if (waitingAtSafePoint(snapshot)) {
+      return `${cycleLabel} is paused at a safe boundary. You can continue, edit the goal, or queue a raw planner note.`;
+    }
+    if (activelyProcessing(snapshot)) {
+      const stage = lower(status.checkpointStage || run.activity_state);
+      if (stage.includes("executor") || stage.includes("codex") || executorTurnActive(run)) {
+        return `${cycleLabel} sent work to Codex and is waiting for executor output. The executor timeout is unlimited.`;
+      }
+      if (stage.includes("planner") || pending.present) {
+        return `${cycleLabel} is waiting for the planner to choose the next structured step.`;
+      }
+      return `${cycleLabel} is actively running. Aurora is displaying observable state while the planner and executor do their work.`;
+    }
+    if (run.completed || status.completed) {
+      return `${cycleLabel} is complete. Review the latest artifacts or start a new run when ready.`;
+    }
+    const stopReason = safeString(status.stopReason, "");
+    if (stopReason && stopReason !== "None" && stopReason !== "Unavailable") {
+      return `${cycleLabel} stopped with reason ${stopReason}. Review the timeline or continue through the explicit control button when appropriate.`;
+    }
+    return `${cycleLabel} is waiting for the next explicit operator action.`;
   }
 
   function eventVisibleForVerbosity(item, verbosity) {
@@ -2237,8 +2410,8 @@
       `- Codex version: ${codex.codexVersion}`,
       `- Permission profile: ${safeString(permissions.profile, "Unavailable")}`,
       `- Total Build Time: ${safeString(buildTime.total_build_time_label, "Unavailable")}`,
-      `- Current Step: ${safeString(buildTime.current_step_label, "Unavailable")}`,
-      `- Current Step Time: ${safeString(buildTime.current_step_time_label, "Unavailable")}`,
+      `- Engine Step: ${safeString(buildTime.current_step_label, "Unavailable")}`,
+      `- Engine Step Time: ${safeString(buildTime.current_step_time_label, "Unavailable")}`,
       `- Executor turn timeout: ${timeoutValue("executor_turn_timeout")}`,
       `- Human wait timeout: ${timeoutValue("human_wait_timeout")}`,
       `- Install timeout: ${timeoutValue("install_timeout")}`,
@@ -2615,6 +2788,9 @@
     buildContractStatusViewModel,
     translateStopReason,
     buildStatusViewModel,
+    formatHMSFromMillis,
+    normalizeMissionProgress,
+    buildCycleTimingViewModel,
     buildProgressPanelViewModel,
     buildActivityTimelineViewModel,
     buildTerminalTabsViewModel,

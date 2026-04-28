@@ -63,11 +63,15 @@ What now exists in the Aurora desktop shell:
 - an optional Electron shell under `console/v2-shell/`
 - `orchestrator gui` as the primary GUI launch command from any folder
 - a dark Aurora Mission Control dashboard with a left navigation rail, Project System drawer, central Mission Run gauge/timeline, right AI Conversation panel, and lower mission controls
+- a top Aurora session tab strip so one GUI window can hold multiple independent repo sessions, with folder-picker `+ New`, close, and right-click rename
 - a guided Home dashboard that answers "am I connected, which repo is loaded, is the loop running, does it need me, what happened, and what should I click next"
 - a top always-visible status strip with plain connection labels (`Ready`, `Not Connected`, `Connecting`, `Reconnecting`), connected/connecting timers, repo root, run id, loop status, blocker, verbosity, update, and connect controls
 - real tab navigation for Home, Run, Action Required, Chat, Files, Live Output, Workers, Terminal, Settings, and Dogfood Notes instead of one giant scroll page
 - a simplified Run Control area with protocol-backed Start Build / Continue Build actions; terminal commands are hidden behind backup help
-- run elapsed-time visibility in Home, Status, What Happened, and CLI/status output when timestamps are available
+- read-only Saved Goal display on Home, with View more/View less and an explicit Edit Goal area with Save and Cancel
+- corrected mission-gauge geometry where 0 percent is bottom, 25 percent left, 50 percent top, 75 percent right, and completed color stops at the needle
+- run elapsed-time visibility in Home, Status, What Happened, and CLI/status output when timestamps are available, including active-only Total Build Time, Current Cycle Time, and recent cycle durations when event data exposes them
+- a Home ntfy card for server/topic/token entry, `Save & Test ntfy`, masked saved-token status, and immediate runtime-config updates for future human-intervention waits
 - a connection/settings pane for the local control server address
 - a progress and roadmap-alignment pane that shows planner-safe operator message, visual progress percent, progress confidence, progress basis, current focus, next intended step, and surfaced roadmap context when available
 - a status pane for latest run id, goal, elapsed time, stop reason, completion state, current verbosity, model health, executor failure details, and pending action summary
@@ -75,8 +79,8 @@ What now exists in the Aurora desktop shell:
 - a run-summary pane for a compact "what changed while I was gone" view derived from real status and event data
 - an artifact browser pane backed by real artifact protocol actions, including a raw text/JSON viewer
 - a Project System panel and contract-file editor for `.orchestrator/brief.md`, `.orchestrator/roadmap.md`, `.orchestrator/constraints.md`, `.orchestrator/decisions.md`, `.orchestrator/human-notes.md`, `.orchestrator/goal.md`, and `AGENTS.md`
-- an explicit Save Goal workflow that separates edited goal text from saved `goal.md`
-- an AI setup/autofill wizard pane that drafts selected canonical contract files and the goal through the real engine protocol and previews them before any save
+- an explicit Saved Goal workflow that separates read-only saved `goal.md` display from an edit draft
+- an AI setup/autofill wizard pane that starts from a Home first-message composer, drafts selected canonical contract files and the goal through the real engine protocol, and previews them before any save
 - a fresh-repo startup checklist for Git, Git safe.directory trust, Orchestrator initialization, required files, Codex availability, planner config, ntfy, and writable state/log folders
 - Snapshot and View Logs controls for durable reports and later inspection
 - a read-only repo browser pane that lists one directory at a time and opens repo files through explicit protocol actions
@@ -157,14 +161,15 @@ orchestrator init
 3. Use `-DebugVisibleWindows` only when you intentionally want visible backend PowerShell windows for debugging.
 4. Leave auto-reconnect enabled in the shell for routine control-server restarts.
 5. Use the shell for status, AI Conversation, planner questions, artifacts, project files, workers, setup checks, snapshots, and approvals.
-6. Start on the Aurora dashboard: confirm System Online, check Project System, save the goal, then use Start Build / Continue.
+6. Start on the Aurora dashboard: confirm System Online, check Project System, review Saved Goal, use Edit Goal when needed, then use Start Build / Continue.
 7. If the dashboard recommends starting or continuing a run, use Start Build / Continue; they call explicit `start_run` / `continue_run` protocol actions and return immediately while the control-server process runs the foreground loop.
-8. If the planner asks a question, type the raw answer and click `Queue Raw Note`, or open Action Required and click `Send Answer and Continue`; the shell queues `inject_control_message` and calls `continue_run` only when you choose that action.
-9. If a safe stop was requested, open Action Required and click `Clear Stop and Continue`; the shell clears the mechanical stop flag, then resumes through `continue_run` when the run is resumable.
-10. Capture friction and bugs in the Dogfood Notes pane while they are fresh; notes stay timestamped and tied to the repo/run context.
-11. Keep the headless CLI available for direct `run`, `continue`, `status`, and `doctor` use when you do not need the GUI.
-12. If the shell restarts, reconnect to the same control server and let it rehydrate current status, pending action, workers, artifacts, side-chat history, dogfood notes, and recent activity.
-13. If a run is shown as already active but nothing is progressing, or if SQLite reports a temporary lock, click `Recover Backend / Unlock Repo`. It only stops dogfood-owned backend processes or proven owned backend listeners, never unknown user-started processes.
+8. Configure the Home ntfy card when you want mobile human-intervention notifications. `Save & Test ntfy` updates runtime config and sends a real test notification without exposing the saved token.
+9. If the planner asks a question, type the raw answer and click `Queue Raw Note`, reply through configured ntfy during ask-human waits, or open Action Required and click `Send Answer and Continue`; the shell queues `inject_control_message` and calls `continue_run` only when you choose that action.
+10. If a safe stop was requested, open Action Required and click `Clear Stop and Continue`; the shell clears the mechanical stop flag, then resumes through `continue_run` when the run is resumable.
+11. Capture friction and bugs in the Dogfood Notes pane while they are fresh; notes stay timestamped and tied to the repo/run context.
+12. Keep the headless CLI available for direct `run`, `continue`, `status`, and `doctor` use when you do not need the GUI.
+13. If the shell restarts, reconnect to the same control server and let it rehydrate current status, pending action, workers, artifacts, side-chat history, dogfood notes, and recent activity.
+14. If a run is shown as already active but nothing is progressing, or if SQLite reports a temporary lock, click `Recover Backend / Unlock Repo`. It only stops dogfood-owned backend processes or proven owned backend listeners, never unknown user-started processes.
 
 V2 will preserve the current architecture:
 
@@ -766,7 +771,12 @@ codex exec --model gpt-5.5 --sandbox danger-full-access -c 'approval_policy="nev
 - Use Copy Model Health from Settings when asking for model/backend support. It includes backend PID, binary path/version, planner model verification, Codex path/version/config, `gpt-5.5` verification, full-access status, and excludes secrets.
 - Pending actions are now durable engine state. When available, they describe what the engine is about to do next at a safe boundary.
 - The Aurora desktop shell now also supports:
+  - one-window multi-session tabs, where each open repo has independent status, files, timeline, timers, ntfy config view, and protocol routing
   - a mission-control Home dashboard with Project System, Mission Run gauge, activity timeline, AI Conversation, setup checklist, snapshots, and explicit controls
+  - a read-only Saved Goal card with View more/View less, plus explicit Edit Goal Save/Cancel controls
+  - Home-first AI setup/autofill, where the operator enters the first planner setup message before any generated-file preview appears
+  - corrected gauge geometry and active-only Total Build Time, Current Cycle Time, and recent cycle duration rendering
+  - Home ntfy configuration and `Save & Test ntfy`, with token masking and no fake success if publishing fails
   - pending-action detail viewing
   - a plain-English "What Happened?" summary with translated stop reasons and recommended next actions
   - a Live Output pane whose visible detail follows `quiet`, `normal`, `verbose`, and `trace`
@@ -808,10 +818,12 @@ Notes:
 - the shell talks only to the real loopback control server and event stream
 - default control server address is `http://127.0.0.1:44777`
 - the shell is still a proof console, but the Home dashboard is now the intended daily entry point
+- the top Aurora tab strip can hold multiple repo sessions in one window; every Start, Continue, setup, file, timeline, and ntfy action is routed to the active tab's repo/control-server address
 - the top strip uses plain labels: `Connection Status: Ready`, `Not Connected`, `Connecting`, or `Reconnecting`; `Loop Status: Running`, `Stopped`, `Needs You`, `Completed`, `No Run Yet`, or `Error`
 - artifact browsing is limited to surfaced `.orchestrator/artifacts/...` paths known to the engine
-- contract editing is limited to the canonical files only: `.orchestrator/brief.md`, `.orchestrator/roadmap.md`, `.orchestrator/constraints.md`, `.orchestrator/decisions.md`, `.orchestrator/human-notes.md`, `.orchestrator/goal.md`, and `AGENTS.md`
-- the AI autofill wizard drafts selected canonical contract files and the goal through the real engine protocol and previews the generated content before you save any file
+- contract editing is limited to the canonical files only: `.orchestrator/brief.md`, `.orchestrator/roadmap.md`, `.orchestrator/constraints.md`, `.orchestrator/decisions.md`, `.orchestrator/human-notes.md`, `.orchestrator/goal.md`, and `AGENTS.md`; Home shows `goal.md` as read-only until Edit Goal is opened
+- the AI autofill wizard begins from the Home "Use AI to Generate Files & Goal" first-message composer, drafts selected canonical contract files and the goal through the real engine protocol, and previews the generated content before you save any file
+- Home ntfy settings use `set_runtime_config` plus `test_ntfy`; the engine publishes a real test message and never returns the saved auth token
 - the repo browser is read-only for arbitrary repo files in this slice and lists one directory at a time through explicit protocol actions
 - the terminal pane is an operator utility shell only; it supports multiple local tabs, but run control still belongs to the explicit engine protocol and control actions
 - the Codex/model readiness card reports the exact Codex executable path/version/config source seen by the control server; `gpt-5.5` full-access is `Verified` only after the Codex probe succeeds, and unavailable-model errors are shown without silent fallback
@@ -856,11 +868,13 @@ The helper also passes the chosen control-server address into the Electron shell
 - Conflict handling is mechanical only. There is no semantic merge resolution or "best worker" selection.
 - Automatic merge into the main repo happens only when the planner explicitly requests an apply step, and only through the supported safe apply modes.
 - Plugin loading exists, but there is no plugin management CLI.
-- The first GUI shell exists, but it is still only a narrow protocol proof surface rather than the full V2 operator console.
+- The Aurora GUI is now the intended dogfood surface, but inactive session tabs rehydrate when selected rather than maintaining separate live event streams in the background.
 - Side Chat is currently an observable-context assistant, not the final LLM/tooling backend. It does not perform hidden actions or semantic run steering.
 - Arbitrary repo-file editing is not implemented in the shell; only the canonical contract files are saveable in this slice.
 - The shell currently remembers local UI/session state, but it does not restore live terminal processes across restarts.
 - Event backlog replay after reconnect is limited by the control server's in-memory event history window.
+- Recent cycle duration history depends on cycle-tagged events and persisted build-time/status data; older runs without those events may show only the live current-cycle timer.
+- ntfy background listening remains tied to the existing ask-human wait path; saving from Home makes future human waits use the new config immediately, and `Save & Test ntfy` truthfully verifies publish delivery.
 - Dogfood issue capture is currently local runtime state only; there is no built-in remote issue tracker export yet.
 
 ## Related Docs

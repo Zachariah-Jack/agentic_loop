@@ -76,6 +76,39 @@ func TestApplyPatchAllowsFineGrainedPermissionOverride(t *testing.T) {
 	}
 }
 
+func TestApplyPatchUpdatesNTFYConfig(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	manager := NewManager(path, config.Default())
+	serverURL := "https://ntfy.example.test"
+	topic := "aurora-mobile"
+	authToken := "secret-token"
+	cfg, changed, err := manager.ApplyPatch(Patch{
+		NTFY: NTFYPatch{
+			ServerURL: &serverURL,
+			Topic:     &topic,
+			AuthToken: &authToken,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyPatch() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("changed = false, want true")
+	}
+	if cfg.NTFY.ServerURL != serverURL || cfg.NTFY.Topic != topic || cfg.NTFY.AuthToken != authToken {
+		t.Fatalf("NTFY config = %#v", cfg.NTFY)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.NTFY.Topic != topic {
+		t.Fatalf("persisted NTFY topic = %q, want %q", loaded.NTFY.Topic, topic)
+	}
+}
+
 func TestTimeoutPatchNullMeansUnlimited(t *testing.T) {
 	t.Parallel()
 

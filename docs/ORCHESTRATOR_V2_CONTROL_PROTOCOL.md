@@ -66,7 +66,8 @@ Implemented in the engine now:
 - `list_repo_tree`
 - `open_repo_file`
 - `get_runtime_config`
-- `set_runtime_config` for verbosity, runtime timeouts, permission profile, and update settings
+- `set_runtime_config` for verbosity, runtime timeouts, permission profile, update settings, and ntfy settings
+- `test_ntfy`
 - `inject_control_message`
 - `list_control_messages`
 - `send_side_chat_message` as a context-agent message
@@ -109,6 +110,8 @@ Implemented on top of the protocol now:
 - protocol-backed canonical contract-file opening and saving
 - protocol-backed AI autofill drafting for canonical contract files, with preview-before-save in the shell
 - protocol-backed setup health checks, safe setup actions, goal save, and run snapshots for the Aurora dashboard
+- protocol-backed Home ntfy save/test through runtime config and `test_ntfy`
+- Aurora multi-session tabs that keep per-repo shell state isolated and route actions to the active tab address
 - protocol-backed read-only repo browsing for tree listing and file opening
 - embedded local operator terminal tabs for shell convenience
 - a Side Chat pane that records context-only messages through the real protocol and uses explicit audited actions for planner notes or Safe Stop
@@ -738,6 +741,11 @@ Payload:
     "ask_before_update": true,
     "include_prereleases": false,
     "update_check_interval": "24h"
+  },
+  "ntfy": {
+    "server_url": "https://ntfy.sh",
+    "topic": "example-private-topic",
+    "auth_token": "optional-token"
   }
 }
 ```
@@ -745,6 +753,8 @@ Payload:
 Timeout fields accept finite Go-style durations such as `30m` or `2h`, plus `unlimited`, `no-limit`, `none`, or JSON `null` for no limit. `executor_turn_timeout` and `human_wait_timeout` default to unlimited.
 
 Config updates are persisted immediately. They apply to future operations immediately. In-flight transports use them only where technically possible; otherwise the response/status should say they apply at the next operation or safe boundary.
+
+ntfy config updates are mechanical operator settings. Status/runtime-config snapshots may show server URL, topic, configured state, and whether an auth token is saved, but must never echo the token. Saving ntfy config does not change planner/executor control flow; it only changes the notification/reply channel used by future human-intervention waits.
 
 Permission profiles are mechanical policy labels and toggles:
 
@@ -756,6 +766,24 @@ Permission profiles are mechanical policy labels and toggles:
 They do not grant the GUI semantic authority; planner/executor direction still flows through the existing planner/executor/control protocol boundaries.
 
 `gpt-5-latest` is the orchestrator's planner-model alias. Live OpenAI calls resolve it through the Models API to the newest available mainline versioned GPT-5 model visible to the account. Exact model ids still pin behavior. The `test_planner_model` action then verifies the resolved/requested model with a tiny Responses API call. If discovery or verification fails, the engine reports the failure; it does not silently fall back to an unverified model.
+
+### `test_ntfy`
+
+Purpose:
+
+- publish a real test notification using the current runtime ntfy settings
+- let the GUI report configured/test-sent/failure state truthfully
+
+Behavior:
+
+- requires a configured ntfy server URL and topic
+- sends a short Aurora Orchestrator test message through the ntfy client
+- returns the server URL, topic, configured state, token-saved boolean, publish status, and message id when available
+- emits an `ntfy_test_completed` event when publish succeeds
+- does not expose the auth token
+- does not start, stop, continue, or otherwise steer a run
+
+Human-reply handling remains the existing ask-human path: the engine persists inbound ntfy replies raw and forwards them to the planner as human input. The GUI must not parse ntfy reply prose as runtime control.
 
 ### Update actions
 
@@ -815,7 +843,7 @@ Response should include:
 - repo/runtime readiness
 - latest run summary
 - run start/stop/elapsed-time fields when available
-- `build_time` with `Total Build Time`, current run time, current step label, and current step time
+- `build_time` with `Total Build Time`, current run time, current cycle/loop label, current cycle time, and persisted timing fields where available
 - `timeouts` with the current runtime timeout values and unlimited state
 - `permissions` with the active autonomy profile/toggles
 - `update_status` with the current GitHub Releases update-check state
