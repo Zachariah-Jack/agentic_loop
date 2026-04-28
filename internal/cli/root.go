@@ -70,6 +70,7 @@ func NewApp(opts Options) *App {
 		"doctor":         newDoctorCommand(),
 		"executor":       newExecutorCommand(),
 		"executor-probe": newExecutorProbeCommand(),
+		"gui":            newGUICommand(),
 		"history":        newHistoryCommand(),
 		"init":           newInitCommand(),
 		"resume":         newResumeCommand(),
@@ -189,6 +190,7 @@ func (a *App) printRootHelp() {
 	fmt.Fprintln(a.stdout, "  orchestrator [--config PATH] <command> [args]")
 	fmt.Fprintln(a.stdout, "")
 	fmt.Fprintln(a.stdout, "Typical flow:")
+	fmt.Fprintln(a.stdout, "  orchestrator gui")
 	fmt.Fprintln(a.stdout, "  setup -> init -> run -> continue/status/history/doctor")
 	fmt.Fprintln(a.stdout, "")
 	fmt.Fprintln(a.stdout, "Commands:")

@@ -19,6 +19,9 @@ const {
   listContractFiles,
   openContractFile,
   saveContractFile,
+  getSetupHealth,
+  runSetupAction,
+  captureSnapshot,
   runAIAutofill,
   listRepoTree,
   openRepoFile,
@@ -41,6 +44,7 @@ const {
   getUpdateChangelog,
   setVerbosity,
   setStopSafe,
+  pauseAtSafePoint,
   clearStopFlag,
   streamControlEvents,
 } = require("../src/protocol/client");
@@ -300,6 +304,44 @@ test("renderer exposes every timeout field and side-chat quick actions", () => {
   assert.match(app, /sideChatActionRequest/);
 });
 
+test("renderer exposes Aurora dashboard, setup, timeline, and goal controls", () => {
+  const root = path.resolve(__dirname, "..");
+  const html = fs.readFileSync(path.join(root, "src", "renderer", "index.html"), "utf8");
+  const app = fs.readFileSync(path.join(root, "src", "renderer", "app.js"), "utf8");
+
+  for (const id of [
+    "project-system-body",
+    "setup-health-body",
+    "use-ai-generate",
+    "save-goal",
+    "saved-goal-body",
+    "aurora-gauge",
+    "aurora-status-chips",
+    "aurora-timeline-body",
+    "capture-snapshot",
+    "aurora-pause",
+    "aurora-inject-note",
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+  }
+  assert.match(app, /saveGoalFromHome/);
+  assert.match(app, /refreshSetupHealth/);
+  assert.match(app, /captureRunSnapshot/);
+  assert.match(app, /renderAuroraDashboard/);
+});
+
+test("renderer keeps HTML element ids unique", () => {
+  const root = path.resolve(__dirname, "..");
+  const html = fs.readFileSync(path.join(root, "src", "renderer", "index.html"), "utf8");
+  const matches = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  const counts = new Map();
+  for (const id of matches) {
+    counts.set(id, (counts.get(id) || 0) + 1);
+  }
+  const duplicates = [...counts.entries()].filter(([, count]) => count > 1);
+  assert.deepEqual(duplicates, []);
+});
+
 test("normalizeModelHealthSnapshot lets newer successful tests clear stale Codex model errors", () => {
   const snapshot = {
     run: {
@@ -555,6 +597,30 @@ test("contract file protocol helpers use the real control actions", async () => 
   assert.match(requestBodies[2], /"expected_mtime":"2026-04-22T12:00:00Z"/);
 });
 
+test("setup, snapshot, and pause helpers use explicit mechanical control actions", async () => {
+  const requestBodies = [];
+  const fetchImpl = async (_url, init) => {
+    requestBodies.push(init.body);
+    return new Response(JSON.stringify({
+      type: "response",
+      ok: true,
+      payload: { ok: true, artifact_path: ".orchestrator/artifacts/reports/snapshots/snapshot.json" },
+    }), { status: 200 });
+  };
+
+  await getSetupHealth("127.0.0.1:44777", { fetchImpl });
+  await runSetupAction("127.0.0.1:44777", { action: "create_templates", repo_path: "D:/repo" }, { fetchImpl });
+  await captureSnapshot("127.0.0.1:44777", { run_id: "run_1", repo_path: "D:/repo" }, { fetchImpl });
+  await pauseAtSafePoint("127.0.0.1:44777", "run_1", "operator_requested_pause", { fetchImpl });
+
+  assert.match(requestBodies[0], /"action":"get_setup_health"/);
+  assert.match(requestBodies[1], /"action":"run_setup_action"/);
+  assert.match(requestBodies[1], /"action":"create_templates"/);
+  assert.match(requestBodies[2], /"action":"capture_snapshot"/);
+  assert.match(requestBodies[2], /"run_id":"run_1"/);
+  assert.match(requestBodies[3], /"action":"pause_at_safe_point"/);
+});
+
 test("autofill protocol helper uses the real control action", async () => {
   let requestBody = "";
   await runAIAutofill("127.0.0.1:44777", {
@@ -794,6 +860,39 @@ test("buildRecommendedActionViewModel uses protocol start when a no-run goal is 
   assert.equal(vm.primaryAction.kind, "protocol");
   assert.equal(vm.primaryAction.enabled, true);
   assert.match(vm.detail, /start_run protocol action/);
+});
+
+test("repo contract readiness blocks protocol run controls with init guidance", () => {
+  const snapshot = {
+    runtime: {
+      repo_root: "D:/repo",
+      repo_ready: false,
+      repo_contract_missing: [".orchestrator/artifacts"],
+    },
+  };
+
+  const recommended = buildRecommendedActionViewModel(snapshot, {
+    connection: { connected: true, status: "connected" },
+    goalEntered: true,
+  });
+  const controls = buildRunControlStateViewModel(snapshot, {
+    connection: { connected: true },
+    goalEntered: true,
+  });
+  const dashboard = buildHomeDashboardViewModel(snapshot, {
+    connection: { connected: true, status: "connected" },
+    goalEntered: true,
+    contractFiles: { files: [] },
+  });
+
+  assert.equal(recommended.state, "repo_contract_not_ready");
+  assert.equal(recommended.primaryAction.id, "refresh_status");
+  assert.equal(controls.startEnabled, false);
+  assert.equal(controls.continueEnabled, false);
+  assert.match(controls.startDisabledReason, /orchestrator init/);
+  assert.match(controls.startDisabledReason, /\.orchestrator\/artifacts/);
+  assert.equal(dashboard.repo.ready, false);
+  assert.match(dashboard.repo.message, /orchestrator init/);
 });
 
 test("stale active-run guard recommends mechanical recovery and blocks run controls", () => {
@@ -1653,6 +1752,7 @@ test("buildHomeDashboardViewModel exposes helpful empty state copy and refresh m
     runtime: {
       repo_root: "D:/repo",
       repo_ready: false,
+      repo_contract_missing: [".orchestrator/artifacts"],
       verbosity: "normal",
     },
   }, {
@@ -1664,13 +1764,14 @@ test("buildHomeDashboardViewModel exposes helpful empty state copy and refresh m
     homeError: "status refresh failed",
   });
 
-  assert.equal(vm.recommendation.state, "connected_no_run");
+  assert.equal(vm.recommendation.state, "repo_contract_not_ready");
   assert.equal(vm.topStatus.repoRoot, "D:/repo");
   assert.equal(vm.refreshedLabel, "4/23/2026, 11:00:00 AM");
   assert.match(vm.emptyStates.noRun, /No run found/);
   assert.match(vm.emptyStates.noArtifacts, /Artifacts appear/);
   assert.match(vm.emptyStates.noPendingAction, /not currently holding/);
   assert.equal(vm.homeError, "status refresh failed");
+  assert.match(vm.repo.message, /orchestrator init/);
   assert.equal(vm.contractStatus.message, "Contract status has not been loaded yet. Connect or refresh everything to inspect canonical files.");
   assert.equal(vm.codex.fullAccessReady, "Not verified");
   assert.match(vm.codex.recommendedAction, /Test Codex Config|Codex/);
@@ -2317,8 +2418,8 @@ test("buildRunSummaryViewModel derives a compact return summary from real protoc
   assert.equal(vm.approval, "No approval needed.");
   assert.equal(vm.latestArtifact, ".orchestrator/artifacts/context/run_99/collected_context.json");
   assert.deepEqual(vm.recentEvents, [
-    "Your control message was queued run=run_99.",
-    "Planner finished choosing the next step run=run_99.",
+    "Human reply received run=run_99.",
+    "Planner response received run=run_99.",
   ]);
 });
 
@@ -2488,7 +2589,7 @@ test("formatEventSummary keeps event stream rows readable", () => {
     payload: { run_id: "run_88" },
   });
 
-  assert.equal(summary, "Your control message was queued run=run_88.");
+  assert.equal(summary, "Human reply received run=run_88.");
 
   assert.equal(formatEventSummary({
     event: "planner_turn_completed",
@@ -2497,13 +2598,15 @@ test("formatEventSummary keeps event stream rows readable", () => {
   assert.equal(formatEventSummary({
     event: "executor_dispatch_requested",
     payload: { run_id: "run_88" },
-  }), "Dispatching Codex executor run=run_88.");
+  }), "Prompt sent to Codex run=run_88.");
 });
 
-test("classifyActivityCategory keeps intervention and terminal events distinct", () => {
-  assert.equal(classifyActivityCategory({ event: "control_message_queued" }), "intervention");
+test("classifyActivityCategory keeps human and terminal events distinct", () => {
+  assert.equal(classifyActivityCategory({ event: "control_message_queued" }), "human");
   assert.equal(classifyActivityCategory({ event: "terminal_session_started" }), "terminal");
   assert.equal(classifyActivityCategory({ event: "worker_dispatch_completed" }), "worker");
+  assert.equal(classifyActivityCategory({ event: "file_changes_detected" }), "files");
+  assert.equal(classifyActivityCategory({ event: "tests_completed" }), "tests");
 });
 
 test("window state cleanup uses captured keys and is idempotent", () => {

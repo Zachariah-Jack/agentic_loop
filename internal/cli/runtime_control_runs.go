@@ -47,7 +47,7 @@ func (m *controlRunManager) StartRun(ctx context.Context, inv Invocation, reques
 		return controlRunLaunchSnapshot{}, err
 	}
 	if contract := inspectTargetRepoContract(inv.RepoRoot); !contract.Ready {
-		return controlRunLaunchSnapshot{}, fmt.Errorf("target repo contract is not ready for start_run: %s", strings.Join(contract.Missing, ", "))
+		return controlRunLaunchSnapshot{}, missingControlRepoContractError("start_run", contract)
 	}
 
 	reservation, err := m.reserve("start_run", "")
@@ -87,7 +87,7 @@ func (m *controlRunManager) ContinueRun(ctx context.Context, inv Invocation, req
 		return controlRunLaunchSnapshot{}, err
 	}
 	if contract := inspectTargetRepoContract(inv.RepoRoot); !contract.Ready {
-		return controlRunLaunchSnapshot{}, fmt.Errorf("target repo contract is not ready for continue_run: %s", strings.Join(contract.Missing, ", "))
+		return controlRunLaunchSnapshot{}, missingControlRepoContractError("continue_run", contract)
 	}
 	if !pathExists(inv.Layout.DBPath) {
 		return controlRunLaunchSnapshot{}, errors.New("no unfinished run is available for continue_run")
@@ -174,6 +174,11 @@ func (m *controlRunManager) reserve(action string, runID string) (controlRunRese
 	m.action = reservation.action
 	m.started = reservation.started
 	return reservation, nil
+}
+
+func missingControlRepoContractError(action string, contract repoContractStatus) error {
+	missing := strings.Join(contract.Missing, ", ")
+	return fmt.Errorf("target repo contract is not ready for %s: missing %s; run `orchestrator init` from the target repo, then refresh the dashboard and retry", action, missing)
 }
 
 func (m *controlRunManager) attachRunID(reservation controlRunReservation, runID string) {

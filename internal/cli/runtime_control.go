@@ -40,15 +40,16 @@ type controlBackendSnapshot struct {
 }
 
 type controlRuntimeSnapshot struct {
-	EngineMode             string `json:"engine_mode"`
-	RepoRoot               string `json:"repo_root"`
-	RepoReady              bool   `json:"repo_ready"`
-	PlannerReady           bool   `json:"planner_ready"`
-	ExecutorReady          bool   `json:"executor_ready"`
-	NTFYReady              bool   `json:"ntfy_ready"`
-	Verbosity              string `json:"verbosity"`
-	WorkerConcurrencyLimit int    `json:"worker_concurrency_limit"`
-	PermissionProfile      string `json:"permission_profile"`
+	EngineMode             string   `json:"engine_mode"`
+	RepoRoot               string   `json:"repo_root"`
+	RepoReady              bool     `json:"repo_ready"`
+	RepoContractMissing    []string `json:"repo_contract_missing,omitempty"`
+	PlannerReady           bool     `json:"planner_ready"`
+	ExecutorReady          bool     `json:"executor_ready"`
+	NTFYReady              bool     `json:"ntfy_ready"`
+	Verbosity              string   `json:"verbosity"`
+	WorkerConcurrencyLimit int      `json:"worker_concurrency_limit"`
+	PermissionProfile      string   `json:"permission_profile"`
 }
 
 type controlCheckpointSnapshot struct {
@@ -667,6 +668,15 @@ func newLocalControlServer(inv Invocation) control.Server {
 			DenyExecutor: func(ctx context.Context, request control.ExecutorApprovalActionRequest) (any, error) {
 				return denyExecutorRequest(ctx, *current, request)
 			},
+			GetSetupHealth: func(ctx context.Context) (any, error) {
+				return getSetupHealth(ctx, *current)
+			},
+			RunSetupAction: func(ctx context.Context, request control.SetupActionRequest) (any, error) {
+				return runSetupAction(ctx, *current, request)
+			},
+			CaptureSnapshot: func(ctx context.Context, request control.CaptureSnapshotRequest) (any, error) {
+				return captureControlSnapshot(ctx, *current, request)
+			},
 			GetArtifact: func(ctx context.Context, request control.ArtifactRequest) (any, error) {
 				return getArtifact(ctx, *current, request)
 			},
@@ -788,6 +798,7 @@ func newLocalControlServer(inv Invocation) control.Server {
 
 func buildControlStatusSnapshot(ctx context.Context, inv Invocation, requestedRunID string) (controlStatusSnapshot, error) {
 	cfg := currentConfig(inv)
+	repoContract := inspectTargetRepoContract(inv.RepoRoot)
 	snapshot := controlStatusSnapshot{
 		Backend:        buildControlBackendSnapshot(inv),
 		ActiveRunGuard: buildActiveRunGuardSnapshot(inv),
@@ -795,7 +806,8 @@ func buildControlStatusSnapshot(ctx context.Context, inv Invocation, requestedRu
 		Runtime: controlRuntimeSnapshot{
 			EngineMode:             "headless_cli",
 			RepoRoot:               inv.RepoRoot,
-			RepoReady:              inspectTargetRepoContract(inv.RepoRoot).Ready,
+			RepoReady:              repoContract.Ready,
+			RepoContractMissing:    repoContract.Missing,
 			PlannerReady:           plannerAPIKeyStatus() == "present",
 			ExecutorReady:          executorAppServerState() == "ready",
 			NTFYReady:              ntfyBridgeState(cfg) == "ready",

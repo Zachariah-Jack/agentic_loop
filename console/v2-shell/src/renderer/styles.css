@@ -1515,3 +1515,629 @@ code {
     width: 100%;
   }
 }
+
+/* Aurora dashboard visual system */
+:root {
+  color-scheme: dark;
+  --bg: #060a14;
+  --panel: rgba(9, 16, 30, 0.84);
+  --panel-border: rgba(119, 151, 196, 0.22);
+  --text: #eff7ff;
+  --muted: #91a5c0;
+  --accent: #2fd3ff;
+  --accent-soft: rgba(47, 211, 255, 0.14);
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #fb7185;
+  --info: #60a5fa;
+  --purple: #a78bfa;
+  --shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+}
+
+body {
+  min-width: 0;
+  background:
+    linear-gradient(135deg, rgba(47, 211, 255, 0.08), transparent 32%),
+    linear-gradient(225deg, rgba(167, 139, 250, 0.08), transparent 36%),
+    linear-gradient(180deg, #050812 0%, #08111f 48%, #05070d 100%);
+  color: var(--text);
+}
+
+.app-header {
+  align-items: center;
+}
+
+.app-header h1 {
+  font-size: 30px;
+}
+
+.eyebrow {
+  color: #67e8f9;
+  letter-spacing: 0.12em;
+}
+
+.subtitle,
+.panel-meta,
+.panel-note,
+.field span {
+  color: var(--muted);
+}
+
+.top-status-strip,
+.side-nav,
+.panel,
+.home-card,
+.event-card,
+.artifact-item,
+.contract-item,
+.worker-card,
+.side-chat-item {
+  background: rgba(8, 15, 29, 0.78);
+  border-color: var(--panel-border);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+
+.top-status-strip {
+  border-radius: 16px;
+}
+
+.top-status-item {
+  background: rgba(13, 25, 44, 0.72);
+  border-color: rgba(134, 178, 240, 0.18);
+}
+
+.connection-ready,
+.loop-running,
+.loop-completed,
+.connection-connected {
+  color: var(--success);
+  background: rgba(21, 128, 61, 0.14);
+  border-color: rgba(74, 222, 128, 0.35);
+}
+
+.connection-connecting,
+.loop-attention {
+  color: var(--warning);
+  background: rgba(180, 83, 9, 0.14);
+  border-color: rgba(251, 191, 36, 0.34);
+}
+
+.connection-not-connected,
+.loop-stopped,
+.loop-error,
+.connection-disconnected {
+  color: var(--danger);
+  background: rgba(190, 18, 60, 0.14);
+  border-color: rgba(251, 113, 133, 0.34);
+}
+
+.side-nav {
+  grid-template-columns: 1fr;
+  width: 96px;
+  padding: 12px;
+}
+
+.workspace-shell {
+  grid-template-columns: 96px minmax(0, 1fr);
+}
+
+.side-nav-item {
+  min-height: 54px;
+  justify-content: center;
+  text-align: center;
+  padding: 10px 8px;
+  color: #9fb5d2;
+  border-radius: 12px;
+  font-size: 12px;
+}
+
+.side-nav-item:hover,
+.side-nav-item.active {
+  background: rgba(47, 211, 255, 0.12);
+  border-color: rgba(47, 211, 255, 0.45);
+  color: #effcff;
+  box-shadow: 0 0 22px rgba(47, 211, 255, 0.16);
+}
+
+.button,
+button,
+input,
+textarea,
+select {
+  color: var(--text);
+}
+
+.button {
+  background: rgba(15, 28, 48, 0.78);
+  border-color: rgba(128, 166, 214, 0.26);
+  color: #eaf4ff;
+  border-radius: 10px;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
+}
+
+.button:hover {
+  border-color: rgba(47, 211, 255, 0.78);
+  background: rgba(22, 43, 72, 0.92);
+  box-shadow: 0 0 20px rgba(47, 211, 255, 0.12);
+}
+
+.button-primary {
+  background: linear-gradient(135deg, #0ea5e9, #2563eb);
+  border-color: rgba(125, 211, 252, 0.66);
+}
+
+.button-danger,
+.button-danger-soft {
+  background: rgba(127, 29, 29, 0.24);
+  border-color: rgba(251, 113, 133, 0.38);
+  color: #fecdd3;
+}
+
+input,
+textarea,
+select,
+.viewer-content,
+.command-preview {
+  background: rgba(3, 8, 19, 0.74);
+  border-color: rgba(125, 160, 214, 0.22);
+  color: var(--text);
+}
+
+.aurora-dashboard {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.aurora-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 16px;
+  padding: 20px;
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(10, 20, 38, 0.94), rgba(7, 11, 24, 0.88));
+  box-shadow: var(--shadow);
+}
+
+.aurora-topline h2 {
+  margin: 0 0 8px;
+  font-size: 28px;
+}
+
+.aurora-status-orbit {
+  min-width: 220px;
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+  padding: 14px 16px;
+  border: 1px solid rgba(47, 211, 255, 0.28);
+  border-radius: 14px;
+  background: rgba(47, 211, 255, 0.08);
+}
+
+.aurora-status-orbit span {
+  color: var(--success);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.aurora-status-orbit strong,
+.aurora-status-orbit small {
+  max-width: 280px;
+  overflow-wrap: anywhere;
+}
+
+.aurora-shell {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.82fr) minmax(420px, 1.4fr) minmax(300px, 0.9fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.aurora-project-panel,
+.aurora-mission-panel,
+.aurora-chat-panel {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--panel-border);
+  border-radius: 18px;
+  background: rgba(8, 15, 29, 0.82);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+
+.aurora-project-panel,
+.aurora-chat-panel {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
+.project-file-list,
+.setup-health-body,
+.aurora-timeline,
+.aurora-side-chat {
+  display: grid;
+  gap: 10px;
+  max-height: 340px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.project-file-card {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid rgba(128, 166, 214, 0.22);
+  border-radius: 10px;
+  background: rgba(13, 25, 44, 0.62);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-file-card:hover {
+  border-color: rgba(47, 211, 255, 0.55);
+}
+
+.project-file-name {
+  font-weight: 800;
+}
+
+.project-file-purpose,
+.project-file-meta {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.project-file-card.is-missing .project-file-meta,
+.goal-status.is-missing,
+.goal-status.is-dirty {
+  color: var(--warning);
+}
+
+.project-file-card.is-saved .project-file-meta,
+.goal-status.is-saved {
+  color: var(--success);
+}
+
+.goal-editor,
+.setup-health,
+.control-note-box,
+.saved-goal-card {
+  padding: 12px;
+  border: 1px solid rgba(128, 166, 214, 0.18);
+  border-radius: 12px;
+  background: rgba(5, 11, 23, 0.52);
+}
+
+.saved-goal-card {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.saved-goal-card p {
+  color: #dbeafe;
+  line-height: 1.45;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.saved-goal-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mission-header,
+.panel-header,
+.timeline-actions,
+.mission-secondary-controls,
+.mission-controls,
+.mission-chip-row,
+.chat-mode-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mission-header {
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.mission-header h3 {
+  margin: 0 0 6px;
+  font-size: 24px;
+}
+
+.mission-gauge-zone {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: center;
+}
+
+.aurora-gauge {
+  --gauge-progress: 0;
+  position: relative;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background:
+    conic-gradient(from 225deg, #22c55e 0deg, #2fd3ff calc(var(--gauge-progress) * 1.8deg), rgba(24, 38, 62, 0.96) 0deg 270deg, transparent 270deg 360deg);
+  padding: 18px;
+  filter: drop-shadow(0 0 28px rgba(47, 211, 255, 0.18));
+}
+
+.aurora-gauge::before {
+  content: "";
+  position: absolute;
+  inset: 28px;
+  border-radius: 50%;
+  border: 1px solid rgba(179, 229, 252, 0.18);
+  background:
+    linear-gradient(180deg, rgba(9, 16, 30, 0.94), rgba(5, 10, 22, 0.98));
+}
+
+.aurora-gauge::after {
+  content: "";
+  position: absolute;
+  width: 42%;
+  height: 2px;
+  left: 50%;
+  top: 50%;
+  transform-origin: left center;
+  transform: rotate(calc(var(--gauge-progress) * 1.8deg - 90deg));
+  background: linear-gradient(90deg, #f8fafc, #2fd3ff);
+  box-shadow: 0 0 12px rgba(47, 211, 255, 0.8);
+}
+
+.aurora-gauge-inner {
+  position: absolute;
+  inset: 74px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.aurora-gauge-inner strong {
+  font-size: 42px;
+  line-height: 1;
+}
+
+.aurora-gauge-inner span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.mission-facts {
+  display: grid;
+  gap: 12px;
+}
+
+.mission-timers,
+.mission-meta-grid,
+.aurora-legacy-status-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.mission-timers,
+.mission-meta-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.aurora-legacy-status-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 16px;
+}
+
+.aurora-legacy-status-grid > div {
+  padding: 12px;
+  border: 1px solid rgba(128, 166, 214, 0.16);
+  border-radius: 12px;
+  background: rgba(4, 9, 20, 0.42);
+}
+
+.mission-chip {
+  padding: 8px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(128, 166, 214, 0.24);
+  color: #b6c7df;
+  background: rgba(13, 25, 44, 0.62);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.mission-chip.active {
+  color: #f8fbff;
+  box-shadow: 0 0 20px rgba(47, 211, 255, 0.14);
+}
+
+.mission-chip-planner.active { border-color: rgba(167, 139, 250, 0.65); background: rgba(109, 40, 217, 0.32); }
+.mission-chip-executor.active { border-color: rgba(47, 211, 255, 0.7); background: rgba(14, 116, 144, 0.28); }
+.mission-chip-human.active { border-color: rgba(251, 191, 36, 0.7); background: rgba(146, 64, 14, 0.28); }
+.mission-chip-paused.active { border-color: rgba(251, 113, 133, 0.7); background: rgba(159, 18, 57, 0.28); }
+.mission-chip-complete.active { border-color: rgba(74, 222, 128, 0.7); background: rgba(21, 128, 61, 0.28); }
+
+.timeline-panel {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(128, 166, 214, 0.16);
+}
+
+.timeline-row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 10px;
+  border: 1px solid rgba(128, 166, 214, 0.18);
+  border-radius: 12px;
+  background: rgba(5, 11, 23, 0.54);
+}
+
+.timeline-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid rgba(47, 211, 255, 0.38);
+  color: #cffafe;
+  background: rgba(8, 145, 178, 0.18);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.timeline-title {
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.timeline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.timeline-row details {
+  margin-top: 6px;
+}
+
+.timeline-row pre {
+  max-height: 180px;
+  overflow: auto;
+  color: #cbd5e1;
+}
+
+.setup-check {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid rgba(128, 166, 214, 0.16);
+  border-radius: 10px;
+  background: rgba(6, 13, 26, 0.56);
+}
+
+.setup-check span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.setup-check-side {
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+}
+
+.setup-status {
+  color: var(--info);
+  text-transform: uppercase;
+}
+
+.setup-check-ok .setup-status {
+  color: var(--success);
+}
+
+.setup-check-action_required .setup-status,
+.setup-check-manual_required .setup-status {
+  color: var(--warning);
+}
+
+.chat-mode-strip span {
+  border: 1px solid rgba(128, 166, 214, 0.24);
+  border-radius: 999px;
+  padding: 6px 10px;
+  color: #c4d7f2;
+  background: rgba(13, 25, 44, 0.64);
+  font-size: 12px;
+}
+
+.aurora-side-chat {
+  max-height: 420px;
+}
+
+.hidden-control {
+  display: none !important;
+}
+
+.connection-banner {
+  background: rgba(127, 29, 29, 0.22);
+  border-color: rgba(251, 113, 133, 0.32);
+  color: #fecdd3;
+}
+
+.flash {
+  background: rgba(8, 15, 29, 0.92);
+  border-color: var(--panel-border);
+  border-radius: 14px 14px 0 0;
+}
+
+@media (max-width: 1280px) {
+  .aurora-shell {
+    grid-template-columns: minmax(260px, 0.9fr) minmax(420px, 1.4fr);
+  }
+
+  .aurora-chat-panel {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 980px) {
+  .app-header,
+  .top-status-strip,
+  .connection-banner,
+  .workspace-shell,
+  .app-grid,
+  .flash {
+    width: min(100vw - 20px, 1440px);
+  }
+
+  .workspace-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .side-nav {
+    position: static;
+    width: 100%;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .aurora-shell,
+  .mission-gauge-zone,
+  .mission-timers,
+  .mission-meta-grid,
+  .aurora-legacy-status-grid,
+  .top-status-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .aurora-topline {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .aurora-status-orbit {
+    justify-items: start;
+  }
+}

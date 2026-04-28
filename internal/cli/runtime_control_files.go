@@ -26,8 +26,10 @@ const (
 var canonicalContractFiles = []string{
 	".orchestrator/brief.md",
 	".orchestrator/roadmap.md",
+	".orchestrator/constraints.md",
 	".orchestrator/decisions.md",
 	".orchestrator/human-notes.md",
+	".orchestrator/goal.md",
 	"AGENTS.md",
 }
 
@@ -519,10 +521,11 @@ func resolveRequestedRepoRoot(defaultRepoRoot string, requestedRepoRoot string) 
 		return "", errors.New("server repo root is unavailable")
 	}
 
-	requested := filepath.Clean(strings.TrimSpace(requestedRepoRoot))
-	if requested == "" {
+	requestedRaw := strings.TrimSpace(requestedRepoRoot)
+	if requestedRaw == "" {
 		return defaultRoot, nil
 	}
+	requested := filepath.Clean(requestedRaw)
 	if !strings.EqualFold(requested, defaultRoot) {
 		return "", errors.New("repo_path must match the server repo root in this slice")
 	}

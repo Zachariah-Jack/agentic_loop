@@ -20,6 +20,9 @@ const {
   listContractFiles,
   openContractFile,
   saveContractFile,
+  getSetupHealth,
+  runSetupAction,
+  captureSnapshot,
   runAIAutofill,
   listRepoTree,
   openRepoFile,
@@ -44,6 +47,7 @@ const {
   getUpdateChangelog,
   setVerbosity,
   setStopSafe,
+  pauseAtSafePoint,
   clearStopFlag,
   streamControlEvents,
 } = require("../src/protocol/client");
@@ -52,7 +56,7 @@ const defaultAddress = "http://127.0.0.1:44777";
 const expectedRepoPath = String(process.env.ORCHESTRATOR_V2_EXPECTED_REPO || "").trim();
 const windowState = new Map();
 
-app.setName("Orchestrator Console");
+app.setName("Aurora Orchestrator");
 
 function stateForWindow(browserWindow) {
   if (!browserWindow || browserWindow.isDestroyed()) {
@@ -221,7 +225,7 @@ function createWindow() {
     height: 920,
     minWidth: 1100,
     minHeight: 760,
-    title: "Orchestrator Console",
+    title: "Aurora Orchestrator",
     icon: path.join(__dirname, "..", "assets", "icon.svg"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -371,6 +375,27 @@ ipcMain.handle("protocol:save-contract-file", async (event, payload = {}) => {
     path: payload.path || "",
     content: payload.content || "",
     expected_mtime: payload.expectedMTime || "",
+  });
+});
+
+ipcMain.handle("protocol:get-setup-health", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return getSetupHealth(requireConnectedAddress(browserWindow, payload.address));
+});
+
+ipcMain.handle("protocol:run-setup-action", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return runSetupAction(requireConnectedAddress(browserWindow, payload.address), {
+    action: payload.action || "",
+    repo_path: payload.repoPath || "",
+  });
+});
+
+ipcMain.handle("protocol:capture-snapshot", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return captureSnapshot(requireConnectedAddress(browserWindow, payload.address), {
+    run_id: payload.runId || "",
+    repo_path: payload.repoPath || "",
   });
 });
 
@@ -559,6 +584,11 @@ ipcMain.handle("protocol:set-verbosity", async (event, payload = {}) => {
 ipcMain.handle("protocol:stop-safe", async (event, payload = {}) => {
   const browserWindow = browserWindowForEvent(event);
   return setStopSafe(requireConnectedAddress(browserWindow, payload.address), payload.runId || "", payload.reason || "");
+});
+
+ipcMain.handle("protocol:pause-at-safe-point", async (event, payload = {}) => {
+  const browserWindow = browserWindowForEvent(event);
+  return pauseAtSafePoint(requireConnectedAddress(browserWindow, payload.address), payload.runId || "", payload.reason || "");
 });
 
 ipcMain.handle("protocol:clear-stop", async (event, payload = {}) => {

@@ -64,6 +64,15 @@ contextBridge.exposeInMainWorld("orchestratorConsole", {
   saveContractFile(payload) {
     return ipcRenderer.invoke("protocol:save-contract-file", payload);
   },
+  getSetupHealth(address = "") {
+    return ipcRenderer.invoke("protocol:get-setup-health", { address });
+  },
+  runSetupAction(action = "", repoPath = "", address = "") {
+    return ipcRenderer.invoke("protocol:run-setup-action", { action, repoPath, address });
+  },
+  captureSnapshot(runId = "", repoPath = "", address = "") {
+    return ipcRenderer.invoke("protocol:capture-snapshot", { runId, repoPath, address });
+  },
   runAIAutofill(payload) {
     return ipcRenderer.invoke("protocol:run-ai-autofill", payload);
   },
@@ -135,6 +144,9 @@ contextBridge.exposeInMainWorld("orchestratorConsole", {
   },
   stopSafe(runId = "", reason = "", address = "") {
     return ipcRenderer.invoke("protocol:stop-safe", { runId, reason, address });
+  },
+  pauseAtSafePoint(runId = "", reason = "", address = "") {
+    return ipcRenderer.invoke("protocol:pause-at-safe-point", { runId, reason, address });
   },
   clearStop(runId = "", address = "") {
     return ipcRenderer.invoke("protocol:clear-stop", { runId, address });

@@ -3,16 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Orchestrator V2 Shell</title>
+    <title>Aurora Orchestrator</title>
     <link rel="icon" href="../../assets/icon.svg" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <header class="app-header">
       <div>
-        <div class="eyebrow">Operator Cockpit</div>
-        <h1>Orchestrator Console</h1>
-        <p class="subtitle">Start, watch, guide, and inspect autonomous app-building from one clear control surface.</p>
+        <div class="eyebrow">Aurora Orchestrator</div>
+        <h1>AI Mission Control for Windows</h1>
+        <p class="subtitle">A polished control surface for planner-led runs, Codex execution, setup health, project files, logs, and explicit operator actions.</p>
       </div>
       <div id="connection-badge" class="badge badge-disconnected">disconnected: not connected</div>
     </header>
@@ -53,23 +53,19 @@
       </aside>
 
     <main class="app-grid">
-      <section id="home-dashboard" class="panel panel-home" data-pane="home">
-        <div class="home-hero">
+      <section id="home-dashboard" class="panel panel-home aurora-dashboard" data-pane="home">
+        <div class="aurora-topline">
           <div>
-            <div class="eyebrow">Guided Home</div>
-            <h2>What should I do now?</h2>
+            <div class="eyebrow">Aurora Orchestrator</div>
+            <h2>AI Mission Control for Windows</h2>
             <p id="home-recommendation-title" class="home-recommendation-title">Connect to the control server.</p>
             <p id="home-recommendation-detail" class="home-recommendation-detail">Start the local control server, then connect this shell.</p>
             <p id="home-refresh-meta" class="panel-meta">Last refreshed: Not refreshed yet</p>
           </div>
-          <div class="home-action-stack">
-            <button id="home-primary-action" class="button button-primary">Connect</button>
-            <button id="home-refresh-everything" class="button" title="Gets the latest run, connection, planner, worker, and approval state.">Update Dashboard</button>
-            <button id="home-open-live-output" class="button">Open Live Output</button>
-            <button id="home-copy-debug-bundle" class="button">Copy Debug Bundle</button>
-            <button id="home-recover-backend" class="button button-danger-soft">Recover Backend / Unlock Repo</button>
-            <button id="home-clear-stop-continue" class="button button-primary" hidden>Clear Stop and Continue</button>
-            <button id="home-safe-stop" class="button button-danger-soft">Safe Stop</button>
+          <div class="aurora-status-orbit">
+            <span id="aurora-system-state">Offline</span>
+            <strong id="aurora-repo-label">No repo loaded</strong>
+            <small>Branch <span id="aurora-branch-label">Unavailable</span></small>
           </div>
         </div>
 
@@ -78,87 +74,177 @@
           <div id="home-error-body" class="issue-body"></div>
         </div>
 
-        <div class="home-grid">
-          <article id="run-launcher-card" class="home-card home-card-wide">
+        <div class="aurora-shell">
+          <aside class="aurora-project-panel">
             <div class="panel-header">
-              <h3>Run Control</h3>
-              <div class="panel-meta">Start Build and Continue Build use explicit engine protocol actions. Terminal commands are backup-only.</div>
+              <div>
+                <h3>Project System</h3>
+                <div class="panel-meta">Files the planner reads; saves are explicit.</div>
+              </div>
+              <button id="use-ai-generate" class="button button-primary">Use AI to Generate Files &amp; Goal</button>
             </div>
-            <label class="field">
-              <span>Goal for a new run</span>
-              <textarea id="home-goal" rows="4" placeholder="Build the next highest-value slice from the repo contract files."></textarea>
-            </label>
-              <div class="button-row">
+            <div id="project-system-body" class="project-file-list"></div>
+            <div class="goal-editor">
+              <div class="panel-header">
+                <h3>Goal</h3>
+                <span id="goal-status" class="goal-status">No saved goal</span>
+              </div>
+              <div id="saved-goal-body" class="saved-goal-body"></div>
+              <label class="field">
+                <span>Edit goal separately from saved state</span>
+                <textarea id="home-goal" rows="5" placeholder="Build the next highest-value slice from the repo contract files."></textarea>
+              </label>
+              <div class="button-row button-row-wrap">
+                <button id="save-goal" class="button button-primary">Save Goal</button>
                 <button id="home-use-default-goal" class="button">Fill Starter Goal</button>
-                <button id="home-start-run" class="button button-primary">Start Build</button>
-                <button id="home-continue-run" class="button">Continue Build</button>
               </div>
               <p id="home-run-control-note" class="panel-note">Start and Continue use explicit engine protocol actions.</p>
-              <details class="advanced-help">
+            </div>
+            <div class="setup-health">
+              <div class="panel-header">
+                <h3>Startup Checklist</h3>
+                <button id="setup-refresh" class="button button-mini">Refresh Checks</button>
+              </div>
+              <div id="setup-health-body" class="setup-health-body"></div>
+            </div>
+          </aside>
+
+          <section class="aurora-mission-panel">
+            <div class="mission-header">
+              <div>
+                <div class="eyebrow">Mission Run</div>
+                <h3 id="aurora-stage">Waiting</h3>
+                <p id="aurora-action">No active run yet.</p>
+              </div>
+              <button id="home-primary-action" class="button button-primary">Connect</button>
+            </div>
+            <div class="mission-gauge-zone">
+              <div id="aurora-gauge" class="aurora-gauge" style="--gauge-progress:0">
+                <div class="aurora-gauge-inner">
+                  <strong id="aurora-progress-label">Phase</strong>
+                  <span id="aurora-progress-subtitle">No planner progress available yet.</span>
+                </div>
+              </div>
+              <div class="mission-facts">
+                <div class="home-kv"><span>Run ID</span><strong id="aurora-run-id">No active run</strong></div>
+                <div id="aurora-timers" class="mission-timers"></div>
+                <div id="aurora-meta" class="mission-meta-grid"></div>
+              </div>
+            </div>
+            <div id="aurora-status-chips" class="mission-chip-row"></div>
+            <div class="mission-controls">
+              <button id="home-start-run" class="button button-primary">Start Build</button>
+              <button id="aurora-continue" class="button">Continue</button>
+              <button id="home-continue-run" class="button hidden-control">Continue Build</button>
+              <button id="aurora-pause" class="button">Pause at Safe Point</button>
+              <button id="aurora-stop" class="button button-danger-soft">Stop / Graceful Stop</button>
+              <button id="capture-snapshot" class="button">Snapshot</button>
+              <button id="aurora-inject-note" class="button">Inject Note</button>
+              <button id="aurora-view-logs" class="button">View Logs</button>
+            </div>
+            <div class="mission-secondary-controls">
+              <button id="home-refresh-everything" class="button" title="Gets the latest run, connection, planner, worker, and approval state.">Update Dashboard</button>
+              <button id="home-open-live-output" class="button">Open Live Output</button>
+              <button id="home-copy-debug-bundle" class="button">Copy Debug Bundle</button>
+              <button id="home-recover-backend" class="button button-danger-soft">Recover Backend / Unlock Repo</button>
+              <button id="home-clear-stop-continue" class="button button-primary" hidden>Clear Stop and Continue</button>
+              <button id="home-safe-stop" class="button button-danger-soft hidden-control">Safe Stop</button>
+            </div>
+            <details class="advanced-help">
               <summary>Backup terminal commands</summary>
-              <p class="panel-note">Use these only if protocol Start/Continue is unavailable or you are intentionally using the terminal.</p>
               <div class="button-row">
                 <button id="home-prepare-start-command" class="button button-quiet">Copy terminal command as backup</button>
                 <button id="home-prepare-continue-command" class="button button-quiet">Copy continue command as backup</button>
               </div>
               <pre id="home-command-preview" class="command-preview">Terminal backup: no command prepared.</pre>
             </details>
-          </article>
-
-          <article class="home-card">
-            <h3>Current Repo</h3>
-            <div id="home-repo-body" class="home-stack"></div>
-          </article>
-
-          <article class="home-card home-card-wide">
-            <h3>What is happening right now?</h3>
-            <div id="home-run-body" class="home-stack"></div>
-          </article>
-
-          <article class="home-card">
-            <h3>Progress</h3>
-            <div id="home-progress-body" class="home-stack"></div>
-          </article>
-
-          <article class="home-card">
-            <h3>Planner Says</h3>
-            <div id="home-planner-body" class="home-stack"></div>
-          </article>
-
-          <article class="home-card">
-            <h3>Needs Attention</h3>
-            <div id="home-attention-body" class="home-stack"></div>
-          </article>
-
-          <article class="home-card">
-            <h3>Codex Readiness</h3>
-            <div id="home-codex-body" class="home-stack"></div>
-          </article>
-
-          <article class="home-card">
-            <h3>Latest Artifact</h3>
-            <div id="home-artifact-body" class="home-stack"></div>
-          </article>
-
-          <article class="home-card home-card-wide">
-            <div class="panel-header">
-              <h3>Live Output Highlights</h3>
-              <div class="panel-meta">This is where to watch planner, Codex, model, approval, worker, and shell activity. Verbose and Trace show more detail here.</div>
+            <div class="aurora-legacy-status-grid">
+              <div id="home-repo-body" class="home-stack"></div>
+              <div id="home-run-body" class="home-stack"></div>
+              <div id="home-progress-body" class="home-stack"></div>
+              <div id="home-planner-body" class="home-stack"></div>
+              <div id="home-attention-body" class="home-stack"></div>
+              <div id="home-codex-body" class="home-stack"></div>
+              <div id="home-artifact-body" class="home-stack"></div>
+              <div id="home-activity-body" class="home-activity-list"></div>
             </div>
-            <div id="home-activity-body" class="home-activity-list"></div>
-          </article>
+            <div class="timeline-panel">
+              <div class="panel-header">
+                <div>
+                  <h3>Live Activity Timeline</h3>
+                  <div class="panel-meta">Concise event stream; raw details stay behind details controls.</div>
+                </div>
+                <div class="timeline-actions">
+                  <select id="aurora-timeline-filter">
+                    <option value="all">All Events</option>
+                    <option value="planner">Planner</option>
+                    <option value="executor">Executor</option>
+                    <option value="human">Human</option>
+                    <option value="files">Files</option>
+                    <option value="tests">Tests</option>
+                    <option value="system">System</option>
+                  </select>
+                  <label class="activity-toggle"><input id="aurora-events-auto-scroll" type="checkbox" checked /> Auto-scroll</label>
+                  <button id="timeline-view-logs" class="button button-mini">View Logs</button>
+                </div>
+              </div>
+              <div id="aurora-timeline-body" class="aurora-timeline"></div>
+            </div>
+          </section>
 
-          <article class="home-card home-card-wide">
-            <h3>Quick Buttons</h3>
-            <div class="quick-button-grid">
-              <button id="home-open-contracts" class="button">Open Contract Files</button>
+          <aside class="aurora-chat-panel">
+            <div class="panel-header">
+              <div>
+                <h3>AI Conversation</h3>
+                <div class="panel-meta">Side chat stays separate from run control; notes are explicit.</div>
+              </div>
+              <button id="home-open-contracts" class="button button-mini">Files</button>
+            </div>
+            <div class="chat-mode-strip">
+              <span>@Planner</span>
+              <span>@Executor</span>
+              <span>Add Context</span>
+            </div>
+            <div id="side-chat-body" class="side-chat-list aurora-side-chat"></div>
+            <label class="field">
+              <span>Side chat / copilot question</span>
+              <textarea id="side-chat-message" rows="4" placeholder="What is happening now?"></textarea>
+            </label>
+            <div class="inline-control">
+              <label class="field">
+                <span>Context policy</span>
+                <select id="side-chat-context-policy">
+                  <option value="repo_and_latest_run_summary">repo_and_latest_run_summary</option>
+                  <option value="repo_only">repo_only</option>
+                  <option value="none">none</option>
+                </select>
+              </label>
+              <button id="send-side-chat-message" class="button button-primary">Ask Side Chat</button>
+            </div>
+            <div class="button-row button-row-wrap">
+              <button id="side-chat-what-now" class="button button-secondary">What is happening now?</button>
+              <button id="side-chat-what-changed" class="button button-secondary">What changed while I was gone?</button>
+              <button id="side-chat-explain-blocker" class="button button-secondary">Explain blocker</button>
+              <button id="side-chat-ask-planner-reconsider" class="button button-secondary">Planner note</button>
+              <button id="side-chat-safe-stop" class="button button-danger">Safe stop</button>
+              <button id="side-chat-copy-conversation" class="button button-secondary">Copy chat</button>
+              <button id="side-chat-copy-support" class="button button-secondary">Copy support</button>
+            </div>
+            <div class="control-note-box">
+              <label class="field">
+                <span>Planner input for next safe point</span>
+                <textarea id="control-message" rows="4" placeholder="Type the raw note. The app will not rewrite it."></textarea>
+              </label>
+              <button id="send-control-message" class="button">Queue Raw Note</button>
+            </div>
+            <div class="quick-button-grid hidden-control">
               <button id="home-open-latest-artifact" class="button">Open Latest Artifact</button>
               <button id="home-quick-live-output" class="button">Open Live Output</button>
               <button id="home-quick-copy-debug-bundle" class="button">Copy Run Details for Support</button>
               <button id="home-add-dogfood-note" class="button">Add Dogfood Note</button>
               <button id="home-open-terminal" class="button">Open Operator Terminal</button>
             </div>
-          </article>
+          </aside>
         </div>
       </section>
 
@@ -290,48 +376,17 @@
       </section>
 
       <section id="control-chat-panel" class="panel panel-chat" data-pane="chat">
-        <h2>Control Chat - affects the active run at the next safe point</h2>
-        <label class="field">
-          <span>Raw human intervention message</span>
-          <textarea id="control-message" rows="5" placeholder="Make that wall red, not blue."></textarea>
-        </label>
-        <button id="send-control-message" class="button button-primary">Queue Control Message</button>
-        <p class="panel-note">This queues a real <code>inject_control_message</code> protocol action. The planner decides what to do with the raw message at a safe point.</p>
+        <h2>AI Conversation</h2>
+        <p class="panel-note">The primary conversation composer now lives on the right side of the Aurora dashboard. Raw run notes still route through <code>inject_control_message</code> and are consumed only at safe planner boundaries.</p>
+        <button class="button button-primary" data-tab-target="home">Open Aurora Dashboard</button>
       </section>
 
       <section class="panel panel-side-chat" data-pane="chat">
         <div class="panel-header">
-          <h2>Side Chat - context assistant</h2>
-          <div class="panel-meta">Real-time answers from visible runtime context. It does not affect the active run unless you explicitly promote something to Control Chat.</div>
+          <h2>Side Chat Notes</h2>
+          <div class="panel-meta">Side chat is visible in the home dashboard. Normal messages do not affect the active run.</div>
         </div>
-        <div class="non-interfering-banner">
-          Side Chat answers from observable status/events/artifacts. It only affects planner/Codex flow when you press an explicit audited action button.
-        </div>
-        <div class="button-row button-row-wrap">
-          <button id="side-chat-what-now" class="button button-secondary">What is happening now?</button>
-          <button id="side-chat-what-changed" class="button button-secondary">What changed while I was gone?</button>
-          <button id="side-chat-explain-blocker" class="button button-secondary">Explain current blocker</button>
-          <button id="side-chat-ask-planner-reconsider" class="button button-secondary">Ask planner to reconsider</button>
-          <button id="side-chat-safe-stop" class="button button-danger">Safe stop</button>
-          <button id="side-chat-copy-conversation" class="button button-secondary">Copy conversation</button>
-          <button id="side-chat-copy-support" class="button button-secondary">Copy support bundle</button>
-        </div>
-        <label class="field">
-          <span>Side note</span>
-          <textarea id="side-chat-message" rows="4" placeholder="What still remains before release?"></textarea>
-        </label>
-        <div class="inline-control">
-          <label class="field">
-            <span>Context policy</span>
-            <select id="side-chat-context-policy">
-              <option value="repo_and_latest_run_summary">repo_and_latest_run_summary</option>
-              <option value="repo_only">repo_only</option>
-              <option value="none">none</option>
-            </select>
-          </label>
-          <button id="send-side-chat-message" class="button button-primary">Ask Side Chat</button>
-        </div>
-        <div id="side-chat-body" class="side-chat-list"></div>
+        <div class="non-interfering-banner">Open Home to chat, inject raw notes, or ask the observable-context assistant what changed.</div>
       </section>
 
       <section id="dogfood-panel" class="panel panel-dogfood" data-pane="dogfood">
@@ -524,7 +579,7 @@
         </div>
       </section>
 
-      <section class="panel panel-autofill" data-pane="files">
+      <section id="autofill-setup-panel" class="panel panel-autofill" data-pane="files">
         <div class="panel-header">
           <h2>AI Autofill Wizard</h2>
           <div class="panel-meta">Guided contract drafting through the real engine protocol. Drafts preview first and save only when you choose.</div>
@@ -573,7 +628,9 @@
             <div class="viewer-heading">Draft targets</div>
             <label><input type="checkbox" data-autofill-target=".orchestrator/brief.md" checked /> .orchestrator/brief.md</label>
             <label><input type="checkbox" data-autofill-target=".orchestrator/roadmap.md" checked /> .orchestrator/roadmap.md</label>
+            <label><input type="checkbox" data-autofill-target=".orchestrator/constraints.md" checked /> .orchestrator/constraints.md</label>
             <label><input type="checkbox" data-autofill-target=".orchestrator/decisions.md" checked /> .orchestrator/decisions.md</label>
+            <label><input type="checkbox" data-autofill-target=".orchestrator/goal.md" checked /> .orchestrator/goal.md</label>
             <label><input type="checkbox" data-autofill-target=".orchestrator/human-notes.md" checked /> .orchestrator/human-notes.md</label>
             <label><input type="checkbox" data-autofill-target="AGENTS.md" /> AGENTS.md</label>
           </div>
@@ -636,11 +693,15 @@
           <label class="activity-chip"><input type="checkbox" data-event-category="planner" checked /> Planner</label>
           <label class="activity-chip"><input type="checkbox" data-event-category="executor" checked /> Executor</label>
           <label class="activity-chip"><input type="checkbox" data-event-category="worker" checked /> Worker</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="human" checked /> Human</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="files" checked /> Files</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="tests" checked /> Tests</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="setup" checked /> Setup</label>
           <label class="activity-chip"><input type="checkbox" data-event-category="approval" checked /> Approval</label>
           <label class="activity-chip"><input type="checkbox" data-event-category="intervention" checked /> Intervention</label>
           <label class="activity-chip"><input type="checkbox" data-event-category="fault" checked /> Fault</label>
           <label class="activity-chip"><input type="checkbox" data-event-category="terminal" checked /> Terminal</label>
-          <label class="activity-chip"><input type="checkbox" data-event-category="status" checked /> Status</label>
+          <label class="activity-chip"><input type="checkbox" data-event-category="system" checked /> System</label>
           <label class="activity-chip"><input type="checkbox" data-event-category="other" checked /> Other</label>
         </div>
         <div id="events-body" class="events-list"></div>

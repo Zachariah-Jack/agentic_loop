@@ -75,6 +75,16 @@ type UpdateRequest struct {
 	Version            string `json:"version,omitempty"`
 }
 
+type SetupActionRequest struct {
+	Action   string `json:"action"`
+	RepoPath string `json:"repo_path,omitempty"`
+}
+
+type CaptureSnapshotRequest struct {
+	RunID    string `json:"run_id,omitempty"`
+	RepoPath string `json:"repo_path,omitempty"`
+}
+
 type PendingActionRequest struct {
 	RunID string `json:"run_id,omitempty"`
 }
@@ -217,6 +227,9 @@ type ActionSet struct {
 	GetPendingAction        func(context.Context, string) (any, error)
 	ApproveExecutor         func(context.Context, ExecutorApprovalActionRequest) (any, error)
 	DenyExecutor            func(context.Context, ExecutorApprovalActionRequest) (any, error)
+	GetSetupHealth          func(context.Context) (any, error)
+	RunSetupAction          func(context.Context, SetupActionRequest) (any, error)
+	CaptureSnapshot         func(context.Context, CaptureSnapshotRequest) (any, error)
 	GetArtifact             func(context.Context, ArtifactRequest) (any, error)
 	ListRecentArtifacts     func(context.Context, ListArtifactsRequest) (any, error)
 	ListContractFiles       func(context.Context, ListContractFilesRequest) (any, error)
@@ -428,7 +441,7 @@ func (s Server) dispatch(ctx context.Context, req RequestEnvelope) ResponseEnvel
 			"requested_scope": strings.TrimSpace(payload.Scope),
 		})
 		return okResponse(req, updated)
-	case "set_stop_flag", "stop_safe":
+	case "set_stop_flag", "stop_safe", "pause_at_safe_point":
 		handler := s.Actions.SetStopFlag
 		if handler == nil {
 			return unsupportedAction(req, "stop_safe")
@@ -496,6 +509,47 @@ func (s Server) dispatch(ctx context.Context, req RequestEnvelope) ResponseEnvel
 		response, err := handler(ctx, payload)
 		if err != nil {
 			return actionError(req, "deny_executor_failed", err)
+		}
+		return okResponse(req, response)
+	case "get_setup_health":
+		handler := s.Actions.GetSetupHealth
+		if handler == nil {
+			return unsupportedAction(req, "get_setup_health")
+		}
+		response, err := handler(ctx)
+		if err != nil {
+			return actionError(req, "get_setup_health_failed", err)
+		}
+		return okResponse(req, response)
+	case "run_setup_action":
+		handler := s.Actions.RunSetupAction
+		if handler == nil {
+			return unsupportedAction(req, "run_setup_action")
+		}
+		var payload SetupActionRequest
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return invalidPayload(req, err)
+		}
+		response, err := handler(ctx, payload)
+		if err != nil {
+			return actionError(req, "run_setup_action_failed", err)
+		}
+		s.publish("setup_action_completed", map[string]any{
+			"action": strings.TrimSpace(payload.Action),
+		})
+		return okResponse(req, response)
+	case "capture_snapshot":
+		handler := s.Actions.CaptureSnapshot
+		if handler == nil {
+			return unsupportedAction(req, "capture_snapshot")
+		}
+		var payload CaptureSnapshotRequest
+		if err := decodePayload(req.Payload, &payload); err != nil {
+			return invalidPayload(req, err)
+		}
+		response, err := handler(ctx, payload)
+		if err != nil {
+			return actionError(req, "capture_snapshot_failed", err)
 		}
 		return okResponse(req, response)
 	case "get_artifact":

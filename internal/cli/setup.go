@@ -244,6 +244,10 @@ func writeSetupSummary(stdout io.Writer, configPath string, cfg config.Config, s
 	fmt.Fprintf(stdout, "ntfy.configured: %t\n", ntfyConfigured(cfg))
 	fmt.Fprintf(stdout, "repo_contract.markers_ready: %t\n", summary.RepoContract.Ready)
 	fmt.Fprintf(stdout, "repo_contract.confirmed: %t\n", repoContractConfirmedValue(cfg, summary.RepoContract))
+	pathLevel, pathDetail := executableDirPATHStatus()
+	fmt.Fprintf(stdout, "gui.launch_command: orchestrator gui\n")
+	fmt.Fprintf(stdout, "gui.path_status: %s\n", pathLevel)
+	fmt.Fprintf(stdout, "gui.path_detail: %s\n", pathDetail)
 	if len(summary.RepoContract.Missing) == 0 {
 		fmt.Fprintln(stdout, "repo_contract.missing_markers: none")
 	} else {

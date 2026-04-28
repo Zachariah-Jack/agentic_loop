@@ -15,7 +15,9 @@ const defaultAddress = persistedShellSession.address || bootstrapAddress;
 const defaultAutofillTargets = [
   ".orchestrator/brief.md",
   ".orchestrator/roadmap.md",
+  ".orchestrator/constraints.md",
   ".orchestrator/decisions.md",
+  ".orchestrator/goal.md",
   ".orchestrator/human-notes.md",
 ];
 const softRefreshEvents = new Set([
@@ -39,6 +41,8 @@ const softRefreshEvents = new Set([
   "side_chat_message_answered",
   "dogfood_issue_recorded",
   "contract_autofill_generated",
+  "setup_action_completed",
+  "snapshot_captured",
   "worker_created",
   "worker_dispatch_completed",
   "worker_removed",
@@ -65,6 +69,16 @@ const state = {
   contractFiles: { count: 0, files: [] },
   selectedContractPath: persistedShellSession.selectedContractPath || "",
   contractOpenFile: null,
+  savedGoal: {
+    content: "",
+    modifiedAt: "",
+    exists: false,
+    dirty: false,
+    status: "not_loaded",
+  },
+  setupHealth: null,
+  setupActionInFlight: "",
+  latestSnapshotCapture: null,
   autofill: {
     step: 0,
     answers: {
@@ -205,6 +219,35 @@ function initializeRefs() {
   refs.homeError = document.getElementById("home-error");
   refs.homeErrorBody = document.getElementById("home-error-body");
   refs.homeGoal = document.getElementById("home-goal");
+  refs.goalSaveButton = document.getElementById("save-goal");
+  refs.goalStatus = document.getElementById("goal-status");
+  refs.savedGoalBody = document.getElementById("saved-goal-body");
+  refs.projectSystemBody = document.getElementById("project-system-body");
+  refs.setupHealthBody = document.getElementById("setup-health-body");
+  refs.setupRefreshButton = document.getElementById("setup-refresh");
+  refs.useAIGenerateButton = document.getElementById("use-ai-generate");
+  refs.auroraGauge = document.getElementById("aurora-gauge");
+  refs.auroraProgressLabel = document.getElementById("aurora-progress-label");
+  refs.auroraProgressSubtitle = document.getElementById("aurora-progress-subtitle");
+  refs.auroraSystemState = document.getElementById("aurora-system-state");
+  refs.auroraRepoLabel = document.getElementById("aurora-repo-label");
+  refs.auroraBranchLabel = document.getElementById("aurora-branch-label");
+  refs.auroraRunId = document.getElementById("aurora-run-id");
+  refs.auroraStage = document.getElementById("aurora-stage");
+  refs.auroraAction = document.getElementById("aurora-action");
+  refs.auroraStatusChips = document.getElementById("aurora-status-chips");
+  refs.auroraTimers = document.getElementById("aurora-timers");
+  refs.auroraMeta = document.getElementById("aurora-meta");
+  refs.auroraTimelineBody = document.getElementById("aurora-timeline-body");
+  refs.auroraTimelineFilter = document.getElementById("aurora-timeline-filter");
+  refs.auroraEventsAutoScroll = document.getElementById("aurora-events-auto-scroll");
+  refs.timelineViewLogsButton = document.getElementById("timeline-view-logs");
+  refs.captureSnapshotButton = document.getElementById("capture-snapshot");
+  refs.auroraPauseButton = document.getElementById("aurora-pause");
+  refs.auroraStopButton = document.getElementById("aurora-stop");
+  refs.auroraContinueButton = document.getElementById("aurora-continue");
+  refs.auroraInjectNoteButton = document.getElementById("aurora-inject-note");
+  refs.auroraViewLogsButton = document.getElementById("aurora-view-logs");
   refs.homeUseDefaultGoal = document.getElementById("home-use-default-goal");
   refs.homeStartRun = document.getElementById("home-start-run");
   refs.homeContinueRun = document.getElementById("home-continue-run");
@@ -562,6 +605,7 @@ function makeLocalActivity(eventName, payload = {}, summary = "") {
 function pushActivityEvent(event) {
   state.events = [event, ...state.events].slice(0, 120);
   renderHomeDashboard();
+  renderAuroraDashboard();
   renderEvents();
   renderRunSummary();
 }
@@ -604,6 +648,24 @@ function reportIssue(scope, error, hint = "") {
   renderIssue();
   renderHomeDashboard();
   setFlash("error", state.lastIssue.message);
+}
+
+function isRepoContractReadinessError(error) {
+  return /target repo contract is not ready/i.test(error && error.message ? error.message : "");
+}
+
+function friendlyRepoContractReadinessError(error) {
+  const message = error && error.message ? error.message : "";
+  const missingMatch = message.match(/missing\s+(.+?)(?:;|$)/i);
+  const missing = missingMatch ? missingMatch[1].trim() : "";
+  return `Target repo contract is not ready${missing ? `; missing ${missing}` : ""}. Run orchestrator init from the target repo, then refresh the dashboard and retry.`;
+}
+
+function displayErrorWithMessage(error, message) {
+  const displayError = new Error(message);
+  displayError.code = error && error.code;
+  displayError.status = error && error.status;
+  return displayError;
 }
 
 function clearIssue() {
@@ -667,6 +729,71 @@ function renderIssue() {
 
 function homeRow(label, value) {
   return `<div class="home-kv"><span>${escapeHTML(label)}</span><strong title="${escapeHTML(value)}">${escapeHTML(value)}</strong></div>`;
+}
+
+const projectFilePurposes = {
+  ".orchestrator/brief.md": "Project brief and desired outcome.",
+  ".orchestrator/roadmap.md": "Build plan and milestones.",
+  ".orchestrator/constraints.md": "Technical and business guardrails.",
+  ".orchestrator/decisions.md": "Stable decisions and rationale.",
+  ".orchestrator/human-notes.md": "Extra user context and notes.",
+  ".orchestrator/goal.md": "Current run/build objective.",
+  "AGENTS.md": "Repo instructions for AI agents.",
+};
+
+const auroraTimelineCategorySets = {
+  all: {},
+  planner: { planner: true },
+  executor: { executor: true, worker: true },
+  human: { human: true, intervention: true, approval: true },
+  files: { files: true },
+  tests: { tests: true },
+  system: { system: true, status: true, fault: true, terminal: true, setup: true, other: true },
+};
+
+function shortPathName(path) {
+  const parts = String(path || "").split(/[\\/]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : String(path || "");
+}
+
+function latestBranchLabel(snapshot) {
+  const runtime = snapshot && snapshot.runtime ? snapshot.runtime : {};
+  const run = snapshot && snapshot.run ? snapshot.run : {};
+  return runtime.git_branch || runtime.current_branch || run.git_branch || "Unavailable";
+}
+
+function runStateLabelForAurora(loopVM) {
+  switch (loopVM.state) {
+    case "running":
+      return "Active Run";
+    case "attention":
+      return "Human Input";
+    case "completed":
+      return "Complete";
+    case "stopped":
+      return "Paused";
+    case "idle":
+      return state.connection.connected ? "Waiting" : "Offline";
+    default:
+      return state.connection.connected ? "System Online" : "Offline";
+  }
+}
+
+function chipHTML(label, active, tone = "neutral") {
+  return `<span class="mission-chip mission-chip-${escapeHTML(tone)} ${active ? "active" : ""}">${escapeHTML(label)}</span>`;
+}
+
+function timelineCategoriesForAurora() {
+  const selected = refs.auroraTimelineFilter ? refs.auroraTimelineFilter.value : "all";
+  const selectedSet = auroraTimelineCategorySets[selected] || {};
+  if (selected === "all") {
+    return {};
+  }
+  const categories = {};
+  ["planner", "executor", "worker", "approval", "intervention", "human", "files", "tests", "system", "setup", "fault", "terminal", "status", "other"].forEach((category) => {
+    categories[category] = Boolean(selectedSet[category]);
+  });
+  return categories;
 }
 
 function renderProgressDetailSection(section) {
@@ -929,6 +1056,198 @@ function renderHomeDashboard() {
     `)),
       `<p class="panel-note">${escapeHTML(vm.liveOutput.detail)}</p>`,
     ].join("");
+}
+
+function renderAuroraDashboard() {
+  if (!refs.auroraGauge) {
+    return;
+  }
+
+  const loopVM = window.OrchestratorViewModel.buildLoopStatusViewModel(state.snapshot, {
+    connection: state.connection,
+    latestEvent: latestActivityEvent(),
+    launching: state.runLaunch.inFlight,
+    lastUpdateLabel: state.lastRefreshedAt ? new Date(state.lastRefreshedAt).toLocaleTimeString() : "",
+  });
+  const statusVM = window.OrchestratorViewModel.buildStatusViewModel(state.snapshot);
+  const progressVM = window.OrchestratorViewModel.buildProgressPanelViewModel(state.snapshot);
+  const pendingVM = window.OrchestratorViewModel.buildPendingActionViewModel(state.snapshot);
+  const approvalVM = window.OrchestratorViewModel.buildApprovalViewModel(state.snapshot);
+  const run = state.snapshot && state.snapshot.run ? state.snapshot.run : {};
+  const runtime = state.snapshot && state.snapshot.runtime ? state.snapshot.runtime : {};
+  const buildTime = state.snapshot && state.snapshot.build_time ? state.snapshot.build_time : {};
+  const progressKnown = progressVM.progressPercent !== null;
+  const progressValue = progressKnown ? progressVM.progressPercent : 0;
+  const actionLabel = state.runLaunch.inFlight
+    ? "Submitting explicit run action"
+    : (pendingVM.present ? pendingVM.summary : (statusVM.nextOperatorAction || loopVM.detail || "Waiting for explicit operator action"));
+  const currentStage = statusVM.checkpointStage !== "Unavailable"
+    ? statusVM.checkpointStage
+    : (run.activity_state || loopVM.state || "waiting");
+
+  refs.auroraGauge.style.setProperty("--gauge-progress", String(progressValue));
+  refs.auroraProgressLabel.textContent = progressKnown ? `${progressValue}%` : "Phase";
+  refs.auroraProgressSubtitle.textContent = progressKnown
+    ? `${progressVM.progressConfidence} confidence from planner status`
+    : `${loopVM.label}: ${loopVM.detail}`;
+  refs.auroraSystemState.textContent = runStateLabelForAurora(loopVM);
+  refs.auroraRepoLabel.textContent = shortPathName(runtime.repo_root || activeRepoPath() || "No repo loaded");
+  refs.auroraBranchLabel.textContent = latestBranchLabel(state.snapshot);
+  refs.auroraRunId.textContent = statusVM.runID || "No active run";
+  refs.auroraStage.textContent = currentStage;
+  refs.auroraAction.textContent = actionLabel;
+
+  const executorActive = ["executor", "codex"].some((word) => String(currentStage).toLowerCase().includes(word))
+    || String(run.activity_state || "").toLowerCase().includes("executor");
+  const plannerActive = String(currentStage).toLowerCase().includes("planner")
+    || String(statusVM.latestPlannerOutcome || "").toLowerCase() !== "unavailable";
+  refs.auroraStatusChips.innerHTML = [
+    chipHTML("Planner", plannerActive && !executorActive, "planner"),
+    chipHTML("Executor / Codex", executorActive, "executor"),
+    chipHTML("Waiting", loopVM.state === "idle" || loopVM.state === "stopped", "waiting"),
+    chipHTML("Human Input", approvalVM.needsAttention || statusVM.stopReason === "planner_ask_human", "human"),
+    chipHTML("Paused", loopVM.state === "stopped", "paused"),
+    chipHTML("Complete", loopVM.state === "completed" || statusVM.completed, "complete"),
+  ].join("");
+
+  refs.auroraTimers.innerHTML = [
+    homeRow("Total Build Time", buildTime.total_build_time_label || "Unavailable"),
+    homeRow("Current Step Time", buildTime.current_step_time_label || "Unavailable"),
+    homeRow("Current Step", buildTime.current_step_label || currentStage),
+  ].join("");
+
+  refs.auroraMeta.innerHTML = [
+    homeRow("Cycle", String(run.cycle || run.cycle_number || statusVM.cycle || "Unavailable")),
+    homeRow("Latest Checkpoint", `${statusVM.checkpointStage} / ${statusVM.checkpointLabel}`),
+    homeRow("Stop Reason", statusVM.stopReason || "None"),
+    homeRow("Planner Outcome", statusVM.latestPlannerOutcome || "Unavailable"),
+    homeRow("Executor Status", statusVM.executorTurnStatus || "Unavailable"),
+  ].join("");
+
+  renderProjectSystem();
+  renderSetupHealth();
+  renderSavedGoal();
+  renderAuroraTimeline();
+}
+
+function renderProjectSystem() {
+  if (!refs.projectSystemBody) {
+    return;
+  }
+  const files = state.contractFiles && Array.isArray(state.contractFiles.files) ? state.contractFiles.files : [];
+  const preferred = [
+    ".orchestrator/brief.md",
+    ".orchestrator/roadmap.md",
+    ".orchestrator/constraints.md",
+    ".orchestrator/decisions.md",
+    ".orchestrator/human-notes.md",
+    ".orchestrator/goal.md",
+  ];
+  const byPath = new Map(files.map((file) => [file.path, file]));
+  const cards = preferred
+    .filter((path) => byPath.has(path) || path !== ".orchestrator/human-notes.md")
+    .map((path) => {
+      const file = byPath.get(path) || { path, exists: false, modified_at: "" };
+      const status = file.exists ? "saved" : "missing";
+      return `
+        <button class="project-file-card ${file.exists ? "is-saved" : "is-missing"}" data-project-file="${escapeHTML(path)}">
+          <span class="project-file-name">${escapeHTML(shortPathName(path))}</span>
+          <span class="project-file-purpose">${escapeHTML(projectFilePurposes[path] || "Project system file.")}</span>
+          <span class="project-file-meta">${escapeHTML(status)}${file.modified_at ? ` | ${escapeHTML(file.modified_at)}` : ""}</span>
+        </button>
+      `;
+    });
+  refs.projectSystemBody.innerHTML = cards.length === 0
+    ? `<div class="event-empty">Project files have not been loaded yet. Connect or refresh setup checks.</div>`
+    : cards.join("");
+}
+
+function renderSavedGoal() {
+  if (!refs.savedGoalBody || !refs.goalStatus) {
+    return;
+  }
+  const statusText = state.savedGoal.dirty
+    ? "Unsaved edits"
+    : state.savedGoal.exists
+      ? "Goal saved"
+      : "No saved goal";
+  refs.goalStatus.textContent = statusText;
+  refs.goalStatus.className = `goal-status ${state.savedGoal.dirty ? "is-dirty" : state.savedGoal.exists ? "is-saved" : "is-missing"}`;
+  refs.savedGoalBody.innerHTML = state.savedGoal.exists
+    ? `<div class="saved-goal-card"><strong>Saved Goal</strong><p>${escapeHTML(state.savedGoal.content || "Saved goal file is empty.")}</p><span>${escapeHTML(state.savedGoal.modifiedAt || "Last updated unavailable")}</span></div>`
+    : `<div class="saved-goal-card empty"><strong>No saved goal yet</strong><p>Write or generate a goal, then save it explicitly before starting a run.</p></div>`;
+}
+
+function renderSetupHealth() {
+  if (!refs.setupHealthBody) {
+    return;
+  }
+  const checks = state.setupHealth && Array.isArray(state.setupHealth.checks) ? state.setupHealth.checks : [];
+  if (checks.length === 0) {
+    refs.setupHealthBody.innerHTML = `<div class="event-empty">Setup checks have not run yet. Connect to the control server or click Refresh Checks.</div>`;
+    return;
+  }
+  refs.setupHealthBody.innerHTML = checks.map((check) => {
+    const action = check.action ? `<button class="button button-mini" data-setup-action="${escapeHTML(check.action)}">${escapeHTML(check.action_label || "Fix")}</button>` : "";
+    return `
+      <div class="setup-check setup-check-${escapeHTML(check.status || "unknown")}">
+        <div>
+          <strong>${escapeHTML(check.label || check.id)}</strong>
+          <span>${escapeHTML(check.detail || "")}</span>
+        </div>
+        <div class="setup-check-side">
+          <span class="setup-status">${escapeHTML(check.status || "unknown")}</span>
+          ${action}
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderAuroraTimeline() {
+  if (!refs.auroraTimelineBody) {
+    return;
+  }
+  const vm = window.OrchestratorViewModel.buildActivityTimelineViewModel(state.events, {
+    currentRunOnly: false,
+    categories: timelineCategoriesForAurora(),
+    verbosity: refs.verbositySelect ? refs.verbositySelect.value : "normal",
+  });
+  const items = vm.items.slice(0, 18);
+  if (items.length === 0) {
+    refs.auroraTimelineBody.innerHTML = `<div class="event-empty">${escapeHTML(vm.emptyMessage)}</div>`;
+    return;
+  }
+  const icons = {
+    planner: "PL",
+    executor: "CX",
+    worker: "WK",
+    approval: "OK",
+    intervention: "HU",
+    human: "HU",
+    files: "FI",
+    tests: "TS",
+    setup: "SU",
+    system: "SY",
+    terminal: "SH",
+    fault: "!",
+    status: "ST",
+  };
+  refs.auroraTimelineBody.innerHTML = items.map((event, index) => `
+    <div class="timeline-row timeline-row-${escapeHTML(event.severity)}">
+      <span class="timeline-icon">${escapeHTML(icons[event.category] || "EV")}</span>
+      <div class="timeline-main">
+        <div class="timeline-title">${escapeHTML(event.summary)}</div>
+        <div class="timeline-meta">
+          <span>${escapeHTML(event.timestampLabel)}</span>
+          <span class="event-chip event-chip-${escapeHTML(event.category)}">${escapeHTML(event.categoryLabel)}</span>
+          <span>${escapeHTML(event.sourceLabel)}</span>
+        </div>
+        <details><summary>Details</summary><pre>${escapeHTML(event.payloadText)}</pre></details>
+      </div>
+      <button class="button button-mini event-copy" data-event-index="${escapeHTML(String(index))}">Copy</button>
+    </div>
+  `).join("");
 }
 
 function renderConnection() {
@@ -1464,6 +1783,9 @@ function renderWorkers() {
 }
 
 function renderEvents() {
+  if (refs.auroraEventsAutoScroll) {
+    refs.auroraEventsAutoScroll.checked = state.activityFilters.autoScroll;
+  }
   const vm = window.OrchestratorViewModel.buildActivityTimelineViewModel(state.events, {
     searchText: state.activityFilters.searchText,
     currentRunOnly: state.activityFilters.currentRunOnly,
@@ -1699,6 +2021,7 @@ function renderAll() {
   renderVerbosityHelp();
   renderConnection();
   renderHomeDashboard();
+  renderAuroraDashboard();
   renderProgressPanel();
   renderStatus();
   renderModelHealth();
@@ -1770,13 +2093,14 @@ async function hydrateProtocolBackedPanels(refreshContracts = false) {
   }
 
   const runID = activeRunID();
-  const [artifactsResult, sideChatResult, dogfoodResult, workersResult, runtimeConfigResult, updateStatusResult] = await Promise.allSettled([
+  const [artifactsResult, sideChatResult, dogfoodResult, workersResult, runtimeConfigResult, updateStatusResult, setupHealthResult] = await Promise.allSettled([
     window.orchestratorConsole.listRecentArtifacts(runID, "", 12, state.address),
     window.orchestratorConsole.listSideChatMessages(activeRepoPath(), 20, state.address),
     window.orchestratorConsole.listDogfoodIssues(activeRepoPath(), 20, state.address),
     window.orchestratorConsole.listWorkers(runID, 20, state.address),
     window.orchestratorConsole.getRuntimeConfig(state.address),
     window.orchestratorConsole.getUpdateStatus(state.address),
+    window.orchestratorConsole.getSetupHealth(state.address),
   ]);
   if (artifactsResult.status === "fulfilled") {
     state.artifacts = artifactsResult.value;
@@ -1808,6 +2132,11 @@ async function hydrateProtocolBackedPanels(refreshContracts = false) {
   } else {
     reportIssue("updates", updateStatusResult.reason, "Update status could not be refreshed.");
   }
+  if (setupHealthResult.status === "fulfilled") {
+    state.setupHealth = setupHealthResult.value;
+  } else {
+    reportIssue("setup checks", setupHealthResult.reason, "Fresh-repo setup checks could not be refreshed.");
+  }
   ensureSelectedWorker();
   ensureSelectedDogfoodIssue();
 
@@ -1828,9 +2157,13 @@ async function hydrateProtocolBackedPanels(refreshContracts = false) {
       if (state.selectedContractPath) {
         await openContractByPath(state.selectedContractPath, { quiet: true });
       }
+      await loadSavedGoal({ quiet: true });
     } catch (error) {
       reportIssue("contract files", error, "Canonical contract files could not be listed.");
     }
+  }
+  if (state.savedGoal.status === "not_loaded" && activeRepoPath()) {
+    await loadSavedGoal({ quiet: true });
   }
 
   if (state.selectedArtifactPath) {
@@ -1875,6 +2208,131 @@ async function hydrateProtocolBackedPanels(refreshContracts = false) {
   } catch (error) {
     reportIssue("repo browser", error, "Repo tree refresh failed after reconnect.");
   }
+}
+
+async function refreshSetupHealth(options = {}) {
+  try {
+    state.setupHealth = await window.orchestratorConsole.getSetupHealth(state.address);
+    renderSetupHealth();
+    if (!options.quiet) {
+      setFlash("success", "Setup checks refreshed.");
+    }
+  } catch (error) {
+    reportIssue("setup checks", error);
+  }
+}
+
+async function runSetupHealthAction(action) {
+  const normalized = String(action || "").trim();
+  if (normalized === "") {
+    return;
+  }
+  state.setupActionInFlight = normalized;
+  renderSetupHealth();
+  try {
+    const result = await window.orchestratorConsole.runSetupAction(normalized, activeRepoPath(), state.address);
+    recordLocalActivity("setup_action_completed", { action: normalized, status: result.status }, result.detail || `Setup action completed: ${normalized}.`);
+    await refreshStatus({ quiet: true, refreshContracts: true });
+    await refreshSetupHealth({ quiet: true });
+    setFlash(result.manual ? "info" : "success", result.detail || `Setup action ${normalized} completed.`);
+  } catch (error) {
+    reportIssue("setup action", error);
+  } finally {
+    state.setupActionInFlight = "";
+    renderSetupHealth();
+  }
+}
+
+async function loadSavedGoal(options = {}) {
+  try {
+    const goalFile = await window.orchestratorConsole.openContractFile(".orchestrator/goal.md", activeRepoPath(), state.address);
+    state.savedGoal = {
+      content: goalFile.content || "",
+      modifiedAt: goalFile.modified_at || "",
+      exists: goalFile.exists !== false,
+      dirty: false,
+      status: "loaded",
+    };
+    if (refs.homeGoal && !refs.homeGoal.value.trim()) {
+      refs.homeGoal.value = state.savedGoal.content || "";
+    }
+    renderSavedGoal();
+    if (!options.quiet) {
+      setFlash("success", "Saved goal loaded.");
+    }
+  } catch (_error) {
+    state.savedGoal = {
+      content: "",
+      modifiedAt: "",
+      exists: false,
+      dirty: false,
+      status: "missing",
+    };
+    renderSavedGoal();
+  }
+}
+
+async function saveGoalFromHome() {
+  const content = refs.homeGoal ? refs.homeGoal.value.trim() : "";
+  if (content === "") {
+    setFlash("error", "Write a goal before saving it.");
+    return;
+  }
+  const replacingMeaningfulGoal = state.savedGoal.exists
+    && state.savedGoal.content.trim() !== ""
+    && state.savedGoal.content.trim() !== content;
+  if (replacingMeaningfulGoal && !window.confirm("Replace the saved goal file with the edited goal?")) {
+    return;
+  }
+  try {
+    const result = await window.orchestratorConsole.saveContractFile({
+      path: ".orchestrator/goal.md",
+      repoPath: activeRepoPath(),
+      address: state.address,
+      content,
+      expectedMTime: state.savedGoal.modifiedAt || "",
+    });
+    state.savedGoal = {
+      content,
+      modifiedAt: result.modified_at || "",
+      exists: true,
+      dirty: false,
+      status: "saved",
+    };
+    state.contractFiles = await window.orchestratorConsole.listContractFiles(activeRepoPath(), state.address);
+    renderAll();
+    setFlash("success", "Goal saved.");
+  } catch (error) {
+    reportIssue("save goal", error, "If the goal changed externally, refresh and try again.");
+  }
+}
+
+async function captureRunSnapshot() {
+  try {
+    const result = await window.orchestratorConsole.captureSnapshot(activeRunID(), activeRepoPath(), state.address);
+    state.latestSnapshotCapture = result;
+    recordLocalActivity("snapshot_captured", { artifact_path: result.artifact_path || result.artifactPath, run_id: result.run_id || result.runID }, result.message || "Snapshot captured.");
+    await refreshArtifacts({ quiet: true });
+    setFlash("success", `Snapshot captured: ${result.artifact_path || result.artifactPath || "report artifact"}.`);
+  } catch (error) {
+    reportIssue("capture snapshot", error);
+  }
+}
+
+async function pauseAtSafePoint() {
+  try {
+    await window.orchestratorConsole.pauseAtSafePoint(activeRunID(), "operator_requested_pause_at_safe_point", state.address);
+    await refreshStatus({ quiet: true });
+    setFlash("success", "Pause requested for the next safe point.");
+  } catch (error) {
+    reportIssue("pause at safe point", error);
+  }
+}
+
+function openSetupAutofill() {
+  setActiveTab("files", { noScroll: true });
+  scrollToSection("autofill-setup-panel");
+  setFlash("info", "AI setup drafts project files and goal only. It previews generated content and does not start a build run.");
 }
 
 async function refreshSideChat(options = {}) {
@@ -2985,6 +3443,26 @@ async function copyEventPayload(index) {
   }
 }
 
+async function copyAuroraEventPayload(index) {
+  const vm = window.OrchestratorViewModel.buildActivityTimelineViewModel(state.events, {
+    currentRunOnly: false,
+    categories: timelineCategoriesForAurora(),
+    verbosity: refs.verbositySelect ? refs.verbositySelect.value : "normal",
+  });
+  const event = vm.items[index];
+  if (!event) {
+    setFlash("error", "Timeline event is unavailable.");
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(event.payloadText);
+    setFlash("success", "Copied timeline details.");
+  } catch (error) {
+    reportIssue("timeline", error, "Copying the payload requires clipboard access.");
+  }
+}
+
 async function openArtifactByPath(path, options = {}) {
   if (!path) {
     return;
@@ -3179,11 +3657,21 @@ async function startRunFromHome() {
     setFlash("success", state.runLaunch.message);
     await refreshStatus({ refreshContracts: true, quiet: true });
   } catch (error) {
-    const activeMessage = /already active/i.test(error.message || "")
+    const errorMessage = error && error.message ? error.message : "";
+    const contractReadinessError = isRepoContractReadinessError(error);
+    const activeMessage = contractReadinessError
+      ? friendlyRepoContractReadinessError(error)
+      : /already active/i.test(errorMessage)
       ? "A run is already active for this repo. Watch progress or safe stop it first."
-      : error.message;
+      : errorMessage;
     state.runLaunch = { inFlight: false, message: "", error: activeMessage };
-    reportIssue("start run", error, "If another run is active, wait for a safe point or use Safe Stop before starting a new run.");
+    reportIssue(
+      "start run",
+      contractReadinessError ? displayErrorWithMessage(error, activeMessage) : error,
+      contractReadinessError
+        ? "Run orchestrator init from the target repo, then refresh the dashboard."
+        : "If another run is active, wait for a safe point or use Safe Stop before starting a new run.",
+    );
   }
 }
 
@@ -3273,7 +3761,7 @@ function handleHomePrimaryAction() {
       }
       return;
     case "open_control_chat":
-      scrollToSection("control-chat-panel");
+      setActiveTab("home", { noScroll: true });
       refs.controlMessageInput.focus();
       return;
     case "open_latest_artifact":
@@ -3405,7 +3893,51 @@ function wireEvents() {
   refs.homeContinueRun.addEventListener("click", () => void continueRunFromHome());
   refs.homePrepareStartCommand.addEventListener("click", prepareStartRunCommand);
   refs.homePrepareContinueCommand.addEventListener("click", prepareContinueRunCommand);
-  refs.homeGoal.addEventListener("input", () => renderHomeDashboard());
+  refs.homeGoal.addEventListener("input", () => {
+    state.savedGoal.dirty = refs.homeGoal.value.trim() !== (state.savedGoal.content || "").trim();
+    renderHomeDashboard();
+    renderSavedGoal();
+    renderAuroraDashboard();
+  });
+  refs.goalSaveButton.addEventListener("click", () => void saveGoalFromHome());
+  refs.setupRefreshButton.addEventListener("click", () => void refreshSetupHealth());
+  refs.useAIGenerateButton.addEventListener("click", openSetupAutofill);
+  refs.timelineViewLogsButton.addEventListener("click", openLiveOutput);
+  refs.captureSnapshotButton.addEventListener("click", () => void captureRunSnapshot());
+  refs.auroraPauseButton.addEventListener("click", () => void pauseAtSafePoint());
+  refs.auroraStopButton.addEventListener("click", () => void safeStop());
+  refs.auroraContinueButton.addEventListener("click", () => void continueRunFromHome());
+  refs.auroraInjectNoteButton.addEventListener("click", () => {
+    refs.controlMessageInput.focus();
+  });
+  refs.auroraViewLogsButton.addEventListener("click", openLiveOutput);
+  refs.auroraTimelineFilter.addEventListener("change", renderAuroraTimeline);
+  refs.auroraEventsAutoScroll.addEventListener("change", () => {
+    state.activityFilters.autoScroll = refs.auroraEventsAutoScroll.checked;
+    if (refs.eventsAutoScroll) {
+      refs.eventsAutoScroll.checked = refs.auroraEventsAutoScroll.checked;
+    }
+    persistShellSession();
+  });
+  refs.projectSystemBody.addEventListener("click", (event) => {
+    const item = event.target.closest("[data-project-file]");
+    if (item) {
+      const contractPath = item.getAttribute("data-project-file") || "";
+      void openContractByPath(contractPath).then(() => scrollToSection("contracts-panel"));
+    }
+  });
+  refs.setupHealthBody.addEventListener("click", (event) => {
+    const item = event.target.closest("[data-setup-action]");
+    if (item) {
+      void runSetupHealthAction(item.getAttribute("data-setup-action") || "");
+    }
+  });
+  refs.auroraTimelineBody.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-event-index]");
+    if (button) {
+      void copyAuroraEventPayload(Number(button.getAttribute("data-event-index")));
+    }
+  });
   refs.homeOpenContracts.addEventListener("click", () => scrollToSection("contracts-panel"));
   refs.homeOpenLatestArtifact.addEventListener("click", () => void openLatestArtifactFromHome());
   refs.homeQuickLiveOutput.addEventListener("click", openLiveOutput);

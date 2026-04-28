@@ -130,6 +130,18 @@ async function saveContractFile(baseURL, payload, options = {}) {
   return callControlAction(baseURL, "save_contract_file", payload, options);
 }
 
+async function getSetupHealth(baseURL, options = {}) {
+  return callControlAction(baseURL, "get_setup_health", {}, options);
+}
+
+async function runSetupAction(baseURL, payload = {}, options = {}) {
+  return callControlAction(baseURL, "run_setup_action", payload, options);
+}
+
+async function captureSnapshot(baseURL, payload = {}, options = {}) {
+  return callControlAction(baseURL, "capture_snapshot", payload, options);
+}
+
 async function runAIAutofill(baseURL, payload, options = {}) {
   return callControlAction(baseURL, "run_ai_autofill", payload, options);
 }
@@ -224,6 +236,10 @@ async function setVerbosity(baseURL, verbosity, options = {}) {
 
 async function setStopSafe(baseURL, runID = "", reason = "", options = {}) {
   return callControlAction(baseURL, "stop_safe", { run_id: runID, reason }, options);
+}
+
+async function pauseAtSafePoint(baseURL, runID = "", reason = "", options = {}) {
+  return callControlAction(baseURL, "pause_at_safe_point", { run_id: runID, reason }, options);
 }
 
 async function clearStopFlag(baseURL, runID = "", options = {}) {
@@ -330,6 +346,9 @@ module.exports = {
   listContractFiles,
   openContractFile,
   saveContractFile,
+  getSetupHealth,
+  runSetupAction,
+  captureSnapshot,
   runAIAutofill,
   listRepoTree,
   openRepoFile,
@@ -354,6 +373,7 @@ module.exports = {
   getUpdateChangelog,
   setVerbosity,
   setStopSafe,
+  pauseAtSafePoint,
   clearStopFlag,
   streamControlEvents,
   parseNDJSONStream,

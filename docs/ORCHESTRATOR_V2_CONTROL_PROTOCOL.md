@@ -59,6 +59,9 @@ Implemented in the engine now:
 - `list_contract_files`
 - `open_contract_file`
 - `save_contract_file`
+- `get_setup_health`
+- `run_setup_action`
+- `capture_snapshot`
 - `run_ai_autofill`
 - `list_repo_tree`
 - `open_repo_file`
@@ -105,6 +108,7 @@ Implemented on top of the protocol now:
 - protocol-backed artifact browsing and raw text/JSON viewing
 - protocol-backed canonical contract-file opening and saving
 - protocol-backed AI autofill drafting for canonical contract files, with preview-before-save in the shell
+- protocol-backed setup health checks, safe setup actions, goal save, and run snapshots for the Aurora dashboard
 - protocol-backed read-only repo browsing for tree listing and file opening
 - embedded local operator terminal tabs for shell convenience
 - a Side Chat pane that records context-only messages through the real protocol and uses explicit audited actions for planner notes or Safe Stop
@@ -982,6 +986,8 @@ Payload:
   "targets": [
     ".orchestrator/brief.md",
     ".orchestrator/roadmap.md",
+    ".orchestrator/constraints.md",
+    ".orchestrator/goal.md",
     ".orchestrator/decisions.md"
   ],
   "answers": {
@@ -1003,6 +1009,40 @@ Behavior:
 - drafts are returned synchronously for preview
 - saving still goes through the separate `save_contract_file` action
 - the autofill flow does not alter the active run implicitly
+
+### Setup and snapshot actions
+
+Actions:
+
+- `get_setup_health`
+- `run_setup_action`
+- `capture_snapshot`
+- `pause_at_safe_point`
+
+Purpose:
+
+- let the Aurora dashboard show fresh-repo readiness without giving the GUI planner authority
+- run narrow explicit setup actions requested by the operator
+- capture current status/events into a durable artifact
+- request a pause at the next safe point without killing active Codex/executor work
+
+Supported `run_setup_action` values:
+
+- `git_init`
+- `git_safe_directory`
+- `orchestrator_init`
+- `create_templates`
+- `check_codex`
+- `verify_planner_config`
+- `codex_repo_trust`
+
+Rules:
+
+- setup actions are mechanical only
+- `git_safe_directory` must use the selected repo path in `git config --global --add safe.directory "<repo path>"`
+- Codex repo trust must not be faked; if it cannot be automated reliably, return manual guidance
+- `capture_snapshot` writes a report artifact under `.orchestrator/artifacts/reports/snapshots/`
+- `pause_at_safe_point` writes the safe-stop flag and does not interrupt an active AI turn
 
 ### `list_repo_tree`
 
@@ -1255,6 +1295,7 @@ Suggested shape:
   "runtime": {
     "engine_mode": "headless_or_console_attached",
     "repo_ready": true,
+    "repo_contract_missing": [],
     "planner_ready": true,
     "executor_ready": true,
     "ntfy_ready": false

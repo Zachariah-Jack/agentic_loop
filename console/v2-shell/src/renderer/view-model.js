@@ -43,6 +43,24 @@
     return snapshot && snapshot.runtime ? snapshot.runtime : {};
   }
 
+  function repoContractReadinessViewModel(snapshot) {
+    const runtime = runtimeSnapshot(snapshot);
+    const hasRepoReady = Object.prototype.hasOwnProperty.call(runtime, "repo_ready");
+    const missing = Array.isArray(runtime.repo_contract_missing)
+      ? runtime.repo_contract_missing.map((item) => safeString(item, "")).filter(Boolean)
+      : [];
+    const ready = hasRepoReady ? Boolean(runtime.repo_ready) : true;
+    const missingText = missing.length > 0 ? ` Missing: ${missing.join(", ")}.` : "";
+    return {
+      known: hasRepoReady,
+      ready,
+      missing,
+      message: ready
+        ? "Repo contract markers look ready from the latest status snapshot."
+        : `Target repo contract is not ready.${missingText} Run \`orchestrator init\` from the target repo, then refresh the dashboard.`,
+    };
+  }
+
   function runSnapshot(snapshot) {
     return snapshot && snapshot.run ? snapshot.run : null;
   }
@@ -897,6 +915,21 @@
       };
     }
 
+    const repoContract = repoContractReadinessViewModel(snapshot);
+    if (!repoContract.ready) {
+      return {
+        state: "repo_contract_not_ready",
+        title: "Initialize the target repo contract.",
+        detail: repoContract.message,
+        primaryAction: {
+          id: "refresh_status",
+          label: "Refresh After Init",
+          enabled: true,
+          kind: "protocol",
+        },
+      };
+    }
+
     if (safeStopRequested(snapshot)) {
       const safeStop = buildSafeStopViewModel(snapshot);
       return {
@@ -1082,6 +1115,7 @@
     const askHuman = buildAskHumanViewModel(snapshot);
     const staleGuard = hasStaleActiveRunGuard(snapshot);
     const repoBinding = repoBindingViewModel(snapshot, options);
+    const repoContract = repoContractReadinessViewModel(snapshot);
     const executeReady = executeReadyToDispatch(snapshot);
     const safePoint = waitingAtSafePoint(snapshot);
     const processing = hasActiveRunInProgress(snapshot);
@@ -1109,6 +1143,10 @@
       startDisabledReasons.push("Disabled because a stale active run is blocking this repo. Use Recover Backend / Unlock Repo first.");
       continueDisabledReasons.push("Disabled because a stale active run is blocking this repo. Use Recover Backend / Unlock Repo first.");
     }
+    if (!repoContract.ready) {
+      startDisabledReasons.push(`Disabled because ${repoContract.message}`);
+      continueDisabledReasons.push(`Disabled because ${repoContract.message}`);
+    }
     if (!goalEntered) {
       startDisabledReasons.push("Disabled because Start Build needs a goal.");
     }
@@ -1133,10 +1171,16 @@
       continueDisabledReasons.push("Disabled because the latest run is not marked resumable.");
     }
 
-    const startEnabled = connected && !launchInFlight && !modelHealthChecking && !repoBinding.mismatch && !staleGuard && goalEntered && !unfinishedResumableRun;
+    const startEnabled = connected && !launchInFlight && !modelHealthChecking
+      && !repoBinding.mismatch
+      && !staleGuard
+      && repoContract.ready
+      && goalEntered
+      && !unfinishedResumableRun;
     const continueEnabled = connected && !launchInFlight && !modelHealthChecking
       && !repoBinding.mismatch
       && !staleGuard
+      && repoContract.ready
       && !stopRequested
       && !processing
       && Boolean(run && !run.completed && run.resumable !== false && !askHuman.present);
@@ -1154,6 +1198,8 @@
         ? "Recovery needed. Recover Backend / Unlock Repo clears stale active-run state without deleting history or artifacts, and restarts the owned backend only if needed."
       : repoBinding.mismatch
         ? "Wrong repo backend. Restart Backend for Target Repo before showing or acting on run state."
+      : !repoContract.ready
+        ? repoContract.message
       : (startDisabledReasons[0] || continueDisabledReasons[0] || "Start and Continue use explicit engine protocol actions.");
 
     return {
@@ -1218,7 +1264,8 @@
       repoMatch: repoBinding.matches,
       repoMismatch: repoBinding.mismatch,
       repoBindingMessage: repoBinding.message,
-      repoReady: Boolean(runtime.repo_ready),
+      repoReady: repoContractReadinessViewModel(snapshot).ready,
+      repoContractMissing: repoContractReadinessViewModel(snapshot).missing,
       runID: repoBinding.mismatch ? "Hidden until repo matches" : (run ? safeString(run.id) : "No active run"),
       runState: repoBinding.mismatch ? "repo mismatch" : runStateLabel(run),
       loopState: loopStatus.state,
@@ -1267,6 +1314,7 @@
     const topStatus = buildTopStatusViewModel(snapshot, options);
     const recommendation = buildRecommendedActionViewModel(snapshot, options);
     const repoBinding = repoBindingViewModel(snapshot, options);
+    const repoContract = repoContractReadinessViewModel(snapshot);
     const rawStatus = buildStatusViewModel(snapshot);
     const status = repoBinding.mismatch
       ? {
@@ -1325,9 +1373,7 @@
         ready: topStatus.repoReady,
         message: repoBinding.mismatch
           ? repoBinding.message
-          : topStatus.repoReady
-          ? "Repo contract markers look ready from the latest status snapshot."
-          : "Repo contract markers are missing or not loaded yet. Refresh status or open the contract files.",
+          : repoContract.message,
       },
       latestPlannerMessage: status.operatorMessage,
       latestArtifactPath: artifacts.latestPath,
@@ -1472,19 +1518,32 @@
         return `Build loop started${runID}.`;
       case "run_completed":
         return `Build loop completed${runID}.`;
+      case "runtime.initialized":
+      case "runtime_initialized":
+        return "Orchestrator initialized successfully.";
+      case "planner_prompt_sent":
+        return `Prompt sent to planner${runID}.`;
+      case "planner_response_received":
+        return `Planner response received${runID}.`;
+      case "planner_requested_repo_context":
+        return `Planner requested repo context${runID}.`;
+      case "context_collected":
+        return `Context collected${runID}.`;
       case "planner_turn_started":
-        return `Planner is choosing the next step${runID}.`;
+        return `Awaiting planner response${runID}.`;
       case "planner_turn_completed":
         if (safeString(payload.planner_outcome, "") === "execute") {
           return `Planner selected an execute task. Waiting to dispatch Codex${runID}.`;
         }
-        return `Planner finished choosing the next step${runID}.`;
+        return `Planner response received${runID}.`;
       case "executor_dispatch_requested":
-        return `Dispatching Codex executor${runID}.`;
+        return `Prompt sent to Codex${runID}.`;
       case "executor_turn_started":
-        return `Codex started an implementation turn${runID}.`;
+        return `Codex turn started${runID}.`;
       case "executor_turn_completed":
-        return `Codex completed an implementation turn${runID}.`;
+        return `Codex response received${runID}.`;
+      case "executor_waiting":
+        return `Waiting on Codex${runID}.`;
       case "executor_turn_failed":
         if (modelUnavailableFromText(payload.error_message)) {
           return `Codex could not start because the configured model is unavailable${runID}.`;
@@ -1506,10 +1565,28 @@
         return `Verbosity changed to ${safeString(payload.verbosity, "the selected level")}.`;
       case "safe_point_reached":
         return `A safe pause point was reached${runID}.`;
+      case "safe_pause_requested":
+        return `Safe pause requested${runID}.`;
+      case "paused_at_safe_point":
+        return `Paused at safe point${runID}.`;
       case "control_message_queued":
-        return `Your control message was queued${runID}.`;
+        return `Human reply received${runID}.`;
       case "control_message_consumed":
         return `Planner received your control message${runID}.`;
+      case "human_question_presented":
+      case "human.question.presented":
+      case "ask_human":
+        return `Waiting on human input${runID}.`;
+      case "file_changes_detected":
+        return `Files changed${runID}.`;
+      case "tests_started":
+        return `Tests started${runID}.`;
+      case "tests_completed":
+        return `Tests completed${runID}.`;
+      case "snapshot_captured":
+        return `Snapshot captured${payload.artifact_path ? `: ${payload.artifact_path}` : runID}.`;
+      case "setup_action_completed":
+        return `Setup action completed${payload.action ? `: ${payload.action}` : ""}.`;
       case "worker_created":
         return `Worker was created${runID}.`;
       case "worker_dispatch_completed":
@@ -1529,6 +1606,18 @@
     const name = safeString(event && event.event, "unknown_event",).toLowerCase();
     if (name.startsWith("terminal_")) {
       return "terminal";
+    }
+    if (name.includes("snapshot") || name.includes("setup")) {
+      return "setup";
+    }
+    if (name.includes("human") || name.includes("control_message")) {
+      return "human";
+    }
+    if (name.includes("file") || name.includes("artifact")) {
+      return "files";
+    }
+    if (name.includes("test")) {
+      return "tests";
     }
     if (name.includes("model")) {
       return "fault";
@@ -1558,11 +1647,12 @@
     }
     if (
       name.startsWith("run_")
+      || name.startsWith("runtime")
       || name.startsWith("status_")
       || name.startsWith("safe_point_")
       || name.startsWith("verbosity_")
     ) {
-      return "status";
+      return "system";
     }
     return "other";
   }
@@ -1575,6 +1665,14 @@
         return "Executor";
       case "worker":
         return "Worker";
+      case "human":
+        return "Human";
+      case "files":
+        return "Files";
+      case "tests":
+        return "Tests";
+      case "setup":
+        return "Setup";
       case "approval":
         return "Approval";
       case "intervention":
@@ -1583,8 +1681,9 @@
         return "Fault";
       case "terminal":
         return "Terminal";
+      case "system":
       case "status":
-        return "Status";
+        return "System";
       default:
         return "Other";
     }
@@ -1600,8 +1699,12 @@
       case "planner":
       case "executor":
       case "worker":
+      case "files":
+      case "tests":
+      case "setup":
         return "info";
       case "terminal":
+      case "system":
       case "status":
       default:
         return "neutral";
@@ -2120,6 +2223,8 @@
       `- Expected repo path: ${repoBinding.expected || "Unavailable"}`,
       `- Actual backend repo root: ${repoBinding.actual || "Unavailable"}`,
       `- Repo match: ${repoBinding.matches ? "yes" : "no"}`,
+      `- Repo contract ready: ${repoContractReadinessViewModel(snapshot).ready ? "yes" : "no"}`,
+      `- Repo contract missing: ${repoContractReadinessViewModel(snapshot).missing.join(", ") || "none"}`,
       repoBinding.mismatch ? "- Warning: GUI is connected to a backend serving the wrong repo. Do not Start/Continue until Backend for Target Repo is restarted." : "- Warning: none",
       `- Binary version: ${safeString(runtime.version || runtime.binary_version || runtime.build_version || (snapshot && snapshot.version), "Unavailable")}`,
       `- Backend PID/session: ${safeString(backend.pid, "Unavailable")} / ${safeString(backend.owner_session_id || backend.owner_sessionID, "Unavailable")}`,

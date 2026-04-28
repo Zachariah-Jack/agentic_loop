@@ -32,7 +32,7 @@ Key architecture and operator docs:
 
 ## V2 Preview
 
-V2 console work is planned and specified, and there is now a first minimal desktop GUI shell on top of the real local engine protocol. It is an intentionally small proof shell, not the final console.
+V2 console work is planned and specified, and there is now an Aurora Orchestrator desktop dashboard on top of the real local engine protocol. It is still protocol-first and planner-led, but the default GUI experience is now a polished AI Mission Control surface for Windows.
 
 The intended V2 direction is:
 
@@ -58,9 +58,11 @@ What exists now in the engine:
 - permission/autonomy profile settings (`guided`, `balanced`, `autonomous`, `full_send`) surfaced in status/runtime config
 - GitHub Releases update check/changelog foundation through CLI and control protocol; safe self-install remains deferred until signed/checksummed Windows assets exist
 
-What now exists in the first desktop shell:
+What now exists in the Aurora desktop shell:
 
-- a minimal optional Electron shell under `console/v2-shell/`
+- an optional Electron shell under `console/v2-shell/`
+- `orchestrator gui` as the primary GUI launch command from any folder
+- a dark Aurora Mission Control dashboard with a left navigation rail, Project System drawer, central Mission Run gauge/timeline, right AI Conversation panel, and lower mission controls
 - a guided Home dashboard that answers "am I connected, which repo is loaded, is the loop running, does it need me, what happened, and what should I click next"
 - a top always-visible status strip with plain connection labels (`Ready`, `Not Connected`, `Connecting`, `Reconnecting`), connected/connecting timers, repo root, run id, loop status, blocker, verbosity, update, and connect controls
 - real tab navigation for Home, Run, Action Required, Chat, Files, Live Output, Workers, Terminal, Settings, and Dogfood Notes instead of one giant scroll page
@@ -72,8 +74,11 @@ What now exists in the first desktop shell:
 - a pending-action detail pane for planner outcome, held state, hold reason, dispatch target, executor prompt summary, and full pending executor prompt text when available
 - a run-summary pane for a compact "what changed while I was gone" view derived from real status and event data
 - an artifact browser pane backed by real artifact protocol actions, including a raw text/JSON viewer
-- a contract-file editor pane for `.orchestrator/brief.md`, `.orchestrator/roadmap.md`, `.orchestrator/decisions.md`, `.orchestrator/human-notes.md`, and `AGENTS.md`
-- an AI autofill wizard pane that drafts selected canonical contract files through the real engine protocol and previews them before any save
+- a Project System panel and contract-file editor for `.orchestrator/brief.md`, `.orchestrator/roadmap.md`, `.orchestrator/constraints.md`, `.orchestrator/decisions.md`, `.orchestrator/human-notes.md`, `.orchestrator/goal.md`, and `AGENTS.md`
+- an explicit Save Goal workflow that separates edited goal text from saved `goal.md`
+- an AI setup/autofill wizard pane that drafts selected canonical contract files and the goal through the real engine protocol and previews them before any save
+- a fresh-repo startup checklist for Git, Git safe.directory trust, Orchestrator initialization, required files, Codex availability, planner config, ntfy, and writable state/log folders
+- Snapshot and View Logs controls for durable reports and later inspection
 - a read-only repo browser pane that lists one directory at a time and opens repo files through explicit protocol actions
 - embedded operator terminal tabs for local shell sessions, kept separate from engine run authority
 - an Action Required pane that surfaces primary executor approval-required state and planner `ask_human` pauses in plain English; executor approve/deny and planner answer-and-continue both go through explicit protocol actions
@@ -128,7 +133,13 @@ What is still experimental:
 
 Recommended daily dogfood workflow:
 
-1. From this repo, launch the local control server and shell together:
+1. Launch the GUI from the repo you want to operate on:
+
+```powershell
+orchestrator gui
+```
+
+If the binary folder is not on `PATH` yet, run `orchestrator doctor` and `orchestrator setup` for exact PATH guidance. During local development from this checkout, the helper below is still useful:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\start-v2-dogfood.ps1 -RepoPath D:\Projects\target-repo
@@ -139,10 +150,10 @@ The helper builds from the orchestrator repo, but the control server is bound to
 2. For a double-click style launch, run `scripts\Launch-Orchestrator-V2-Shell.vbs` or create a shortcut to it and pin that shortcut to the taskbar.
 3. Use `-DebugVisibleWindows` only when you intentionally want visible backend PowerShell windows for debugging.
 4. Leave auto-reconnect enabled in the shell for routine control-server restarts.
-5. Use the shell for status, Control Chat, planner questions, artifacts, contract editing, workers, and approvals.
-6. Start on the guided Home dashboard: confirm the top strip says `Connection Status: Ready`, check the Current Repo card for the repo root, then follow the "What should I do now?" card.
-7. If the Home dashboard recommends starting or continuing a run, use Start Build / Continue Build; they call explicit `start_run` / `continue_run` protocol actions and return immediately while the control-server process runs the foreground loop.
-8. If the planner asks a question, open Action Required, type the raw answer, and click `Send Answer and Continue`; the shell queues `inject_control_message` and then calls `continue_run`.
+5. Use the shell for status, AI Conversation, planner questions, artifacts, project files, workers, setup checks, snapshots, and approvals.
+6. Start on the Aurora dashboard: confirm System Online, check Project System, save the goal, then use Start Build / Continue.
+7. If the dashboard recommends starting or continuing a run, use Start Build / Continue; they call explicit `start_run` / `continue_run` protocol actions and return immediately while the control-server process runs the foreground loop.
+8. If the planner asks a question, type the raw answer and click `Queue Raw Note`, or open Action Required and click `Send Answer and Continue`; the shell queues `inject_control_message` and calls `continue_run` only when you choose that action.
 9. If a safe stop was requested, open Action Required and click `Clear Stop and Continue`; the shell clears the mechanical stop flag, then resumes through `continue_run` when the run is resumable.
 10. Capture friction and bugs in the Dogfood Notes pane while they are fresh; notes stay timestamped and tied to the repo/run context.
 11. Keep the headless CLI available for direct `run`, `continue`, `status`, and `doctor` use when you do not need the GUI.
@@ -179,6 +190,7 @@ Global behavior:
 Typical flow:
 
 ```text
+orchestrator gui
 setup -> init -> run -> continue/status/history/doctor
 ```
 
@@ -202,6 +214,14 @@ setup -> init -> run -> continue/status/history/doctor
 - Important behavior: `status` prints the live status snapshot, `pending` prints the current pending action buffer, `inject` queues a control message, `events` streams NDJSON-backed engine events, `set-verbosity` updates runtime verbosity, and `stop-safe` / `clear-stop` manage the safe-stop flag.
 - Does not: bypass the engine, attach a GUI shell, or provide a real side-chat conversational backend.
 
+#### `gui [--repo PATH] [--addr HOST:PORT] [--dry-run]`
+
+- Does: launches the Aurora Orchestrator dashboard and owned local control server flow through the real GUI launcher.
+- Use it when: opening the GUI from any project folder. Inside a Git repo, that repo is selected by default. Outside a repo, the last GUI repo is reused when known; otherwise the current folder opens to setup guidance.
+- Important behavior: it does not require manual `npm run dev` commands in normal use. The launcher prints the selected repo, control address, shell path, and logs/status. `--dry-run` prints the launch plan without starting the GUI.
+- PATH guidance: `orchestrator doctor` reports whether GUI launcher assets are available and whether the binary folder is on `PATH`; `orchestrator setup` prints the launch command and PATH status.
+- Does not: make planner decisions, start a build run by itself, or reinterpret human messages.
+
 #### `setup [--yes]`
 
 - Does: loads existing operator config, prompts for planner model, drift watcher enablement, optional `ntfy` settings, and repo-contract confirmation, then writes config durably.
@@ -213,7 +233,7 @@ setup -> init -> run -> continue/status/history/doctor
 
 - Does: scaffolds the target-repo contract and runtime directories under `.orchestrator/`, preserves existing human-authored files, and ensures persistence exists.
 - Use it when: preparing a fresh target repo before the first real `run`, `resume`, `continue`, or `auto`.
-- Important outputs: `.orchestrator/brief.md`, `.orchestrator/roadmap.md`, `.orchestrator/decisions.md`, `.orchestrator/human-notes.md`, `.orchestrator/state/`, `.orchestrator/logs/`, `.orchestrator/artifacts/`, and `AGENTS.md` if missing.
+- Important outputs: `.orchestrator/brief.md`, `.orchestrator/roadmap.md`, `.orchestrator/constraints.md`, `.orchestrator/decisions.md`, `.orchestrator/human-notes.md`, `.orchestrator/goal.md`, `.orchestrator/state/`, `.orchestrator/logs/`, `.orchestrator/artifacts/`, and `AGENTS.md` if missing.
 - Does not: fill in the product brief or decisions for you.
 
 #### `doctor`
@@ -431,7 +451,9 @@ Then fill in:
 
 - `.orchestrator/brief.md`
 - `.orchestrator/roadmap.md`
+- `.orchestrator/constraints.md`
 - `.orchestrator/decisions.md`
+- `.orchestrator/goal.md`
 
 Use `.orchestrator/human-notes.md` for append-only extra context.
 
@@ -728,8 +750,8 @@ codex exec --model gpt-5.5 --sandbox danger-full-access -c 'approval_policy="nev
 - The shell auto-runs `test_planner_model` and `test_executor_model` after connect/reconnect and before protocol Start Build / Continue Build. If both pass, stale older model errors no longer block the GUI; if either fails, Action Required explains the current failure.
 - Use Copy Model Health from Settings when asking for model/backend support. It includes backend PID, binary path/version, planner model verification, Codex path/version/config, `gpt-5.5` verification, full-access status, and excludes secrets.
 - Pending actions are now durable engine state. When available, they describe what the engine is about to do next at a safe boundary.
-- The desktop proof shell now also supports:
-  - a tabbed guided Home dashboard with plain Connection Status and Loop Status indicators
+- The Aurora desktop shell now also supports:
+  - a mission-control Home dashboard with Project System, Mission Run gauge, activity timeline, AI Conversation, setup checklist, snapshots, and explicit controls
   - pending-action detail viewing
   - a plain-English "What Happened?" summary with translated stop reasons and recommended next actions
   - a Live Output pane whose visible detail follows `quiet`, `normal`, `verbose`, and `trace`
@@ -744,15 +766,21 @@ codex exec --model gpt-5.5 --sandbox danger-full-access -c 'approval_policy="nev
 - Control messages are raw human intervention messages. At the next safe point, the engine holds the pending action, packages the raw message plus pending action into planner-visible input, and lets the planner decide whether to proceed, redirect, pause, ask the human, or do something else.
 - The engine does not reinterpret or summarize the control message. The planner remains the decision-maker.
 
-### First GUI Shell Dev Flow
+### GUI Launch And Dev Flow
 
-1. Start the engine protocol server:
+Primary launch:
+
+```powershell
+orchestrator gui
+```
+
+For low-level development, start the engine protocol server:
 
 ```powershell
 orchestrator control serve
 ```
 
-2. In a separate terminal, start the early shell:
+Then in a separate terminal, start the shell:
 
 ```powershell
 cd console\v2-shell
@@ -767,8 +795,8 @@ Notes:
 - the shell is still a proof console, but the Home dashboard is now the intended daily entry point
 - the top strip uses plain labels: `Connection Status: Ready`, `Not Connected`, `Connecting`, or `Reconnecting`; `Loop Status: Running`, `Stopped`, `Needs You`, `Completed`, `No Run Yet`, or `Error`
 - artifact browsing is limited to surfaced `.orchestrator/artifacts/...` paths known to the engine
-- contract editing is limited to the canonical files only: `.orchestrator/brief.md`, `.orchestrator/roadmap.md`, `.orchestrator/decisions.md`, `.orchestrator/human-notes.md`, and `AGENTS.md`
-- the AI autofill wizard drafts selected canonical contract files through the real engine protocol and previews the generated content before you save any file
+- contract editing is limited to the canonical files only: `.orchestrator/brief.md`, `.orchestrator/roadmap.md`, `.orchestrator/constraints.md`, `.orchestrator/decisions.md`, `.orchestrator/human-notes.md`, `.orchestrator/goal.md`, and `AGENTS.md`
+- the AI autofill wizard drafts selected canonical contract files and the goal through the real engine protocol and previews the generated content before you save any file
 - the repo browser is read-only for arbitrary repo files in this slice and lists one directory at a time through explicit protocol actions
 - the terminal pane is an operator utility shell only; it supports multiple local tabs, but run control still belongs to the explicit engine protocol and control actions
 - the Codex/model readiness card reports the exact Codex executable path/version/config source seen by the control server; `gpt-5.5` full-access is `Verified` only after the Codex probe succeeds, and unavailable-model errors are shown without silent fallback

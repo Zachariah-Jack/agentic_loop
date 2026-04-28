@@ -451,6 +451,7 @@ func TestRootHelpShowsPrimeTimeWorkflow(t *testing.T) {
 		"setup -> init -> run -> continue/status/history/doctor",
 		"auto",
 		"control",
+		"gui",
 		"setup",
 		"init",
 		"run",
@@ -464,6 +465,39 @@ func TestRootHelpShowsPrimeTimeWorkflow(t *testing.T) {
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("root help missing %q\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRunGUIDryRunSelectsExplicitRepoAndUsesLauncherAssets(t *testing.T) {
+	repoRoot := t.TempDir()
+	mustMkdirAll(t, filepath.Join(repoRoot, ".git"))
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	shellDir, err := filepath.Abs(filepath.Join("..", "..", "console", "v2-shell"))
+	if err != nil {
+		t.Fatalf("filepath.Abs() error = %v", err)
+	}
+	t.Setenv("ORCHESTRATOR_GUI_SHELL_DIR", shellDir)
+
+	var stdout bytes.Buffer
+	err = runGUI(context.Background(), Invocation{
+		Args:       []string{"--repo", repoRoot, "--dry-run"},
+		Stdout:     &stdout,
+		Stderr:     &bytes.Buffer{},
+		ConfigPath: configPath,
+		RepoRoot:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("runGUI() error = %v\n%s", err, stdout.String())
+	}
+
+	for _, want := range []string{
+		"gui.product: Aurora Orchestrator / AI Mission Control for Windows",
+		"gui.repo: " + filepath.Clean(repoRoot) + " (explicit --repo)",
+		"gui.status: launch plan ready",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("gui dry-run output missing %q\n%s", want, stdout.String())
 		}
 	}
 }
@@ -824,8 +858,10 @@ func writeRepoMarkerFiles(t *testing.T, repoRoot string) {
 	mustWriteFile(t, filepath.Join(repoRoot, "docs", "CLI_ENGINE_EXECPLAN.md"), "execplan\n")
 	mustWriteFile(t, filepath.Join(repoRoot, ".orchestrator", "brief.md"), "brief\n")
 	mustWriteFile(t, filepath.Join(repoRoot, ".orchestrator", "roadmap.md"), "roadmap\n")
+	mustWriteFile(t, filepath.Join(repoRoot, ".orchestrator", "constraints.md"), "constraints\n")
 	mustWriteFile(t, filepath.Join(repoRoot, ".orchestrator", "decisions.md"), "decisions\n")
 	mustWriteFile(t, filepath.Join(repoRoot, ".orchestrator", "human-notes.md"), "human notes\n")
+	mustWriteFile(t, filepath.Join(repoRoot, ".orchestrator", "goal.md"), "goal\n")
 	mustMkdirAll(t, filepath.Join(repoRoot, ".orchestrator", "state"))
 	mustMkdirAll(t, filepath.Join(repoRoot, ".orchestrator", "logs"))
 	mustMkdirAll(t, filepath.Join(repoRoot, ".orchestrator", "artifacts"))

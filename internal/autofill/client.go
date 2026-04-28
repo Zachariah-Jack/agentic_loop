@@ -266,7 +266,10 @@ func validateResponse(envelope outputEnvelope, targets []string) error {
 
 func renderInstructions() string {
 	return strings.TrimSpace(`
-You are drafting canonical orchestrator contract files for a software repository.
+You are helping the user prepare an Orchestrator project before a build run.
+The app requires project files and a goal: brief.md, roadmap.md, constraints.md, decisions.md, and goal.
+Use the provided setup-session answers and existing files as the conversation record.
+Draft structured content for the requested files only. Do not start a build run. Do not claim files were written; the engine writes only after explicit user confirmation.
 
 Rules:
 - Return only the requested files.
@@ -276,8 +279,10 @@ Rules:
 - Be practical and specific rather than generic.
 - brief.md should capture what is being built, why it matters, user outcomes, scope, and constraints.
 - roadmap.md should give concrete milestones, sequencing, and near-term next steps.
+- constraints.md should capture technical, business, privacy, security, UX, and workflow guardrails.
 - decisions.md should record current locked decisions, constraints, and unresolved questions in a crisp format.
 - human-notes.md should preserve operator-useful notes, assumptions, and loose context in a readable way.
+- goal.md should contain the explicit current run objective plus acceptance signals.
 - If AGENTS.md is requested, keep it as repository instructions and guardrails only; do not include secrets.
 - Do not mention missing backend systems, hidden thoughts, or meta commentary about the API.
 `)

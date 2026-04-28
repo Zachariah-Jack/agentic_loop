@@ -91,8 +91,10 @@ func scaffoldTargetRepoContract(repoRoot string, layout state.Layout) ([]scaffol
 	}{
 		{label: "brief_md", path: filepath.Join(repoRoot, ".orchestrator", "brief.md"), content: targetRepoBriefTemplate()},
 		{label: "roadmap_md", path: filepath.Join(repoRoot, ".orchestrator", "roadmap.md"), content: targetRepoRoadmapTemplate()},
+		{label: "constraints_md", path: filepath.Join(repoRoot, ".orchestrator", "constraints.md"), content: targetRepoConstraintsTemplate()},
 		{label: "decisions_md", path: filepath.Join(repoRoot, ".orchestrator", "decisions.md"), content: targetRepoDecisionsTemplate()},
 		{label: "human_notes_md", path: filepath.Join(repoRoot, ".orchestrator", "human-notes.md"), content: targetRepoHumanNotesTemplate()},
+		{label: "goal_md", path: filepath.Join(repoRoot, ".orchestrator", "goal.md"), content: targetRepoGoalTemplate()},
 		{label: "agents_md", path: filepath.Join(repoRoot, "AGENTS.md"), content: targetRepoAgentsTemplate()},
 	}
 
@@ -634,6 +636,50 @@ facts change, decisions are made, or milestones are completed.
 `) + "\n"
 }
 
+func targetRepoConstraintsTemplate() string {
+	return strings.TrimSpace(`
+# Constraints
+
+Use this file for technical, product, business, security, privacy, platform,
+and workflow guardrails that should shape planner decisions and executor work.
+Keep constraints direct, testable where possible, and current.
+
+## Technical Constraints
+- Required language/framework/runtime:
+- Required platforms:
+- Integration limits:
+- Performance or reliability expectations:
+
+## Business / Product Constraints
+- Scope boundaries:
+- User or market assumptions:
+- Release, budget, or timeline limits:
+
+## Security / Privacy Constraints
+- Secrets handling:
+- Data storage / retention:
+- Authentication / authorization:
+- Compliance or policy requirements:
+
+## UX / Accessibility Constraints
+- Target device or input model:
+- Accessibility requirements:
+- Visual or brand guardrails:
+
+## Workflow Constraints
+- Required tests or checks:
+- Files or areas to avoid without explicit approval:
+- External services that require human approval:
+
+## Non-Goals
+- Do not build:
+- Defer until:
+
+## Open Constraint Questions
+- Question:
+`) + "\n"
+}
+
 func targetRepoDecisionsTemplate() string {
 	return strings.TrimSpace(`
 # Decisions
@@ -693,6 +739,25 @@ Copy this format when recording a durable decision.
 `) + "\n"
 }
 
+func targetRepoGoalTemplate() string {
+	return strings.TrimSpace(`
+# Goal
+
+Use this file as the saved starting objective for the next orchestrator run.
+The GUI can edit and save this separately from the currently typed run goal.
+Starting a run still sends an explicit goal string through the engine protocol.
+
+## Current Goal
+- Build the next highest-value slice from the repo contract files.
+
+## Acceptance Signal
+- The planner has declared completion through the structured complete outcome.
+
+## Notes
+- Update this before starting a new mission if the objective changed.
+`) + "\n"
+}
+
 func targetRepoHumanNotesTemplate() string {
 	return strings.TrimSpace(`
 # Human Notes
@@ -744,8 +809,10 @@ This repo is being built through a planner-led orchestrator workflow.
 Before making a multi-file or workflow-shaping change, read:
 1. .orchestrator/brief.md
 2. .orchestrator/roadmap.md
-3. .orchestrator/decisions.md
-4. .orchestrator/human-notes.md
+3. .orchestrator/constraints.md
+4. .orchestrator/decisions.md
+5. .orchestrator/human-notes.md
+6. .orchestrator/goal.md
 
 ## Working Rules
 

@@ -60,7 +60,7 @@ func runDoctor(ctx context.Context, inv Invocation) error {
 	}, targetRepoContractEntries(inv.RepoRoot)...)
 
 	build := buildinfo.Current()
-	checks := make([]check, 0, len(required)+18)
+	checks := make([]check, 0, len(required)+22)
 	if executablePath, err := os.Executable(); err != nil {
 		checks = append(checks, check{
 			section: "runtime",
@@ -99,6 +99,28 @@ func runDoctor(ctx context.Context, inv Invocation) error {
 		label:   "binary build time",
 		level:   "OK",
 		detail:  build.BuildTime,
+	})
+	if scriptPath, shellPath, err := resolveGUILaunchAssets(); err != nil {
+		checks = append(checks, check{
+			section: "gui",
+			label:   "aurora launcher assets",
+			level:   "WARN",
+			detail:  err.Error() + "; run from the orchestrator checkout or set ORCHESTRATOR_GUI_SHELL_DIR",
+		})
+	} else {
+		checks = append(checks, check{
+			section: "gui",
+			label:   "aurora launcher assets",
+			level:   "OK",
+			detail:  fmt.Sprintf("shell=%s launcher=%s", shellPath, scriptPath),
+		})
+	}
+	pathLevel, pathDetail := executableDirPATHStatus()
+	checks = append(checks, check{
+		section: "gui",
+		label:   "global launch PATH",
+		level:   pathLevel,
+		detail:  pathDetail,
 	})
 
 	for _, requiredPath := range required {
@@ -344,7 +366,7 @@ func runDoctor(ctx context.Context, inv Invocation) error {
 	}
 
 	hasFailure := false
-	sections := []string{"runtime", "repo_contract", "config", "plugins", "planner", "executor", "workers", "ntfy", "persistence"}
+	sections := []string{"runtime", "gui", "repo_contract", "config", "plugins", "planner", "executor", "workers", "ntfy", "persistence"}
 	for _, section := range sections {
 		fmt.Fprintf(inv.Stdout, "%s:\n", section)
 		for _, item := range checks {

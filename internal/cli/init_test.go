@@ -32,8 +32,10 @@ func TestRunInitScaffoldsTargetRepoContract(t *testing.T) {
 		filepath.Join(repoRoot, "AGENTS.md"),
 		filepath.Join(repoRoot, ".orchestrator", "brief.md"),
 		filepath.Join(repoRoot, ".orchestrator", "roadmap.md"),
+		filepath.Join(repoRoot, ".orchestrator", "constraints.md"),
 		filepath.Join(repoRoot, ".orchestrator", "decisions.md"),
 		filepath.Join(repoRoot, ".orchestrator", "human-notes.md"),
+		filepath.Join(repoRoot, ".orchestrator", "goal.md"),
 		filepath.Join(repoRoot, ".orchestrator", "state"),
 		filepath.Join(repoRoot, ".orchestrator", "logs"),
 		filepath.Join(repoRoot, ".orchestrator", "artifacts"),
@@ -51,8 +53,10 @@ func TestRunInitScaffoldsTargetRepoContract(t *testing.T) {
 		"command: init",
 		"scaffold.brief_md: created",
 		"scaffold.roadmap_md: created",
+		"scaffold.constraints_md: created",
 		"scaffold.decisions_md: created",
 		"scaffold.human_notes_md: created",
+		"scaffold.goal_md: created",
 		"scaffold.agents_md: created",
 		"next_operator_action: fill_repo_contract",
 	} {
@@ -91,6 +95,19 @@ func TestRunInitScaffoldsTargetRepoContract(t *testing.T) {
 		t.Fatalf("roadmap.md has %d Acceptance Criteria sections, want at least 11", count)
 	}
 
+	constraints := mustReadFile(t, filepath.Join(repoRoot, ".orchestrator", "constraints.md"))
+	for _, want := range []string{
+		"## Technical Constraints",
+		"## Business / Product Constraints",
+		"## Security / Privacy Constraints",
+		"## Workflow Constraints",
+		"## Non-Goals",
+	} {
+		if !strings.Contains(constraints, want) {
+			t.Fatalf("constraints.md missing %q\n%s", want, constraints)
+		}
+	}
+
 	decisions := mustReadFile(t, filepath.Join(repoRoot, ".orchestrator", "decisions.md"))
 	for _, want := range []string{
 		"## Product Decisions",
@@ -115,6 +132,17 @@ func TestRunInitScaffoldsTargetRepoContract(t *testing.T) {
 			t.Fatalf("human-notes.md missing %q\n%s", want, humanNotes)
 		}
 	}
+
+	goal := mustReadFile(t, filepath.Join(repoRoot, ".orchestrator", "goal.md"))
+	for _, want := range []string{
+		"## Current Goal",
+		"## Acceptance Signal",
+		"structured complete outcome",
+	} {
+		if !strings.Contains(goal, want) {
+			t.Fatalf("goal.md missing %q\n%s", want, goal)
+		}
+	}
 }
 
 func TestRunInitPreservesExistingFiles(t *testing.T) {
@@ -125,8 +153,10 @@ func TestRunInitPreservesExistingFiles(t *testing.T) {
 	existingFiles := map[string]string{
 		filepath.Join(repoRoot, ".orchestrator", "brief.md"):       "# Custom Brief\n\nKeep this exact text.\n",
 		filepath.Join(repoRoot, ".orchestrator", "roadmap.md"):     "# Custom Roadmap\n\nDo not overwrite.\n",
+		filepath.Join(repoRoot, ".orchestrator", "constraints.md"): "# Custom Constraints\n\nDo not overwrite.\n",
 		filepath.Join(repoRoot, ".orchestrator", "decisions.md"):   "# Custom Decisions\n\nDo not overwrite.\n",
 		filepath.Join(repoRoot, ".orchestrator", "human-notes.md"): "# Custom Human Notes\n\nDo not overwrite.\n",
+		filepath.Join(repoRoot, ".orchestrator", "goal.md"):        "# Custom Goal\n\nDo not overwrite.\n",
 		filepath.Join(repoRoot, "AGENTS.md"):                       "# Existing AGENTS\n",
 	}
 	for path, contents := range existingFiles {
@@ -153,8 +183,10 @@ func TestRunInitPreservesExistingFiles(t *testing.T) {
 	for _, want := range []string{
 		"scaffold.brief_md: preserved",
 		"scaffold.roadmap_md: preserved",
+		"scaffold.constraints_md: preserved",
 		"scaffold.decisions_md: preserved",
 		"scaffold.human_notes_md: preserved",
+		"scaffold.goal_md: preserved",
 		"scaffold.agents_md: preserved",
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -223,6 +255,20 @@ func TestTargetRepoTemplatesIncludeAppBuildGuidance(t *testing.T) {
 		}
 	}
 
+	constraints := targetRepoConstraintsTemplate()
+	for _, want := range []string{
+		"## Technical Constraints",
+		"## Business / Product Constraints",
+		"## Security / Privacy Constraints",
+		"## UX / Accessibility Constraints",
+		"## Workflow Constraints",
+		"## Non-Goals",
+	} {
+		if !strings.Contains(constraints, want) {
+			t.Fatalf("constraints template missing %q", want)
+		}
+	}
+
 	decisions := targetRepoDecisionsTemplate()
 	for _, want := range []string{
 		"## Product Decisions",
@@ -258,6 +304,17 @@ func TestTargetRepoTemplatesIncludeAppBuildGuidance(t *testing.T) {
 	} {
 		if !strings.Contains(humanNotes, want) {
 			t.Fatalf("human-notes template missing %q", want)
+		}
+	}
+
+	goal := targetRepoGoalTemplate()
+	for _, want := range []string{
+		"## Current Goal",
+		"## Acceptance Signal",
+		"structured complete outcome",
+	} {
+		if !strings.Contains(goal, want) {
+			t.Fatalf("goal template missing %q", want)
 		}
 	}
 }

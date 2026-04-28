@@ -2409,8 +2409,8 @@ func TestLocalControlServerContractFileActionsOpenAndSaveCanonicalFiles(t *testi
 		t.Fatalf("list_contract_files response.OK = false, error = %#v", listResponse.Error)
 	}
 	listPayload := listResponse.Payload.(map[string]any)
-	if listPayload["count"] != float64(5) {
-		t.Fatalf("count = %#v, want 5 canonical files", listPayload["count"])
+	if listPayload["count"] != float64(7) {
+		t.Fatalf("count = %#v, want 7 canonical files", listPayload["count"])
 	}
 
 	openResponse := postControlAction(t, server.URL, `{
@@ -3054,6 +3054,91 @@ func TestLocalControlServerStatusSnapshotSurfacesApprovalCenterState(t *testing.
 	}
 	if approval["command"] != "go test ./..." {
 		t.Fatalf("approval.command = %#v, want go test ./...", approval["command"])
+	}
+}
+
+func TestLocalControlServerSetupHealthActionAndSnapshotAreMechanical(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	mustMkdirAll(t, filepath.Join(repoRoot, ".git"))
+	layout := state.ResolveLayout(repoRoot)
+	configPath := filepathJoin(t, repoRoot, "config.json")
+	if err := config.Save(configPath, config.Default()); err != nil {
+		t.Fatalf("config.Save() error = %v", err)
+	}
+
+	inv := Invocation{
+		Stdout:     &bytes.Buffer{},
+		Stderr:     &bytes.Buffer{},
+		RepoRoot:   repoRoot,
+		Layout:     layout,
+		Config:     config.Default(),
+		ConfigPath: configPath,
+		RuntimeCfg: runtimecfg.NewManager(configPath, config.Default()),
+		Events:     activity.NewBroker(activity.DefaultHistoryLimit),
+		Version:    "test",
+	}
+	server := httptest.NewServer(newLocalControlServer(inv).Handler())
+	defer server.Close()
+
+	createResponse := postControlAction(t, server.URL, `{
+		"id":"req_setup_templates",
+		"type":"request",
+		"action":"run_setup_action",
+		"payload":{"action":"create_templates"}
+	}`)
+	if !createResponse.OK {
+		t.Fatalf("create templates response failed: %#v", createResponse.Error)
+	}
+	for _, path := range []string{
+		filepath.Join(repoRoot, ".orchestrator", "brief.md"),
+		filepath.Join(repoRoot, ".orchestrator", "constraints.md"),
+		filepath.Join(repoRoot, ".orchestrator", "goal.md"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected setup action to create %s: %v", path, err)
+		}
+	}
+
+	healthResponse := postControlAction(t, server.URL, `{
+		"id":"req_setup_health",
+		"type":"request",
+		"action":"get_setup_health",
+		"payload":{}
+	}`)
+	if !healthResponse.OK {
+		t.Fatalf("setup health response failed: %#v", healthResponse.Error)
+	}
+	healthPayload := healthResponse.Payload.(map[string]any)
+	if healthPayload["repo_path"] != repoRoot {
+		t.Fatalf("setup health repo_path = %#v, want %q", healthPayload["repo_path"], repoRoot)
+	}
+	checks := healthPayload["checks"].([]any)
+	if len(checks) == 0 {
+		t.Fatal("setup health checks should be populated")
+	}
+
+	snapshotResponse := postControlAction(t, server.URL, `{
+		"id":"req_capture_snapshot",
+		"type":"request",
+		"action":"capture_snapshot",
+		"payload":{}
+	}`)
+	if !snapshotResponse.OK {
+		t.Fatalf("capture snapshot response failed: %#v", snapshotResponse.Error)
+	}
+	snapshotPayload := snapshotResponse.Payload.(map[string]any)
+	artifactPath := snapshotPayload["artifact_path"].(string)
+	if artifactPath == "" {
+		t.Fatal("snapshot artifact path should be populated")
+	}
+	_, absoluteSnapshotPath, err := resolveArtifactPath(repoRoot, artifactPath)
+	if err != nil {
+		t.Fatalf("resolveArtifactPath() error = %v", err)
+	}
+	if _, err := os.Stat(absoluteSnapshotPath); err != nil {
+		t.Fatalf("snapshot artifact was not written: %v", err)
 	}
 }
 
