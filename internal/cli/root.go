@@ -73,6 +73,8 @@ func NewApp(opts Options) *App {
 		"gui":            newGUICommand(),
 		"history":        newHistoryCommand(),
 		"init":           newInitCommand(),
+		"install-global": newInstallGlobalCommand("install-global"),
+		"repair-global":  newInstallGlobalCommand("repair-global"),
 		"resume":         newResumeCommand(),
 		"run":            newRunCommand(),
 		"setup":          newSetupCommand(),

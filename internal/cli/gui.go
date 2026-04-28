@@ -154,18 +154,14 @@ func resolveGUILaunchAssets() (string, string, error) {
 }
 
 func executableDirPATHStatus() (string, string) {
-	executable, err := os.Executable()
+	status, err := inspectGlobalLauncher(context.Background(), Invocation{})
 	if err != nil {
-		return "WARN", "unable to inspect executable path: " + err.Error()
+		return "WARN", "unable to inspect global launcher: " + err.Error()
 	}
-	dir := filepath.Clean(filepath.Dir(executable))
-	pathValue := os.Getenv("PATH")
-	for _, entry := range filepath.SplitList(pathValue) {
-		if strings.EqualFold(filepath.Clean(strings.TrimSpace(entry)), dir) {
-			return "OK", fmt.Sprintf("%s is present on PATH", dir)
-		}
+	if status.Status == "ok" {
+		return "OK", fmt.Sprintf("orchestrator resolves to %s", status.ProcessWinner)
 	}
-	return "INFO", fmt.Sprintf("%s is not on PATH; add it to launch `orchestrator gui` from any terminal", dir)
+	return "INFO", status.Detail
 }
 
 func printGUIAssetGuidance(writer io.Writer, repoPath string, addr string, launchErr error) {

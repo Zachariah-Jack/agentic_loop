@@ -62,6 +62,7 @@ What now exists in the Aurora desktop shell:
 
 - an optional Electron shell under `console/v2-shell/`
 - `orchestrator gui` as the primary GUI launch command from any folder
+- `orchestrator install-global` / `orchestrator repair-global` to build the current checkout binary into `bin\orchestrator.exe`, repair the Windows User PATH, and show which global `orchestrator` command wins
 - a dark Aurora Mission Control dashboard with a left navigation rail, Project System drawer, central Mission Run gauge/timeline, right AI Conversation panel, and lower mission controls
 - a top Aurora session tab strip so one GUI window can hold multiple independent repo sessions, with folder-picker `+ New`, close, and right-click rename
 - a guided Home dashboard that answers "am I connected, which repo is loaded, is the loop running, does it need me, what happened, and what should I click next"
@@ -81,7 +82,7 @@ What now exists in the Aurora desktop shell:
 - a Project System panel and contract-file editor for `.orchestrator/brief.md`, `.orchestrator/roadmap.md`, `.orchestrator/constraints.md`, `.orchestrator/decisions.md`, `.orchestrator/human-notes.md`, `.orchestrator/goal.md`, and `AGENTS.md`
 - an explicit Saved Goal workflow that separates read-only saved `goal.md` display from an edit draft
 - an AI setup/autofill wizard pane that starts from a Home first-message composer, drafts selected canonical contract files and the goal through the real engine protocol, and previews them before any save
-- a fresh-repo startup checklist for Git, Git safe.directory trust, Orchestrator initialization, required files, Codex availability, planner config, ntfy, and writable state/log folders
+- a fresh-repo startup checklist for Git, Git safe.directory trust, Orchestrator initialization, required files, Codex availability, planner config, global launcher status, ntfy, and writable state/log folders
 - Snapshot and View Logs controls for durable reports and later inspection
 - a read-only repo browser pane that lists one directory at a time and opens repo files through explicit protocol actions
 - embedded operator terminal tabs for local shell sessions, kept separate from engine run authority
@@ -156,6 +157,20 @@ The helper builds from the orchestrator repo, but the control server is bound to
 ```powershell
 orchestrator init
 ```
+
+If Windows resolves `orchestrator` to an older checkout or install, run the current checkout binary once by full path and repair the global launcher:
+
+```powershell
+& "D:\Projects\agentic_loop\bin\orchestrator.exe" install-global
+```
+
+During source development you can also run this from the current checkout:
+
+```powershell
+go run .\cmd\orchestrator install-global
+```
+
+The repair command builds `bin\orchestrator.exe`, moves that bin folder to the front of the Windows User PATH, updates the current process PATH, reports every stale `orchestrator` it found, and prints a one-line PowerShell refresh/test command. It does not require admin rights and does not delete old installs.
 
 2. For a double-click style launch, run `scripts\Launch-Orchestrator-V2-Shell.vbs` or create a shortcut to it and pin that shortcut to the taskbar.
 3. Use `-DebugVisibleWindows` only when you intentionally want visible backend PowerShell windows for debugging.
@@ -234,11 +249,19 @@ setup -> init -> run -> continue/status/history/doctor
 - PATH guidance: `orchestrator doctor` reports whether GUI launcher assets are available and whether the binary folder is on `PATH`; `orchestrator setup` prints the launch command and PATH status.
 - Does not: make planner decisions, start a build run by itself, or reinterpret human messages.
 
-#### `setup [--yes]`
+#### `install-global [--dry-run]`
+
+- Does: builds the current checkout into `bin\orchestrator.exe`, puts that bin folder first in the Windows User PATH, updates the current process PATH, and reports the winning global `orchestrator` command.
+- Alias: `repair-global`.
+- Use it when: `orchestrator version` or `orchestrator gui` resolves to an older checkout/install.
+- Important behavior: no admin rights are required, old installs are not deleted, and `--dry-run` prints the plan without building or changing PATH.
+- Does not: change run state, update GitHub releases, or remove old folders.
+
+#### `setup [--yes] [--repair-global]`
 
 - Does: loads existing operator config, prompts for planner model, drift watcher enablement, optional `ntfy` settings, and repo-contract confirmation, then writes config durably.
 - Use it when: setting up a machine for the first time or refreshing saved operator config.
-- Important flags: `--yes` keeps current values or defaults where possible and writes without prompting.
+- Important flags: `--yes` keeps current values or defaults where possible and writes without prompting; `--repair-global` also runs the global launcher repair flow.
 - Does not: store `OPENAI_API_KEY`; that remains environment-only.
 
 #### `init`
@@ -250,7 +273,7 @@ setup -> init -> run -> continue/status/history/doctor
 
 #### `doctor`
 
-- Does: prints grouped mechanical health checks for runtime, target-repo contract, config, plugins, planner readiness, executor readiness, workers, `ntfy`, and persistence.
+- Does: prints grouped mechanical health checks for runtime, global launcher PATH winner, target-repo contract, config, plugins, planner readiness, executor readiness, workers, `ntfy`, and persistence.
 - Use it when: checking whether the current machine and repo are ready before a live run.
 - Important behavior: it distinguishes install/runtime health from target-repo contract health.
 - Does not: run a live planner turn, run Codex work, or execute a full end-to-end smoke test.

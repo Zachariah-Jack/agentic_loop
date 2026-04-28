@@ -110,6 +110,7 @@ Implemented on top of the protocol now:
 - protocol-backed canonical contract-file opening and saving
 - protocol-backed AI autofill drafting for canonical contract files, with preview-before-save in the shell
 - protocol-backed setup health checks, safe setup actions, goal save, and run snapshots for the Aurora dashboard
+- protocol-backed global launcher health and repair through the setup checklist
 - protocol-backed Home ntfy save/test through runtime config and `test_ntfy`
 - Aurora multi-session tabs that keep per-repo shell state isolated and route actions to the active tab address
 - protocol-backed read-only repo browsing for tree listing and file opening
@@ -1064,10 +1065,12 @@ Supported `run_setup_action` values:
 - `check_codex`
 - `verify_planner_config`
 - `codex_repo_trust`
+- `repair_global_launcher`
 
 Rules:
 
 - setup actions are mechanical only
+- `repair_global_launcher` runs the same mechanical `install-global` flow as the CLI: build/verify the current checkout binary, move its bin folder to the front of the Windows User PATH, update process PATH when possible, and report stale winners without deleting them
 - `get_setup_health`, `get_status_snapshot`, protocol `start_run`, and protocol `continue_run` may mechanically repair safe runtime directories such as `.orchestrator/state/`, `.orchestrator/logs/`, `.orchestrator/artifacts/`, and worker runtime folders before reporting readiness
 - `repair_project_setup` uses the same idempotent scaffold path as `orchestrator init`; it creates missing templates and runtime directories while preserving existing files
 - `git_safe_directory` must use the selected repo path in `git config --global --add safe.directory "<repo path>"`

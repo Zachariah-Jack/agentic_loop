@@ -139,10 +139,11 @@ On repo open/connect, the GUI shows mechanical setup checks:
 - required project files exist
 - Codex available/authenticated
 - planner key/config available
+- global launcher points to the current checkout binary
 - ntfy configured when applicable
 - state/log folders writable
 
-Safe one-click actions may run `git init`, create Orchestrator templates, initialize runtime folders, check Codex, verify planner config presence, and run `git config --global --add safe.directory "<repo path>"`. Codex trust must not be faked; if it cannot be automated reliably, show manual guidance.
+Safe one-click actions may run `git init`, create Orchestrator templates, initialize runtime folders, check Codex, verify planner config presence, repair the Windows User PATH global launcher, and run `git config --global --add safe.directory "<repo path>"`. Codex trust must not be faked; if it cannot be automated reliably, show manual guidance.
 
 The GUI and control backend may automatically repair safe runtime directories when missing:
 

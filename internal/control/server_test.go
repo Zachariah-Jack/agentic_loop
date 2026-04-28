@@ -174,7 +174,7 @@ func TestServerRoutesUpdateActions(t *testing.T) {
 				return map[string]any{"checked": true}, nil
 			},
 			GetUpdateStatus: func(_ context.Context) (any, error) {
-				return map[string]any{"current_version": "v1.2.0-dev"}, nil
+				return map[string]any{"current_version": "v1.2.1-dev"}, nil
 			},
 			GetUpdateChangelog: func(_ context.Context, _ UpdateRequest) (any, error) {
 				return map[string]any{"changelog": "changes"}, nil

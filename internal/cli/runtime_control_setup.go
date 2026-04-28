@@ -66,6 +66,15 @@ func getSetupHealth(ctx context.Context, inv Invocation) (controlSetupHealthSnap
 	stateReady := pathExists(inv.Layout.StateDir) && pathExists(inv.Layout.LogsDir) && pathExists(filepath.Join(inv.Layout.RootDir, "artifacts"))
 	plannerKeyPresent := plannerAPIKeyStatus() == "present"
 	ntfyReady := ntfyBridgeState(currentConfig(inv)) == "ready"
+	globalLauncherStatus, globalLauncherErr := inspectGlobalLauncher(ctx, inv)
+	globalLauncherOK := globalLauncherStatus.Status == "ok"
+	globalLauncherDetail := globalLauncherStatus.Detail
+	if globalLauncherErr != nil {
+		globalLauncherDetail = globalLauncherErr.Error()
+	}
+	if strings.TrimSpace(globalLauncherStatus.ProcessWinner) != "" {
+		globalLauncherDetail = fmt.Sprintf("%s winner=%s", globalLauncherDetail, globalLauncherStatus.ProcessWinner)
+	}
 
 	codexDetail := "Codex command was not detected from the control-server environment."
 	codexStatus := "action_required"
@@ -137,6 +146,14 @@ func getSetupHealth(ctx context.Context, inv Invocation) (controlSetupHealthSnap
 			Status:   optionalStatus(ntfyReady),
 			Detail:   ntfyBridgeState(currentConfig(inv)),
 			Optional: true,
+		},
+		{
+			ID:          "global_launcher",
+			Label:       "Global launcher",
+			Status:      statusFromBool(globalLauncherOK),
+			Detail:      globalLauncherDetail,
+			Action:      actionIfMissing(globalLauncherOK, "repair_global_launcher"),
+			ActionLabel: actionLabelIfMissing(globalLauncherOK, "Repair Global Launcher"),
 		},
 		{
 			ID:          "state_logs_writable",
@@ -219,6 +236,10 @@ func runSetupAction(ctx context.Context, inv Invocation, request control.SetupAc
 		result.Status = "manual_required"
 		result.Detail = fmt.Sprintf("Codex trust cannot be automated reliably. Run Codex once with --cd %q and confirm any Codex prompt manually.", repoRoot)
 		return result, nil
+	case "repair_global_launcher":
+		install, installErr := installGlobalLauncher(ctx, inv, globalLauncherCommandOptions{})
+		err = installErr
+		result.Detail = fmt.Sprintf("target=%s winner=%s status=%s", install.Status.TargetBinary, install.Status.ProcessWinner, install.Status.Status)
 	default:
 		return controlSetupActionSnapshot{}, fmt.Errorf("unsupported setup action %q", action)
 	}

@@ -19,21 +19,23 @@ func newSetupCommand() Command {
 		Summary: "Capture or refresh the current v1 operator config.",
 		Description: stringsJoin(
 			"Usage:",
-			"  orchestrator setup [--yes]",
+			"  orchestrator setup [--yes] [--repair-global]",
 			"",
 			"Loads the current config, captures planner model plus optional ntfy settings,",
 			"and writes the config back durably for the current operator environment.",
 			"OPENAI_API_KEY remains environment-based and is not written into config.",
 			"`--yes` keeps existing values or defaults where possible and writes without prompting.",
+			"`--repair-global` also runs the global launcher repair flow after config is saved.",
 		),
 		Run: runSetup,
 	}
 }
 
-func runSetup(_ context.Context, inv Invocation) error {
+func runSetup(ctx context.Context, inv Invocation) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(inv.Stderr)
 	yes := fs.Bool("yes", false, "Write existing values/defaults without prompting.")
+	repairGlobal := fs.Bool("repair-global", false, "Repair the global orchestrator launcher after saving setup config.")
 	if err := fs.Parse(inv.Args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintln(inv.Stdout, newSetupCommand().Description)
@@ -54,6 +56,7 @@ func runSetup(_ context.Context, inv Invocation) error {
 	}
 
 	mode := "interactive"
+	shouldRepairGlobal := *repairGlobal
 	if *yes {
 		mode = "non_interactive_yes"
 		if cfg.RepoContractConfirmed == nil && repoContract.Ready {
@@ -62,20 +65,32 @@ func runSetup(_ context.Context, inv Invocation) error {
 		}
 	} else {
 		prompter := newSetupPrompter(inv.Stdin, inv.Stdout)
-		if err := runInteractiveSetup(prompter, inv, &cfg, repoContract); err != nil {
+		promptRepair, err := runInteractiveSetup(prompter, inv, &cfg, repoContract)
+		if err != nil {
 			return err
 		}
+		shouldRepairGlobal = shouldRepairGlobal || promptRepair
 	}
 
 	if err := config.Save(inv.ConfigPath, cfg); err != nil {
 		return err
 	}
 
+	var globalRepair *globalLauncherInstallResult
+	if shouldRepairGlobal {
+		result, err := installGlobalLauncher(ctx, inv, globalLauncherCommandOptions{})
+		if err != nil {
+			return err
+		}
+		globalRepair = &result
+	}
+
 	writeSetupSummary(inv.Stdout, inv.ConfigPath, cfg, setupSummary{
-		Mode:         mode,
-		ConfigState:  setupConfigState(existed),
-		RepoRoot:     inv.RepoRoot,
-		RepoContract: repoContract,
+		Mode:               mode,
+		ConfigState:        setupConfigState(existed),
+		RepoRoot:           inv.RepoRoot,
+		RepoContract:       repoContract,
+		GlobalRepairResult: globalRepair,
 	})
 	return nil
 }
@@ -86,10 +101,11 @@ type setupPrompter struct {
 }
 
 type setupSummary struct {
-	Mode         string
-	ConfigState  string
-	RepoRoot     string
-	RepoContract repoContractStatus
+	Mode               string
+	ConfigState        string
+	RepoRoot           string
+	RepoContract       repoContractStatus
+	GlobalRepairResult *globalLauncherInstallResult
 }
 
 func newSetupPrompter(stdin io.Reader, stdout io.Writer) setupPrompter {
@@ -102,7 +118,7 @@ func newSetupPrompter(stdin io.Reader, stdout io.Writer) setupPrompter {
 	}
 }
 
-func runInteractiveSetup(prompter setupPrompter, inv Invocation, cfg *config.Config, repoContract repoContractStatus) error {
+func runInteractiveSetup(prompter setupPrompter, inv Invocation, cfg *config.Config, repoContract repoContractStatus) (bool, error) {
 	fmt.Fprintf(inv.Stdout, "config.path: %s\n", inv.ConfigPath)
 	fmt.Fprintf(inv.Stdout, "repo.root: %s\n", inv.RepoRoot)
 	fmt.Fprintf(inv.Stdout, "planner_api_key.environment: %s\n", plannerAPIKeyStatus())
@@ -114,31 +130,31 @@ func runInteractiveSetup(prompter setupPrompter, inv Invocation, cfg *config.Con
 
 	plannerModel, err := prompter.promptValue("planner model", cfg.PlannerModel, cfg.PlannerModel)
 	if err != nil {
-		return err
+		return false, err
 	}
 	cfg.PlannerModel = strings.TrimSpace(plannerModel)
 
 	driftWatcherEnabled, err := prompter.promptBool("drift watcher enabled", cfg.DriftWatcherEnabled)
 	if err != nil {
-		return err
+		return false, err
 	}
 	cfg.DriftWatcherEnabled = driftWatcherEnabled
 
 	serverURL, err := prompter.promptValue("ntfy server URL", displayValue(cfg.NTFY.ServerURL), cfg.NTFY.ServerURL)
 	if err != nil {
-		return err
+		return false, err
 	}
 	cfg.NTFY.ServerURL = strings.TrimSpace(serverURL)
 
 	topic, err := prompter.promptValue("ntfy topic", displayValue(cfg.NTFY.Topic), cfg.NTFY.Topic)
 	if err != nil {
-		return err
+		return false, err
 	}
 	cfg.NTFY.Topic = strings.TrimSpace(topic)
 
 	token, err := prompter.promptValue("ntfy auth token", maskedSecret(cfg.NTFY.AuthToken), cfg.NTFY.AuthToken)
 	if err != nil {
-		return err
+		return false, err
 	}
 	cfg.NTFY.AuthToken = strings.TrimSpace(token)
 
@@ -146,12 +162,24 @@ func runInteractiveSetup(prompter setupPrompter, inv Invocation, cfg *config.Con
 		currentConfirmed := repoContractConfirmedValue(*cfg, repoContract)
 		confirmed, err := prompter.promptBool("repo contract markers ready", currentConfirmed)
 		if err != nil {
-			return err
+			return false, err
 		}
 		cfg.RepoContractConfirmed = boolPtr(confirmed)
 	}
 
-	return nil
+	repairGlobal := false
+	if status, err := inspectGlobalLauncher(context.Background(), inv); err == nil {
+		fmt.Fprintf(inv.Stdout, "global_launcher.status: %s\n", status.Status)
+		fmt.Fprintf(inv.Stdout, "global_launcher.winner: %s\n", displayValue(status.ProcessWinner))
+		if status.Status != "ok" {
+			repairGlobal, err = prompter.promptBool("repair global orchestrator launcher", false)
+			if err != nil {
+				return false, err
+			}
+		}
+	}
+
+	return repairGlobal, nil
 }
 
 func (p setupPrompter) promptValue(label string, currentDisplay string, currentValue string) (string, error) {
@@ -248,6 +276,10 @@ func writeSetupSummary(stdout io.Writer, configPath string, cfg config.Config, s
 	fmt.Fprintf(stdout, "gui.launch_command: orchestrator gui\n")
 	fmt.Fprintf(stdout, "gui.path_status: %s\n", pathLevel)
 	fmt.Fprintf(stdout, "gui.path_detail: %s\n", pathDetail)
+	if summary.GlobalRepairResult != nil {
+		fmt.Fprintf(stdout, "global_launcher.repair_status: %s\n", summary.GlobalRepairResult.Status.Status)
+		fmt.Fprintf(stdout, "global_launcher.winner: %s\n", displayValue(summary.GlobalRepairResult.Status.ProcessWinner))
+	}
 	if len(summary.RepoContract.Missing) == 0 {
 		fmt.Fprintln(stdout, "repo_contract.missing_markers: none")
 	} else {

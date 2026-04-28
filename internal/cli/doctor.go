@@ -100,6 +100,24 @@ func runDoctor(ctx context.Context, inv Invocation) error {
 		level:   "OK",
 		detail:  build.BuildTime,
 	})
+	if launcher, err := inspectGlobalLauncher(ctx, inv); err != nil {
+		checks = append(checks, check{
+			section: "global_launcher",
+			label:   "global launcher",
+			level:   "WARN",
+			detail:  err.Error(),
+		})
+	} else {
+		globalChecks := globalLauncherDoctorChecks(launcher)
+		for _, item := range globalChecks {
+			checks = append(checks, check{
+				section: "global_launcher",
+				label:   item.label,
+				level:   item.level,
+				detail:  item.detail,
+			})
+		}
+	}
 	if scriptPath, shellPath, err := resolveGUILaunchAssets(); err != nil {
 		checks = append(checks, check{
 			section: "gui",
@@ -366,7 +384,7 @@ func runDoctor(ctx context.Context, inv Invocation) error {
 	}
 
 	hasFailure := false
-	sections := []string{"runtime", "gui", "repo_contract", "config", "plugins", "planner", "executor", "workers", "ntfy", "persistence"}
+	sections := []string{"runtime", "global_launcher", "gui", "repo_contract", "config", "plugins", "planner", "executor", "workers", "ntfy", "persistence"}
 	for _, section := range sections {
 		fmt.Fprintf(inv.Stdout, "%s:\n", section)
 		for _, item := range checks {
@@ -385,6 +403,46 @@ func runDoctor(ctx context.Context, inv Invocation) error {
 	}
 
 	return nil
+}
+
+func globalLauncherDoctorChecks(status globalLauncherStatus) []struct {
+	label  string
+	level  string
+	detail string
+} {
+	level := "OK"
+	if status.Status == "stale" || status.Status == "missing" || status.Status == "unknown" {
+		level = "WARN"
+	}
+	out := []struct {
+		label  string
+		level  string
+		detail string
+	}{
+		{label: "current binary path", level: "OK", detail: valueOrUnavailable(status.CurrentExecutable)},
+		{label: "desired global binary", level: level, detail: valueOrUnavailable(status.TargetBinary)},
+		{label: "global orchestrator winner", level: level, detail: valueOrUnavailable(status.ProcessWinner)},
+		{label: "global launcher status", level: level, detail: status.Detail},
+	}
+	if status.Status != "ok" {
+		command := "orchestrator install-global"
+		if strings.TrimSpace(status.RepairCommand) != "" {
+			command = status.RepairCommand
+		}
+		out = append(out, struct {
+			label  string
+			level  string
+			detail string
+		}{label: "repair command", level: "INFO", detail: command})
+	}
+	for i, candidate := range status.StaleCandidates {
+		out = append(out, struct {
+			label  string
+			level  string
+			detail string
+		}{label: fmt.Sprintf("stale install %d", i+1), level: "WARN", detail: candidate.Path})
+	}
+	return out
 }
 
 func checkSQLiteSurface(ctx context.Context, layout state.Layout) error {

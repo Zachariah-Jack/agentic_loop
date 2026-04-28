@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.2.1-dev - 2026-04-28
+
+- Added `orchestrator install-global` and `orchestrator repair-global` to build the current checkout binary into repo-relative `bin\orchestrator.exe`, move that bin folder to the front of the Windows User PATH, update the current process PATH, and report the winning `orchestrator` executable.
+- Added `orchestrator setup --repair-global` and an interactive setup prompt for stale/missing global launchers.
+- Expanded `orchestrator doctor` with global launcher diagnostics: current binary path, desired global binary, current PATH winner, stale installs, and the exact repair command.
+- Added a GUI setup-health `Global launcher` check with a `Repair Global Launcher` action backed by the same mechanical repair flow.
+
+Known limits:
+
+- The repair flow does not require admin rights and does not delete old installs. If an old machine-wide PATH entry outranks the User PATH, the tool reports it clearly and updates the current process PATH, but removing or reordering that machine entry remains an admin/system PATH task.
+
 ## v1.2.0-dev - 2026-04-28
 
 - Added Aurora multi-session tabs with folder-picker `+ New`, close confirmation for active work, right-click rename, and per-repo session routing.
