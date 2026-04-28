@@ -14,13 +14,15 @@ import (
 	"orchestrator/internal/control"
 	"orchestrator/internal/executor/appserver"
 	"orchestrator/internal/journal"
+	"orchestrator/internal/state"
 )
 
 type controlSetupHealthSnapshot struct {
-	RepoPath    string              `json:"repo_path"`
-	GeneratedAt string              `json:"generated_at"`
-	Checks      []controlSetupCheck `json:"checks"`
-	Message     string              `json:"message,omitempty"`
+	RepoPath     string              `json:"repo_path"`
+	GeneratedAt  string              `json:"generated_at"`
+	AutoRepaired []string            `json:"auto_repaired,omitempty"`
+	Checks       []controlSetupCheck `json:"checks"`
+	Message      string              `json:"message,omitempty"`
 }
 
 type controlSetupCheck struct {
@@ -54,6 +56,10 @@ type controlSnapshotCapture struct {
 
 func getSetupHealth(ctx context.Context, inv Invocation) (controlSetupHealthSnapshot, error) {
 	repoRoot := inv.RepoRoot
+	repairResult, err := repairSafeRepoContractDirs(inv.Layout)
+	if err != nil {
+		return controlSetupHealthSnapshot{}, err
+	}
 	gitReady := pathExists(filepath.Join(repoRoot, ".git"))
 	contract := inspectTargetRepoContract(repoRoot)
 	orchestratorRoot := pathExists(inv.Layout.RootDir)
@@ -99,8 +105,8 @@ func getSetupHealth(ctx context.Context, inv Invocation) (controlSetupHealthSnap
 			Label:       "Required project files exist",
 			Status:      statusFromBool(contract.Ready),
 			Detail:      missingOrReady(contract.Missing),
-			Action:      actionIfMissing(contract.Ready, "create_templates"),
-			ActionLabel: actionLabelIfMissing(contract.Ready, "Create Missing Templates"),
+			Action:      actionIfMissing(contract.Ready, "repair_project_setup"),
+			ActionLabel: actionLabelIfMissing(contract.Ready, "Repair Project Setup"),
 		},
 		{
 			ID:          "codex_available",
@@ -143,10 +149,11 @@ func getSetupHealth(ctx context.Context, inv Invocation) (controlSetupHealthSnap
 	}
 
 	return controlSetupHealthSnapshot{
-		RepoPath:    repoRoot,
-		GeneratedAt: formatSnapshotTime(time.Now().UTC()),
-		Checks:      checks,
-		Message:     "Setup checks are mechanical readiness checks. They do not decide whether project work is complete.",
+		RepoPath:     repoRoot,
+		GeneratedAt:  formatSnapshotTime(time.Now().UTC()),
+		AutoRepaired: repairResult.Created,
+		Checks:       checks,
+		Message:      "Setup checks are mechanical readiness checks. They do not decide whether project work is complete.",
 	}, nil
 }
 
@@ -168,13 +175,14 @@ func runSetupAction(ctx context.Context, inv Invocation, request control.SetupAc
 	case "git_safe_directory":
 		err = runGitCommand(ctx, repoRoot, "config", "--global", "--add", "safe.directory", repoRoot)
 		result.Detail = fmt.Sprintf("git config --global --add safe.directory %q", repoRoot)
-	case "orchestrator_init", "create_templates":
-		if err = ensureTargetRepoContractDirs(inv.Layout); err == nil {
-			_, err = scaffoldTargetRepoContract(repoRoot, inv.Layout)
+	case "orchestrator_init", "create_templates", "repair_project_setup":
+		layout := state.ResolveLayout(repoRoot)
+		if err = ensureTargetRepoContractDirs(layout); err == nil {
+			_, err = scaffoldTargetRepoContract(repoRoot, layout)
 		}
 		if err == nil {
 			var storeClose func() error
-			store, journalWriter, runtimeErr := ensureRuntime(ctx, inv.Layout)
+			store, journalWriter, runtimeErr := ensureRuntime(ctx, layout)
 			if runtimeErr != nil {
 				err = runtimeErr
 			} else {

@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"orchestrator/internal/state"
 )
 
 type guiRecentState struct {
@@ -71,9 +73,20 @@ func runGUI(ctx context.Context, inv Invocation) error {
 	fmt.Fprintf(inv.Stdout, "gui.shell: %s\n", shellPath)
 	fmt.Fprintf(inv.Stdout, "gui.launcher: %s\n", scriptPath)
 	if *dryRun {
+		if missing := missingSafeRepoRuntimeDirs(state.ResolveLayout(repoPath)); len(missing) > 0 {
+			fmt.Fprintf(inv.Stdout, "gui.setup_repair_needed: %s\n", strings.Join(missing, ", "))
+		}
 		fmt.Fprintln(inv.Stdout, "gui.dry_run: true")
 		fmt.Fprintln(inv.Stdout, "gui.status: launch plan ready")
 		return nil
+	}
+
+	repairResult, err := repairSafeRepoContractDirs(state.ResolveLayout(repoPath))
+	if err != nil {
+		return fmt.Errorf("repair gui repo setup: %w", err)
+	}
+	if len(repairResult.Created) > 0 {
+		fmt.Fprintf(inv.Stdout, "gui.setup_repaired: %s\n", strings.Join(repairResult.Created, ", "))
 	}
 
 	cmd := exec.CommandContext(ctx, "powershell", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-RepoPath", repoPath, "-ControlAddr", *addr)
@@ -196,4 +209,15 @@ func saveGUIRecentState(configPath string, state guiRecentState) error {
 		return err
 	}
 	return os.WriteFile(path, raw, 0o644)
+}
+
+func missingSafeRepoRuntimeDirs(layout state.Layout) []string {
+	var missing []string
+	for _, item := range targetRepoRuntimeDirEntries(layout) {
+		info, err := os.Stat(item.path)
+		if err != nil || !info.IsDir() {
+			missing = append(missing, item.label)
+		}
+	}
+	return missing
 }

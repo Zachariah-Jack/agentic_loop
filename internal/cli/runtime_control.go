@@ -798,6 +798,9 @@ func newLocalControlServer(inv Invocation) control.Server {
 
 func buildControlStatusSnapshot(ctx context.Context, inv Invocation, requestedRunID string) (controlStatusSnapshot, error) {
 	cfg := currentConfig(inv)
+	if _, err := repairSafeRepoContractDirs(inv.Layout); err != nil {
+		return controlStatusSnapshot{}, err
+	}
 	repoContract := inspectTargetRepoContract(inv.RepoRoot)
 	snapshot := controlStatusSnapshot{
 		Backend:        buildControlBackendSnapshot(inv),

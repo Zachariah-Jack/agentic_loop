@@ -147,6 +147,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start-v2-dogfood.ps1 -RepoPat
 
 The helper builds from the orchestrator repo, but the control server is bound to the `-RepoPath` target repo. The shell shows both the expected repo and the backend-reported repo; if they differ, it hides the wrong repo's run state behind a `Wrong Repo Backend` warning and recommends `Restart Backend for Target Repo`.
 
+`orchestrator gui` is the normal launch command. On launch and connect, safe setup surfaces such as `.orchestrator/state/`, `.orchestrator/logs/`, `.orchestrator/artifacts/`, and worker runtime folders are repaired automatically when missing. Missing contract files are handled through the Startup Checklist with `Repair Project Setup`; the manual fallback remains:
+
+```powershell
+orchestrator init
+```
+
 2. For a double-click style launch, run `scripts\Launch-Orchestrator-V2-Shell.vbs` or create a shortcut to it and pin that shortcut to the taskbar.
 3. Use `-DebugVisibleWindows` only when you intentionally want visible backend PowerShell windows for debugging.
 4. Leave auto-reconnect enabled in the shell for routine control-server restarts.
@@ -218,7 +224,8 @@ setup -> init -> run -> continue/status/history/doctor
 
 - Does: launches the Aurora Orchestrator dashboard and owned local control server flow through the real GUI launcher.
 - Use it when: opening the GUI from any project folder. Inside a Git repo, that repo is selected by default. Outside a repo, the last GUI repo is reused when known; otherwise the current folder opens to setup guidance.
-- Important behavior: it does not require manual `npm run dev` commands in normal use. The launcher prints the selected repo, control address, shell path, and logs/status. `--dry-run` prints the launch plan without starting the GUI.
+- Important behavior: it does not require manual `npm run dev` commands in normal use. The launcher prints the selected repo, control address, shell path, logs/status, and any setup repair it performed or would perform. `--dry-run` prints the launch plan without starting the GUI.
+- Fresh repo behavior: safe runtime folders are repaired automatically, missing contract files are shown in the Startup Checklist, and `Repair Project Setup` runs the same idempotent scaffold path as `orchestrator init`.
 - PATH guidance: `orchestrator doctor` reports whether GUI launcher assets are available and whether the binary folder is on `PATH`; `orchestrator setup` prints the launch command and PATH status.
 - Does not: make planner decisions, start a build run by itself, or reinterpret human messages.
 
@@ -440,6 +447,14 @@ orchestrator version
    - Codex app-server resolves to the expected Codex CLI and `Test Codex Config` verifies `gpt-5.5`, `danger-full-access`, approval `never`, and effort `xhigh`
 
 ### Target Repo Initialization
+
+The GUI path should be enough for normal use:
+
+```powershell
+orchestrator gui
+```
+
+Fresh repos are checked and repaired from the dashboard where the operation is mechanical and safe. If you prefer the manual fallback, or if the GUI tells you to run it, use:
 
 From the target repo root:
 

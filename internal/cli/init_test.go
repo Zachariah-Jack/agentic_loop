@@ -48,6 +48,9 @@ func TestRunInitScaffoldsTargetRepoContract(t *testing.T) {
 			t.Fatalf("expected scaffold path %s: %v", path, statErr)
 		}
 	}
+	if contract := inspectTargetRepoContract(repoRoot); !contract.Ready {
+		t.Fatalf("repo contract should be ready after init, missing %#v", contract.Missing)
+	}
 
 	for _, want := range []string{
 		"command: init",
@@ -192,6 +195,34 @@ func TestRunInitPreservesExistingFiles(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("init output missing %q\n%s", want, stdout.String())
 		}
+	}
+}
+
+func TestRepairSafeRepoContractDirsRestoresMissingArtifactsIdempotently(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	layout := state.ResolveLayout(repoRoot)
+	mustMkdirAll(t, filepath.Join(repoRoot, ".orchestrator", "state"))
+	mustMkdirAll(t, filepath.Join(repoRoot, ".orchestrator", "logs"))
+
+	first, err := repairSafeRepoContractDirs(layout)
+	if err != nil {
+		t.Fatalf("repairSafeRepoContractDirs() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, ".orchestrator", "artifacts")); err != nil {
+		t.Fatalf("expected artifacts directory to be repaired: %v", err)
+	}
+	if len(first.Created) == 0 {
+		t.Fatal("first repair should report created directories")
+	}
+
+	second, err := repairSafeRepoContractDirs(layout)
+	if err != nil {
+		t.Fatalf("second repairSafeRepoContractDirs() error = %v", err)
+	}
+	if len(second.Created) != 0 {
+		t.Fatalf("second repair created %#v, want no-op", second.Created)
 	}
 }
 

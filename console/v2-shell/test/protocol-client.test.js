@@ -328,6 +328,8 @@ test("renderer exposes Aurora dashboard, setup, timeline, and goal controls", ()
   assert.match(app, /refreshSetupHealth/);
   assert.match(app, /captureRunSnapshot/);
   assert.match(app, /renderAuroraDashboard/);
+  assert.match(app, /repair_project_setup/);
+  assert.match(app, /friendlyRepoContractReadinessError/);
 });
 
 test("renderer keeps HTML element ids unique", () => {
@@ -340,6 +342,27 @@ test("renderer keeps HTML element ids unique", () => {
   }
   const duplicates = [...counts.entries()].filter(([, count]) => count > 1);
   assert.deepEqual(duplicates, []);
+});
+
+test("Aurora styles keep light/error surfaces readable in dark mode", () => {
+  const root = path.resolve(__dirname, "..");
+  const css = fs.readFileSync(path.join(root, "src", "renderer", "styles.css"), "utf8");
+
+  assert.doesNotMatch(css, /color-scheme:\s*light/i);
+  assert.match(css, /select option\s*\{[\s\S]*background:\s*#07111f/i);
+  assert.match(css, /::placeholder\s*\{[\s\S]*color:\s*#7790b0/i);
+  assert.match(css, /\.issue-box[\s\S]*color:\s*#f8fbff/i);
+  assert.match(css, /\.setup-auto-repair/);
+});
+
+test("dogfood launcher preserves Electron environment assignments", () => {
+  const projectRoot = path.resolve(__dirname, "..", "..", "..");
+  const script = fs.readFileSync(path.join(projectRoot, "scripts", "start-v2-dogfood.ps1"), "utf8");
+
+  assert.match(script, /\$artifactsPath = Join-Path \$resolvedRepoPath/);
+  assert.match(script, /dogfood\.step: repair target repo setup/);
+  assert.match(script, /`\$env:ORCHESTRATOR_V2_SHELL_ADDR/);
+  assert.match(script, /Electron shell exited before a window could stay open/);
 });
 
 test("normalizeModelHealthSnapshot lets newer successful tests clear stale Codex model errors", () => {

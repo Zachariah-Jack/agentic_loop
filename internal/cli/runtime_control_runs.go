@@ -46,6 +46,9 @@ func (m *controlRunManager) StartRun(ctx context.Context, inv Invocation, reques
 	if err := validateControlRunRepoPath(inv, request.RepoPath); err != nil {
 		return controlRunLaunchSnapshot{}, err
 	}
+	if _, err := repairSafeRepoContractDirs(inv.Layout); err != nil {
+		return controlRunLaunchSnapshot{}, err
+	}
 	if contract := inspectTargetRepoContract(inv.RepoRoot); !contract.Ready {
 		return controlRunLaunchSnapshot{}, missingControlRepoContractError("start_run", contract)
 	}
@@ -84,6 +87,9 @@ func (m *controlRunManager) StartRun(ctx context.Context, inv Invocation, reques
 
 func (m *controlRunManager) ContinueRun(ctx context.Context, inv Invocation, request control.ContinueRunRequest) (controlRunLaunchSnapshot, error) {
 	if err := validateControlRunRepoPath(inv, request.RepoPath); err != nil {
+		return controlRunLaunchSnapshot{}, err
+	}
+	if _, err := repairSafeRepoContractDirs(inv.Layout); err != nil {
 		return controlRunLaunchSnapshot{}, err
 	}
 	if contract := inspectTargetRepoContract(inv.RepoRoot); !contract.Ready {

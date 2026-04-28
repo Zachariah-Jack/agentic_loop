@@ -14,6 +14,7 @@ $binaryPath = Join-Path $projectRoot "dist\orchestrator.exe"
 $shellPath = Join-Path $projectRoot "console\v2-shell"
 $logsPath = Join-Path $resolvedRepoPath ".orchestrator\logs"
 $statePath = Join-Path $resolvedRepoPath ".orchestrator\state"
+$artifactsPath = Join-Path $resolvedRepoPath ".orchestrator\artifacts"
 $backendMetaPath = Join-Path $statePath "dogfood-backend.json"
 $ownerMarker = "orchestrator-v2-dogfood"
 
@@ -368,10 +369,22 @@ if (-not $SkipInstall -and -not (Test-Path (Join-Path $shellPath "node_modules")
 
 New-Item -ItemType Directory -Force -Path $logsPath | Out-Null
 New-Item -ItemType Directory -Force -Path $statePath | Out-Null
+New-Item -ItemType Directory -Force -Path $artifactsPath | Out-Null
 $controlOut = Join-Path $logsPath "v2-control-server.out.log"
 $controlErr = Join-Path $logsPath "v2-control-server.err.log"
 $shellOut = Join-Path $logsPath "v2-shell.out.log"
 $shellErr = Join-Path $logsPath "v2-shell.err.log"
+
+Write-Host "dogfood.step: repair target repo setup"
+Push-Location $resolvedRepoPath
+try {
+  & $binaryPath init
+  if ($LASTEXITCODE -ne 0) {
+    throw "orchestrator init failed with exit code $LASTEXITCODE"
+  }
+} finally {
+  Pop-Location
+}
 
 Stop-StaleOwnedBackendIfPresent
 if (-not (Wait-PortClear)) {
@@ -381,7 +394,7 @@ if (-not (Wait-PortClear)) {
 Warn-IfUnknownProcessOwnsPort
 
 $controlCommand = "& `"$binaryPath`" control serve --addr $ControlAddr"
-$shellCommand = "$env:ORCHESTRATOR_V2_SHELL_ADDR = `"http://$ControlAddr`"; $env:ORCHESTRATOR_V2_BACKEND_META = `"$backendMetaPath`"; $env:ORCHESTRATOR_V2_EXPECTED_REPO = `"$resolvedRepoPath`"; cd `"$shellPath`"; npm run dev"
+$shellCommand = "`$env:ORCHESTRATOR_V2_SHELL_ADDR = `"http://$ControlAddr`"; `$env:ORCHESTRATOR_V2_BACKEND_META = `"$backendMetaPath`"; `$env:ORCHESTRATOR_V2_EXPECTED_REPO = `"$resolvedRepoPath`"; cd `"$shellPath`"; npm run dev"
 
 if ($DebugVisibleWindows) {
   Write-Host "dogfood.step: launch visible control server"
@@ -440,6 +453,13 @@ try {
     "-ExecutionPolicy", "Bypass",
     "-Command", $shellCommand
   )
+
+  Start-Sleep -Seconds 2
+  if ($shellProcess.HasExited) {
+    $shellOutTail = if (Test-Path $shellOut) { (Get-Content $shellOut -Tail 40 | Out-String).Trim() } else { "" }
+    $shellErrTail = if (Test-Path $shellErr) { (Get-Content $shellErr -Tail 80 | Out-String).Trim() } else { "" }
+    throw "dogfood.error: Electron shell exited before a window could stay open. exit_code=$($shellProcess.ExitCode) shell_out=$shellOut shell_err=$shellErr`n--- shell stdout tail ---`n$shellOutTail`n--- shell stderr tail ---`n$shellErrTail"
+  }
 
   Write-Host "dogfood.status: launched"
   Write-Host "dogfood.control_server: $ControlAddr"

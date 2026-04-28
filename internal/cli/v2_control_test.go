@@ -3095,10 +3095,14 @@ func TestLocalControlServerSetupHealthActionAndSnapshotAreMechanical(t *testing.
 		filepath.Join(repoRoot, ".orchestrator", "brief.md"),
 		filepath.Join(repoRoot, ".orchestrator", "constraints.md"),
 		filepath.Join(repoRoot, ".orchestrator", "goal.md"),
+		filepath.Join(repoRoot, ".orchestrator", "artifacts"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected setup action to create %s: %v", path, err)
 		}
+	}
+	if err := os.RemoveAll(filepath.Join(repoRoot, ".orchestrator", "artifacts")); err != nil {
+		t.Fatalf("RemoveAll(artifacts) error = %v", err)
 	}
 
 	healthResponse := postControlAction(t, server.URL, `{
@@ -3117,6 +3121,13 @@ func TestLocalControlServerSetupHealthActionAndSnapshotAreMechanical(t *testing.
 	checks := healthPayload["checks"].([]any)
 	if len(checks) == 0 {
 		t.Fatal("setup health checks should be populated")
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, ".orchestrator", "artifacts")); err != nil {
+		t.Fatalf("setup health should auto-repair missing artifacts directory: %v", err)
+	}
+	repaired := healthPayload["auto_repaired"].([]any)
+	if len(repaired) == 0 {
+		t.Fatal("setup health should report auto-repaired safe directories")
 	}
 
 	snapshotResponse := postControlAction(t, server.URL, `{
@@ -3139,6 +3150,54 @@ func TestLocalControlServerSetupHealthActionAndSnapshotAreMechanical(t *testing.
 	}
 	if _, err := os.Stat(absoluteSnapshotPath); err != nil {
 		t.Fatalf("snapshot artifact was not written: %v", err)
+	}
+}
+
+func TestLocalControlServerContinueRunRepairsMissingArtifactsBeforeReadiness(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	writeRepoMarkerFiles(t, repoRoot)
+	layout := state.ResolveLayout(repoRoot)
+	configPath := filepathJoin(t, repoRoot, "config.json")
+	if err := config.Save(configPath, config.Default()); err != nil {
+		t.Fatalf("config.Save() error = %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(repoRoot, ".orchestrator", "artifacts")); err != nil {
+		t.Fatalf("RemoveAll(artifacts) error = %v", err)
+	}
+
+	inv := Invocation{
+		Stdout:     &bytes.Buffer{},
+		Stderr:     &bytes.Buffer{},
+		RepoRoot:   repoRoot,
+		Layout:     layout,
+		Config:     config.Default(),
+		ConfigPath: configPath,
+		RuntimeCfg: runtimecfg.NewManager(configPath, config.Default()),
+		Events:     activity.NewBroker(activity.DefaultHistoryLimit),
+		Version:    "test",
+	}
+	server := httptest.NewServer(newLocalControlServer(inv).Handler())
+	defer server.Close()
+
+	response := postControlAction(t, server.URL, `{
+		"id":"req_continue_repair_artifacts",
+		"type":"request",
+		"action":"continue_run",
+		"payload":{}
+	}`)
+	if response.OK {
+		t.Fatal("continue_run unexpectedly succeeded without a resumable run")
+	}
+	if response.Error == nil {
+		t.Fatal("continue_run should return a structured error")
+	}
+	if strings.Contains(response.Error.Message, "target repo contract is not ready") {
+		t.Fatalf("continue_run should repair missing artifacts before contract readiness error: %#v", response.Error)
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, ".orchestrator", "artifacts")); err != nil {
+		t.Fatalf("continue_run should repair missing artifacts directory: %v", err)
 	}
 }
 

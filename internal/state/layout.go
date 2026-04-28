@@ -41,7 +41,7 @@ func ResolveLayout(repoRoot string) Layout {
 }
 
 func EnsureRuntimeDirs(layout Layout) error {
-	for _, dir := range []string{layout.RootDir, layout.StateDir, layout.LogsDir, layout.WorkersDir} {
+	for _, dir := range []string{layout.RootDir, layout.StateDir, layout.LogsDir, filepath.Join(layout.RootDir, "artifacts"), layout.WorkersDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}

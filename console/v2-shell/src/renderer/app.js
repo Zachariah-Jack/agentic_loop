@@ -654,11 +654,15 @@ function isRepoContractReadinessError(error) {
   return /target repo contract is not ready/i.test(error && error.message ? error.message : "");
 }
 
+function isRepoContractReadinessText(value) {
+  return /target repo contract is not ready|repo contract.*missing|contract status.*missing/i.test(String(value || ""));
+}
+
 function friendlyRepoContractReadinessError(error) {
   const message = error && error.message ? error.message : "";
   const missingMatch = message.match(/missing\s+(.+?)(?:;|$)/i);
   const missing = missingMatch ? missingMatch[1].trim() : "";
-  return `Target repo contract is not ready${missing ? `; missing ${missing}` : ""}. Run orchestrator init from the target repo, then refresh the dashboard and retry.`;
+  return `Target repo contract is not ready${missing ? `; missing ${missing}` : ""}. Use Repair Project Setup, or run orchestrator init from the target repo, then refresh the dashboard and retry.`;
 }
 
 function displayErrorWithMessage(error, message) {
@@ -963,7 +967,16 @@ function renderHomeDashboard() {
   const visibleHomeError = vm.repo && vm.repo.mismatch ? vm.repo.message : vm.homeError;
   if (visibleHomeError) {
     refs.homeError.hidden = false;
-    refs.homeErrorBody.textContent = visibleHomeError;
+    if (isRepoContractReadinessText(visibleHomeError)) {
+      refs.homeErrorBody.innerHTML = `
+        <div>${escapeHTML(visibleHomeError)}</div>
+        <div class="button-row repair-action-row">
+          <button class="button button-primary" data-setup-action="repair_project_setup">Repair Project Setup</button>
+          <button class="button" data-setup-action="orchestrator_init">Run Orchestrator Init</button>
+        </div>`;
+    } else {
+      refs.homeErrorBody.textContent = visibleHomeError;
+    }
   } else {
     refs.homeError.hidden = true;
     refs.homeErrorBody.textContent = "";
@@ -1187,8 +1200,13 @@ function renderSetupHealth() {
     refs.setupHealthBody.innerHTML = `<div class="event-empty">Setup checks have not run yet. Connect to the control server or click Refresh Checks.</div>`;
     return;
   }
-  refs.setupHealthBody.innerHTML = checks.map((check) => {
-    const action = check.action ? `<button class="button button-mini" data-setup-action="${escapeHTML(check.action)}">${escapeHTML(check.action_label || "Fix")}</button>` : "";
+  const autoRepaired = state.setupHealth && Array.isArray(state.setupHealth.auto_repaired) ? state.setupHealth.auto_repaired : [];
+  const autoRepairNote = autoRepaired.length
+    ? `<div class="setup-auto-repair">Auto-repaired safe setup folders: ${escapeHTML(autoRepaired.join(", "))}</div>`
+    : "";
+  refs.setupHealthBody.innerHTML = autoRepairNote + checks.map((check) => {
+    const inFlight = state.setupActionInFlight && state.setupActionInFlight === check.action;
+    const action = check.action ? `<button class="button button-mini" data-setup-action="${escapeHTML(check.action)}" ${inFlight ? "disabled" : ""}>${escapeHTML(inFlight ? "Repairing..." : (check.action_label || "Fix"))}</button>` : "";
     return `
       <div class="setup-check setup-check-${escapeHTML(check.status || "unknown")}">
         <div>
@@ -3731,11 +3749,24 @@ async function continueRunFromHome(options = {}) {
     setFlash("success", state.runLaunch.message);
     await refreshStatus({ refreshContracts: true, quiet: true });
   } catch (error) {
-    const activeMessage = /already active/i.test(error.message || "")
+    const contractReadinessError = isRepoContractReadinessError(error);
+    const activeMessage = contractReadinessError
+      ? friendlyRepoContractReadinessError(error)
+      : /already active/i.test(error.message || "")
       ? "A run is already active for this repo. Watch progress or safe stop it first."
       : error.message;
     state.runLaunch = { inFlight: false, message: "", error: activeMessage };
-    reportIssue("continue run", error, "If another run is active, wait for it to reach a stop boundary before continuing.");
+    if (contractReadinessError) {
+      await refreshSetupHealth({ quiet: true });
+      await refreshStatus({ refreshContracts: true, quiet: true });
+    }
+    reportIssue(
+      "continue run",
+      contractReadinessError ? displayErrorWithMessage(error, activeMessage) : error,
+      contractReadinessError
+        ? "Use Repair Project Setup in the Startup Checklist. Raw protocol details remain in logs."
+        : "If another run is active, wait for it to reach a stop boundary before continuing.",
+    );
   }
 }
 
@@ -3927,6 +3958,12 @@ function wireEvents() {
     }
   });
   refs.setupHealthBody.addEventListener("click", (event) => {
+    const item = event.target.closest("[data-setup-action]");
+    if (item) {
+      void runSetupHealthAction(item.getAttribute("data-setup-action") || "");
+    }
+  });
+  refs.homeError.addEventListener("click", (event) => {
     const item = event.target.closest("[data-setup-action]");
     if (item) {
       void runSetupHealthAction(item.getAttribute("data-setup-action") || "");

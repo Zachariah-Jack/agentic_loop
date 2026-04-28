@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   --bg: #eef3ee;
   --panel: #ffffff;
   --panel-border: #d8e3d7;
@@ -2085,6 +2085,75 @@ select,
   background: rgba(127, 29, 29, 0.22);
   border-color: rgba(251, 113, 133, 0.32);
   color: #fecdd3;
+}
+
+::placeholder {
+  color: #7790b0;
+  opacity: 1;
+}
+
+select option {
+  background: #07111f;
+  color: #eff7ff;
+}
+
+input:disabled,
+textarea:disabled,
+select:disabled {
+  color: #879ab8;
+  background: rgba(15, 23, 42, 0.72);
+  -webkit-text-fill-color: #879ab8;
+}
+
+.contract-pill-missing,
+.what-happened-card-danger,
+.what-happened-card-warning,
+.attention-ask-human,
+.ask-human-answer-shell,
+.event-card-warning,
+.event-card-danger,
+.issue-box {
+  color: #f8fbff;
+  background: rgba(15, 23, 42, 0.88);
+  border-color: rgba(148, 163, 184, 0.28);
+}
+
+.contract-pill-missing,
+.event-card-danger,
+.issue-box {
+  border-color: rgba(251, 113, 133, 0.36);
+}
+
+.what-happened-card-warning,
+.attention-ask-human,
+.ask-human-answer-shell,
+.event-card-warning {
+  border-color: rgba(251, 191, 36, 0.34);
+}
+
+.issue-box .viewer-heading,
+.issue-box .issue-body,
+.what-happened-card-danger *,
+.what-happened-card-warning *,
+.attention-ask-human *,
+.ask-human-answer-shell *,
+.event-card-warning *,
+.event-card-danger * {
+  color: inherit;
+}
+
+.repair-action-row {
+  margin-top: 10px;
+}
+
+.setup-auto-repair {
+  padding: 10px 12px;
+  border: 1px solid rgba(74, 222, 128, 0.28);
+  border-radius: 10px;
+  color: #bbf7d0;
+  background: rgba(22, 101, 52, 0.18);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .flash {

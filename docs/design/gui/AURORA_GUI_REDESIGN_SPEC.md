@@ -110,6 +110,19 @@ On repo open/connect, the GUI shows mechanical setup checks:
 
 Safe one-click actions may run `git init`, create Orchestrator templates, initialize runtime folders, check Codex, verify planner config presence, and run `git config --global --add safe.directory "<repo path>"`. Codex trust must not be faked; if it cannot be automated reliably, show manual guidance.
 
+The GUI and control backend may automatically repair safe runtime directories when missing:
+
+- `.orchestrator/state/`
+- `.orchestrator/logs/`
+- `.orchestrator/artifacts/`
+- the repo worker runtime folder
+
+Missing `.orchestrator/artifacts/` must not trap the user behind a raw Continue error. Status/health refresh should repair the directory, refresh readiness, and update Start/Continue controls. Missing contract files should show `Repair Project Setup`, which runs the idempotent scaffold path and preserves existing files. The manual fallback command is:
+
+```powershell
+orchestrator init
+```
+
 ## Global Launcher
 
 Primary launch command:
@@ -126,6 +139,7 @@ Expected behavior:
 - If no repo is known, opens against the current folder so the setup checklist can guide first-run setup.
 - Uses the local control protocol and Electron shell launcher.
 - Reuses/clears only owned backend processes where supported and refuses to kill unknown listeners.
+- Repairs safe repo setup before backend launch and fails loudly with shell/control log paths if the Electron shell exits before a window can remain open.
 
 `orchestrator doctor` reports GUI launch readiness. `orchestrator setup` prints PATH/global launch guidance.
 

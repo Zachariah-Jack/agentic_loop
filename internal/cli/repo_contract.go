@@ -21,6 +21,10 @@ type repoContractEntry struct {
 	isDir bool
 }
 
+type repoContractRepairResult struct {
+	Created []string
+}
+
 func targetRepoContractEntries(repoRoot string) []repoContractEntry {
 	return []repoContractEntry{
 		{label: "AGENTS.md", path: filepath.Join(repoRoot, "AGENTS.md")},
@@ -33,6 +37,16 @@ func targetRepoContractEntries(repoRoot string) []repoContractEntry {
 		{label: ".orchestrator/state", path: filepath.Join(repoRoot, ".orchestrator", "state"), isDir: true},
 		{label: ".orchestrator/logs", path: filepath.Join(repoRoot, ".orchestrator", "logs"), isDir: true},
 		{label: ".orchestrator/artifacts", path: filepath.Join(repoRoot, ".orchestrator", "artifacts"), isDir: true},
+	}
+}
+
+func targetRepoRuntimeDirEntries(layout state.Layout) []repoContractEntry {
+	return []repoContractEntry{
+		{label: ".orchestrator", path: layout.RootDir, isDir: true},
+		{label: ".orchestrator/state", path: layout.StateDir, isDir: true},
+		{label: ".orchestrator/logs", path: layout.LogsDir, isDir: true},
+		{label: ".orchestrator/artifacts", path: filepath.Join(layout.RootDir, "artifacts"), isDir: true},
+		{label: filepath.Base(layout.WorkersDir), path: layout.WorkersDir, isDir: true},
 	}
 }
 
@@ -58,20 +72,30 @@ func inspectTargetRepoContract(repoRoot string) repoContractStatus {
 	return status
 }
 
-func ensureTargetRepoContractDirs(layout state.Layout) error {
-	dirs := []string{
-		layout.RootDir,
-		layout.StateDir,
-		layout.LogsDir,
-		filepath.Join(layout.RootDir, "artifacts"),
-		layout.WorkersDir,
-	}
-	for _, dir := range dirs {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
+func repairSafeRepoContractDirs(layout state.Layout) (repoContractRepairResult, error) {
+	result := repoContractRepairResult{}
+	for _, item := range targetRepoRuntimeDirEntries(layout) {
+		info, err := os.Stat(item.path)
+		if err == nil {
+			if !info.IsDir() {
+				return result, fmt.Errorf("%s exists but is not a directory", item.label)
+			}
+			continue
 		}
+		if !os.IsNotExist(err) {
+			return result, err
+		}
+		if err := os.MkdirAll(item.path, 0o755); err != nil {
+			return result, err
+		}
+		result.Created = append(result.Created, item.label)
 	}
-	return nil
+	return result, nil
+}
+
+func ensureTargetRepoContractDirs(layout state.Layout) error {
+	_, err := repairSafeRepoContractDirs(layout)
+	return err
 }
 
 func writeMissingRepoContractReport(stdout io.Writer, command string, repoRoot string, goal string, contract repoContractStatus) error {
