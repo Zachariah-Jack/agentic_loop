@@ -1,5 +1,5 @@
 const path = require("node:path");
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu } = require("electron");
 const { createTerminalManager } = require("./terminal-manager");
 const { shutdownWindowStateByKey, shutdownAllWindowStates } = require("./window-state-cleanup");
 const { killProcessTree, restartOwnedBackend, startBackendForRepo } = require("./backend-manager");
@@ -58,6 +58,10 @@ const expectedRepoPath = String(process.env.ORCHESTRATOR_V2_EXPECTED_REPO || "")
 const windowState = new Map();
 
 app.setName("Aurora Orchestrator");
+
+function shouldShowNativeMenu() {
+  return String(process.env.ORCHESTRATOR_SHOW_ELECTRON_MENU || "").trim() === "1";
+}
 
 function stateForWindow(browserWindow) {
   if (!browserWindow || browserWindow.isDestroyed()) {
@@ -228,12 +232,18 @@ function createWindow() {
     minHeight: 760,
     title: "Aurora Orchestrator",
     icon: path.join(__dirname, "..", "assets", "icon.svg"),
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+
+  if (!shouldShowNativeMenu()) {
+    browserWindow.setAutoHideMenuBar(true);
+    browserWindow.setMenuBarVisibility(false);
+  }
 
   const windowKey = browserWindow.webContents.id;
   browserWindow.loadFile(path.join(__dirname, "..", "src", "renderer", "index.html"));
@@ -660,6 +670,10 @@ ipcMain.handle("terminal:close", async (event, payload = {}) => {
 });
 
 app.whenReady().then(() => {
+  if (!shouldShowNativeMenu()) {
+    Menu.setApplicationMenu(null);
+  }
+
   createWindow();
 
   app.on("activate", () => {

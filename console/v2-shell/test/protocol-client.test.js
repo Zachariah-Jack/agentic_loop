@@ -427,6 +427,70 @@ test("Aurora styles keep light/error surfaces readable in dark mode", () => {
   assert.match(css, /\.setup-auto-repair/);
 });
 
+test("Aurora shell uses full-window mission-control zones and theme tokens", () => {
+  const root = path.resolve(__dirname, "..");
+  const html = fs.readFileSync(path.join(root, "src", "renderer", "index.html"), "utf8");
+  const css = fs.readFileSync(path.join(root, "src", "renderer", "styles.css"), "utf8");
+
+  for (const token of [
+    "--bg-root",
+    "--bg-shell",
+    "--surface-1",
+    "--surface-2",
+    "--surface-3",
+    "--surface-raised",
+    "--surface-input",
+    "--surface-input-focus",
+    "--text-primary",
+    "--text-secondary",
+    "--text-muted",
+    "--text-inverse",
+    "--border-soft",
+    "--border-strong",
+    "--accent-blue",
+    "--accent-cyan",
+    "--accent-purple",
+    "--accent-green",
+    "--accent-amber",
+    "--accent-red",
+    "--focus-ring",
+  ]) {
+    assert.match(css, new RegExp(token.replace("-", "\\-")));
+  }
+
+  assert.match(css, /body\s*\{[\s\S]*grid-template-rows:\s*54px 48px 46px minmax\(0, 1fr\) 28px/);
+  assert.match(css, /\.workspace-shell\s*\{[\s\S]*grid-template-columns:\s*64px minmax\(0, 1fr\)/);
+  assert.match(css, /\.aurora-shell\s*\{[\s\S]*grid-template-columns:\s*336px minmax\(460px, 1fr\) 384px/);
+  assert.match(css, /\.side-nav-item::before\s*\{[\s\S]*content:\s*attr\(data-icon\)/);
+  assert.match(html, /class="aurora-project-panel"/);
+  assert.match(html, /class="aurora-mission-panel"/);
+  assert.match(html, /class="aurora-chat-panel"/);
+  assert.doesNotMatch(html, /A polished control surface for planner-led runs/);
+});
+
+test("Electron shell hides the native menu unless explicitly requested", () => {
+  const root = path.resolve(__dirname, "..");
+  const main = fs.readFileSync(path.join(root, "electron", "main.js"), "utf8");
+
+  assert.match(main, /ORCHESTRATOR_SHOW_ELECTRON_MENU/);
+  assert.match(main, /autoHideMenuBar:\s*true/);
+  assert.match(main, /setMenuBarVisibility\(false\)/);
+  assert.match(main, /Menu\.setApplicationMenu\(null\)/);
+});
+
+test("Aurora readable controls cover selected files, editors, inputs, ntfy, and chat", () => {
+  const root = path.resolve(__dirname, "..");
+  const css = fs.readFileSync(path.join(root, "src", "renderer", "styles.css"), "utf8");
+
+  assert.match(css, /\.project-file-card:active[\s\S]*color:\s*var\(--text-primary\)/);
+  assert.match(css, /\.project-file-card\.is-goal-card\.is-saved[\s\S]*border-color:\s*rgba\(53, 226, 125, 0\.7\)/);
+  assert.match(css, /input,\s*textarea,\s*select,\s*\[contenteditable\]\s*\{[\s\S]*background:\s*var\(--surface-input\)[\s\S]*color:\s*var\(--text-primary\)/);
+  assert.match(css, /input:focus,\s*textarea:focus,\s*select:focus[\s\S]*background:\s*var\(--surface-input-focus\)[\s\S]*color:\s*var\(--text-primary\)/);
+  assert.match(css, /\.ntfy-status[\s\S]*background:\s*var\(--surface-input\)[\s\S]*color:\s*var\(--text-secondary\)/);
+  assert.match(css, /\.side-chat-item[\s\S]*color:\s*var\(--text-primary\)/);
+  assert.match(css, /select option\s*\{[\s\S]*background:\s*#07111f[\s\S]*color:\s*#eff7ff/);
+});
+
 test("Aurora gauge progress normalization uses the speedometer geometry", () => {
   assert.deepEqual(normalizeMissionProgress(0), {
     known: true,

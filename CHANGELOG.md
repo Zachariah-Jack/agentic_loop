@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.3.0-dev - 2026-04-29
+
+- Rebuilt the Aurora GUI Home surface as a full-window mission-control dashboard with a compact command bar, session tabs, top status strip, far-left icon rail, persistent Project System drawer, dominant Mission Run panel, and integrated right AI Conversation panel.
+- Hid the default Electron File/Edit/View/Window menu in normal launches while preserving an explicit `ORCHESTRATOR_SHOW_ELECTRON_MENU=1` development escape hatch.
+- Added a tokenized dark Aurora theme for root/background, panels, inputs, text, borders, accents, and focus states; restyled selected file cards, editors, inputs, ntfy fields, chat composer, warnings, previews, context menus, tabs, and active/disabled states for readable contrast.
+- Improved Mission Run visual fidelity with a larger central gauge, fixed completed-run dashboard state, status chips, timer cards, timeline, and mission controls inside the same shell layout.
+- Added renderer tests for the full-window Aurora zones, token coverage, readable selected/control states, and Electron menu hiding.
+
+Known limits:
+
+- This is still the Electron proof shell rather than the final packaged console. Inactive multi-session tabs continue to rehydrate when selected instead of maintaining background event streams.
+
 ## v1.2.2-dev - 2026-04-29
 
 - Added explicit V2 control-protocol capability fields for runtime config, `ntfy` runtime config, `test_ntfy`, and backend compatibility so the GUI can detect older backends instead of failing mysteriously.

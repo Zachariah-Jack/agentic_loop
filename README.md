@@ -63,7 +63,9 @@ What now exists in the Aurora desktop shell:
 - an optional Electron shell under `console/v2-shell/`
 - `orchestrator gui` as the primary GUI launch command from any folder
 - `orchestrator install-global` / `orchestrator repair-global` to build the current checkout binary into `bin\orchestrator.exe`, repair the Windows User PATH, and show which global `orchestrator` command wins
+- a full-window Aurora cockpit shell that removes the default centered web-page layout, hides the normal Electron menu strip, and anchors the operator view around a left icon rail, Project System drawer, central Mission Run dashboard, and right AI Conversation panel
 - a dark Aurora Mission Control dashboard with a left navigation rail, Project System drawer, central Mission Run gauge/timeline, right AI Conversation panel, and lower mission controls
+- a tokenized dark GUI theme for readable file cards, selected states, text editors, textareas, inputs, selects, ntfy settings, chat composers, warnings, previews, context menus, buttons, and focus states
 - a top Aurora session tab strip so one GUI window can hold multiple independent repo sessions, with folder-picker `+ New`, close, and right-click rename
 - a guided Home dashboard that answers "am I connected, which repo is loaded, is the loop running, does it need me, what happened, and what should I click next"
 - a top always-visible status strip with plain connection labels (`Ready`, `Not Connected`, `Connecting`, `Reconnecting`), connected/connecting timers, repo root, run id, loop status, blocker, verbosity, update, and connect controls

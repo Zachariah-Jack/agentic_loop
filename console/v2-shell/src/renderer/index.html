@@ -9,10 +9,12 @@
   </head>
   <body>
     <header class="app-header">
-      <div>
-        <div class="eyebrow">Aurora Orchestrator</div>
-        <h1>AI Mission Control for Windows</h1>
-        <p class="subtitle">A polished control surface for planner-led runs, Codex execution, setup health, project files, logs, and explicit operator actions.</p>
+      <div class="brand-lockup">
+        <img class="brand-mark" src="../../assets/icon.svg" alt="" />
+        <div>
+          <div class="eyebrow">Aurora Orchestrator</div>
+          <h1>Mission Control</h1>
+        </div>
       </div>
       <div id="connection-badge" class="badge badge-disconnected">disconnected: not connected</div>
     </header>
@@ -49,16 +51,16 @@
 
     <div class="workspace-shell">
       <aside class="side-nav" aria-label="Console sections">
-        <button class="side-nav-item active" data-tab-target="home">Home</button>
-        <button class="side-nav-item" data-tab-target="run">Run</button>
-        <button class="side-nav-item" data-tab-target="attention">Action Required <span id="attention-badge" class="nav-badge" hidden>0</span></button>
-        <button class="side-nav-item" data-tab-target="chat">Chat</button>
-        <button class="side-nav-item" data-tab-target="files">Files</button>
-        <button class="side-nav-item" data-tab-target="activity">Live Output</button>
-        <button class="side-nav-item" data-tab-target="workers">Workers</button>
-        <button class="side-nav-item" data-tab-target="terminal">Terminal</button>
-        <button class="side-nav-item" data-tab-target="settings">Settings</button>
-        <button class="side-nav-item" data-tab-target="dogfood">Dogfood Notes</button>
+        <button class="side-nav-item active" data-tab-target="home" data-icon="H" title="Home"><span class="nav-label">Home</span></button>
+        <button class="side-nav-item" data-tab-target="run" data-icon="R" title="Run"><span class="nav-label">Run</span></button>
+        <button class="side-nav-item" data-tab-target="attention" data-icon="!" title="Action Required"><span class="nav-label">Action Required</span><span id="attention-badge" class="nav-badge" hidden>0</span></button>
+        <button class="side-nav-item" data-tab-target="chat" data-icon="C" title="Chat"><span class="nav-label">Chat</span></button>
+        <button class="side-nav-item" data-tab-target="files" data-icon="F" title="Files"><span class="nav-label">Files</span></button>
+        <button class="side-nav-item" data-tab-target="activity" data-icon="L" title="Live Output"><span class="nav-label">Live Output</span></button>
+        <button class="side-nav-item" data-tab-target="workers" data-icon="W" title="Workers"><span class="nav-label">Workers</span></button>
+        <button class="side-nav-item" data-tab-target="terminal" data-icon="T" title="Terminal"><span class="nav-label">Terminal</span></button>
+        <button class="side-nav-item" data-tab-target="settings" data-icon="S" title="Settings"><span class="nav-label">Settings</span></button>
+        <button class="side-nav-item" data-tab-target="dogfood" data-icon="D" title="Dogfood Notes"><span class="nav-label">Dogfood Notes</span></button>
       </aside>
 
     <main class="app-grid">
@@ -66,7 +68,7 @@
         <div class="aurora-topline">
           <div>
             <div class="eyebrow">Aurora Orchestrator</div>
-            <h2>AI Mission Control for Windows</h2>
+            <h2>Operator Dashboard</h2>
             <p id="home-recommendation-title" class="home-recommendation-title">Connect to the control server.</p>
             <p id="home-recommendation-detail" class="home-recommendation-detail">Start the local control server, then connect this shell.</p>
             <p id="home-refresh-meta" class="panel-meta">Last refreshed: Not refreshed yet</p>
@@ -182,14 +184,14 @@
                   <span id="aurora-progress-subtitle">No planner progress available yet.</span>
                 </div>
               </div>
-              <div class="mission-facts">
-                <div class="home-kv"><span>Run ID</span><strong id="aurora-run-id">No active run</strong></div>
-                <div id="aurora-timers" class="mission-timers"></div>
-                <div id="cycle-history" class="cycle-history"></div>
-                <div id="aurora-meta" class="mission-meta-grid"></div>
-              </div>
             </div>
             <div id="aurora-status-chips" class="mission-chip-row"></div>
+            <div class="mission-facts">
+              <div class="home-kv run-id-card"><span>Run ID</span><strong id="aurora-run-id">No active run</strong></div>
+              <div id="aurora-timers" class="mission-timers"></div>
+              <div id="cycle-history" class="cycle-history"></div>
+              <div id="aurora-meta" class="mission-meta-grid"></div>
+            </div>
             <div class="mission-controls">
               <button id="home-start-run" class="button button-primary">Start Build</button>
               <button id="aurora-continue" class="button">Continue</button>

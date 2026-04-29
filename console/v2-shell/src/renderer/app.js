@@ -1047,6 +1047,15 @@ const projectFilePurposes = {
   "AGENTS.md": "Repo instructions for AI agents.",
 };
 
+const projectFileCards = {
+  ".orchestrator/brief.md": { icon: "BR", title: "brief.md", tone: "blue" },
+  ".orchestrator/roadmap.md": { icon: "RM", title: "roadmap.md", tone: "cyan" },
+  ".orchestrator/constraints.md": { icon: "CT", title: "constraints.md", tone: "purple" },
+  ".orchestrator/decisions.md": { icon: "DC", title: "decisions.md", tone: "amber" },
+  ".orchestrator/human-notes.md": { icon: "HN", title: "human-notes.md", tone: "slate" },
+  ".orchestrator/goal.md": { icon: "GO", title: "goal", tone: "green" },
+};
+
 const auroraTimelineCategorySets = {
   all: {},
   planner: { planner: true },
@@ -1397,20 +1406,22 @@ function renderAuroraDashboard() {
     nowMs: Date.now(),
     snapshotAtMs: state.lastRefreshedAt ? new Date(state.lastRefreshedAt).getTime() : Date.now(),
   });
-  const actionLabel = state.runLaunch.inFlight
+  let actionLabel = state.runLaunch.inFlight
     ? "Submitting explicit run action"
     : (pendingVM.present ? pendingVM.summary : (statusVM.nextOperatorAction || loopVM.detail || "Waiting for explicit operator action"));
-  const currentStage = statusVM.checkpointStage !== "Unavailable"
+  let currentStage = statusVM.checkpointStage !== "Unavailable"
     ? statusVM.checkpointStage
     : (run.activity_state || loopVM.state || "waiting");
+  if (statusVM.completed || loopVM.state === "completed") {
+    currentStage = "Run complete";
+    actionLabel = "Planner declared run complete. Review artifacts or start a new run.";
+  }
 
   refs.auroraGauge.classList.toggle("is-indeterminate", !progressGeometry.known);
   refs.auroraGauge.style.setProperty("--gauge-arc", `${progressGeometry.arcDegrees}deg`);
   refs.auroraGauge.style.setProperty("--gauge-angle", `${progressGeometry.needleAngleDegrees}deg`);
   refs.auroraProgressLabel.textContent = progressGeometry.known ? progressGeometry.percentLabel : "Phase";
-  refs.auroraProgressSubtitle.textContent = progressKnown
-    ? `${progressVM.progressConfidence} confidence from planner status`
-    : `${loopVM.label}: ${loopVM.detail}`;
+  refs.auroraProgressSubtitle.textContent = "OVERALL PROGRESS";
   refs.auroraSystemState.textContent = runStateLabelForAurora(loopVM);
   refs.auroraRepoLabel.textContent = shortPathName(runtime.repo_root || activeRepoPath() || "No repo loaded");
   refs.auroraBranchLabel.textContent = latestBranchLabel(state.snapshot);
@@ -1490,11 +1501,17 @@ function renderProjectSystem() {
     .map((path) => {
       const file = byPath.get(path) || { path, exists: false, modified_at: "" };
       const status = file.exists ? "saved" : "missing";
+      const card = projectFileCards[path] || { icon: "FI", title: shortPathName(path), tone: "slate" };
+      const goalClass = path === ".orchestrator/goal.md" ? "is-goal-card" : "";
       return `
-        <button class="project-file-card ${file.exists ? "is-saved" : "is-missing"}" data-project-file="${escapeHTML(path)}">
-          <span class="project-file-name">${escapeHTML(shortPathName(path))}</span>
-          <span class="project-file-purpose">${escapeHTML(projectFilePurposes[path] || "Project system file.")}</span>
-          <span class="project-file-meta">${escapeHTML(status)}${file.modified_at ? ` | ${escapeHTML(file.modified_at)}` : ""}</span>
+        <button class="project-file-card ${file.exists ? "is-saved" : "is-missing"} ${goalClass}" data-project-file="${escapeHTML(path)}">
+          <span class="project-file-icon project-file-icon-${escapeHTML(card.tone)}">${escapeHTML(card.icon)}</span>
+          <span class="project-file-copy">
+            <span class="project-file-name">${escapeHTML(card.title)}</span>
+            <span class="project-file-purpose">${escapeHTML(projectFilePurposes[path] || "Project system file.")}</span>
+            <span class="project-file-meta">${file.modified_at ? `Updated ${escapeHTML(file.modified_at)}` : "Last update unavailable"}</span>
+          </span>
+          <span class="project-file-status">${escapeHTML(status)}</span>
         </button>
       `;
     });
