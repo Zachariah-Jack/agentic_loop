@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.2.2-dev - 2026-04-29
+
+- Added explicit V2 control-protocol capability fields for runtime config, `ntfy` runtime config, `test_ntfy`, and backend compatibility so the GUI can detect older backends instead of failing mysteriously.
+- Kept the canonical Home ntfy payload as `{"ntfy":{"server_url":"...","topic":"...","auth_token":"..."}}`, with optional auth token and masked status responses.
+- Changed strict payload failures to return friendly protocol mismatch messages instead of raw Go JSON decoder text.
+- Updated the Aurora renderer to show “Backend is running an older protocol. Restart Aurora GUI.” guidance for stale backends and to avoid showing raw `json: unknown field "ntfy"` errors.
+- Added backend binary/protocol version and ntfy runtime-config support to debug bundles.
+- Hardened dogfood GUI launch/recovery so an owned backend that is actively processing a run is not stopped automatically.
+
+Known limits:
+
+- A backend already running from an older binary cannot learn the new protocol fields in place. If active work is processing, wait for a safe boundary or request Safe Stop before restarting the GUI/backend.
+
 ## v1.2.1-dev - 2026-04-28
 
 - Added `orchestrator install-global` and `orchestrator repair-global` to build the current checkout binary into repo-relative `bin\orchestrator.exe`, move that bin folder to the front of the Windows User PATH, update the current process PATH, and report the winning `orchestrator` executable.

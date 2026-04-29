@@ -112,6 +112,7 @@ Implemented on top of the protocol now:
 - protocol-backed setup health checks, safe setup actions, goal save, and run snapshots for the Aurora dashboard
 - protocol-backed global launcher health and repair through the setup checklist
 - protocol-backed Home ntfy save/test through runtime config and `test_ntfy`
+- explicit backend protocol capability fields for runtime config, `ntfy` runtime config, and `test_ntfy`, so the GUI can identify older incompatible backends and ask the operator to restart instead of showing raw strict-JSON errors
 - Aurora multi-session tabs that keep per-repo shell state isolated and route actions to the active tab address
 - protocol-backed read-only repo browsing for tree listing and file opening
 - embedded local operator terminal tabs for shell convenience
@@ -757,6 +758,20 @@ Config updates are persisted immediately. They apply to future operations immedi
 
 ntfy config updates are mechanical operator settings. Status/runtime-config snapshots may show server URL, topic, configured state, and whether an auth token is saved, but must never echo the token. Saving ntfy config does not change planner/executor control flow; it only changes the notification/reply channel used by future human-intervention waits.
 
+The canonical ntfy runtime-config payload is:
+
+```json
+{
+  "ntfy": {
+    "server_url": "https://ntfy.sh",
+    "topic": "example-private-topic",
+    "auth_token": "optional-token"
+  }
+}
+```
+
+The server URL is the ntfy server root, not the topic URL. For public ntfy.sh, use `server_url:"https://ntfy.sh"` or `server_url:"https://ntfy.sh/"` and put the topic in `topic`. The auth token is optional and must never be echoed in full. Backends that do not support this payload must return a friendly protocol-mismatch error; the GUI must show restart guidance such as “Backend is running an older protocol. Restart Aurora GUI.”
+
 Permission profiles are mechanical policy labels and toggles:
 
 - `guided`
@@ -1288,6 +1303,16 @@ Suggested shape:
 
 ```json
 {
+  "protocol": {
+    "version": "v2.2",
+    "supports": {
+      "runtime_config": true,
+      "ntfy_runtime_config": true,
+      "test_ntfy": true,
+      "backend_compatibility": true,
+      "runtime_config_field_list": true
+    }
+  },
   "backend": {
     "pid": 1234,
     "started_at": "2026-04-24T14:00:00Z",
@@ -1296,11 +1321,13 @@ Suggested shape:
     "binary_version": "v1.0.1-dev",
     "binary_revision": "abc123",
     "binary_build_time": "2026-04-24T13:59:00Z",
+    "protocol_version": "v2.2",
     "repo_root": "D:\\Projects\\target_repo",
     "control_address": "http://127.0.0.1:44777",
     "owner": "orchestrator-v2-dogfood",
     "owner_session_id": "session_abc",
     "owner_metadata_path": "D:\\Projects\\target_repo\\.orchestrator\\state\\dogfood-backend.json",
+    "supports_ntfy_runtime_config": true,
     "stale": false,
     "stale_reason": ""
   },
@@ -1328,6 +1355,8 @@ Suggested shape:
   },
   "runtime": {
     "engine_mode": "headless_or_console_attached",
+    "protocol_version": "v2.2",
+    "supports_ntfy_runtime_config": true,
     "repo_ready": true,
     "repo_contract_missing": [],
     "planner_ready": true,

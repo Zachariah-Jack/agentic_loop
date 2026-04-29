@@ -130,6 +130,12 @@ func TestServerSetRuntimeConfigRejectsUnknownFields(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), `"code":"invalid_payload"`) {
 		t.Fatalf("response missing invalid_payload\n%s", recorder.Body.String())
 	}
+	if !strings.Contains(recorder.Body.String(), `unsupported field`) {
+		t.Fatalf("response missing friendly unsupported-field message\n%s", recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), `json: unknown field`) {
+		t.Fatalf("response exposed raw Go JSON decoder error\n%s", recorder.Body.String())
+	}
 }
 
 func TestServerSetRuntimeConfigAcceptsTimeoutPatch(t *testing.T) {
@@ -165,6 +171,55 @@ func TestServerSetRuntimeConfigAcceptsTimeoutPatch(t *testing.T) {
 	}
 }
 
+func TestServerSetRuntimeConfigAcceptsNtfyPatch(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	server := Server{
+		Actions: ActionSet{
+			SetRuntimeConfig: func(_ context.Context, patch runtimecfg.Patch) (any, error) {
+				called = true
+				if patch.NTFY.ServerURL == nil || *patch.NTFY.ServerURL != "https://ntfy.sh" {
+					t.Fatalf("NTFY.ServerURL = %#v, want https://ntfy.sh", patch.NTFY.ServerURL)
+				}
+				if patch.NTFY.Topic == nil || *patch.NTFY.Topic != "aurora-test" {
+					t.Fatalf("NTFY.Topic = %#v, want aurora-test", patch.NTFY.Topic)
+				}
+				if patch.NTFY.AuthToken == nil || *patch.NTFY.AuthToken != "secret" {
+					t.Fatalf("NTFY.AuthToken = %#v, want secret", patch.NTFY.AuthToken)
+				}
+				return map[string]any{
+					"ntfy": map[string]any{
+						"configured":       true,
+						"server_url":       *patch.NTFY.ServerURL,
+						"topic":            *patch.NTFY.Topic,
+						"auth_token_saved": true,
+					},
+				}, nil
+			},
+		},
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v2/control", bytes.NewBufferString(`{
+		"id":"req_ntfy",
+		"type":"request",
+		"action":"set_runtime_config",
+		"payload":{"ntfy":{"server_url":"https://ntfy.sh","topic":"aurora-test","auth_token":"secret"}}
+	}`))
+
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200\n%s", recorder.Code, recorder.Body.String())
+	}
+	if !called {
+		t.Fatal("SetRuntimeConfig handler was not called")
+	}
+	if strings.Contains(recorder.Body.String(), "secret") {
+		t.Fatalf("response exposed auth token\n%s", recorder.Body.String())
+	}
+}
+
 func TestServerRoutesUpdateActions(t *testing.T) {
 	t.Parallel()
 
@@ -174,7 +229,7 @@ func TestServerRoutesUpdateActions(t *testing.T) {
 				return map[string]any{"checked": true}, nil
 			},
 			GetUpdateStatus: func(_ context.Context) (any, error) {
-				return map[string]any{"current_version": "v1.2.1-dev"}, nil
+				return map[string]any{"current_version": "v1.2.2-dev"}, nil
 			},
 			GetUpdateChangelog: func(_ context.Context, _ UpdateRequest) (any, error) {
 				return map[string]any{"changelog": "changes"}, nil

@@ -104,13 +104,30 @@ func TestLocalControlServerGetStatusSnapshotAction(t *testing.T) {
 	}
 
 	payload := response.Payload.(map[string]any)
+	protocol := payload["protocol"].(map[string]any)
+	if protocol["version"] != controlProtocolVersion {
+		t.Fatalf("protocol.version = %#v, want %s", protocol["version"], controlProtocolVersion)
+	}
+	protocolSupports := protocol["supports"].(map[string]any)
+	if protocolSupports["ntfy_runtime_config"] != true {
+		t.Fatalf("protocol.supports.ntfy_runtime_config = %#v, want true", protocolSupports["ntfy_runtime_config"])
+	}
 	backend := payload["backend"].(map[string]any)
 	if backend["pid"] == nil || backend["started_at"] == "" || backend["binary_version"] == "" {
 		t.Fatalf("backend identity missing required fields: %#v", backend)
 	}
+	if backend["protocol_version"] != controlProtocolVersion {
+		t.Fatalf("backend.protocol_version = %#v, want %s", backend["protocol_version"], controlProtocolVersion)
+	}
+	if backend["supports_ntfy_runtime_config"] != true {
+		t.Fatalf("backend.supports_ntfy_runtime_config = %#v, want true", backend["supports_ntfy_runtime_config"])
+	}
 	runtimeSnapshot := payload["runtime"].(map[string]any)
 	if runtimeSnapshot["verbosity"] != "normal" {
 		t.Fatalf("runtime.verbosity = %#v, want normal", runtimeSnapshot["verbosity"])
+	}
+	if runtimeSnapshot["supports_ntfy_runtime_config"] != true {
+		t.Fatalf("runtime.supports_ntfy_runtime_config = %#v, want true", runtimeSnapshot["supports_ntfy_runtime_config"])
 	}
 	plannerStatus := payload["planner_status"].(map[string]any)
 	if plannerStatus["present"] != true {

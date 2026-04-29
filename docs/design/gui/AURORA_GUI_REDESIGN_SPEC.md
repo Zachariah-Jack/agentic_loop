@@ -129,6 +129,8 @@ Home includes first-class ntfy configuration for the active repo/session:
 
 Saving ntfy config is a mechanical runtime-config action and may take effect immediately for future planner ask-human waits. Test sends a real ntfy notification and must report failure truthfully. Inbound ntfy replies are persisted raw and forwarded through the same human-input path as GUI replies. The GUI must not parse reply prose as control, and the planner must continue through structured planner outcomes such as execute, collect_context, ask_human, pause, or complete.
 
+The canonical ntfy payload sent through `set_runtime_config` is `{"ntfy":{"server_url":"https://ntfy.sh","topic":"example-topic","auth_token":"optional-token"}}`. The server URL is the ntfy server root, not the topic URL; the topic belongs in the separate topic field. Aurora must detect older backends that do not advertise `ntfy_runtime_config` support and show “Backend is running an older protocol. Restart Aurora GUI.” rather than raw JSON decoder text.
+
 ## Startup Checklist
 
 On repo open/connect, the GUI shows mechanical setup checks:

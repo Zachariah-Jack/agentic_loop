@@ -1,9 +1,10 @@
 const defaultBaseURL = "http://127.0.0.1:44777";
 
 function makeProtocolError(action, message, extra = {}) {
-  const error = new Error(message);
+  const error = new Error(friendlyProtocolMessage(action, message, extra));
   error.name = "ProtocolError";
   error.action = action;
+  error.rawMessage = message;
   if (extra.code) {
     error.code = extra.code;
   }
@@ -14,6 +15,20 @@ function makeProtocolError(action, message, extra = {}) {
     error.address = extra.address;
   }
   return error;
+}
+
+function friendlyProtocolMessage(action, message, extra = {}) {
+  const text = String(message || "").trim();
+  const code = String(extra && extra.code || "").trim();
+  if (action === "set_runtime_config" && /unknown field ["']?ntfy["']?/i.test(text)) {
+    return "Backend is running an older control protocol that does not support Home ntfy settings. Restart Aurora GUI with the current orchestrator binary, then use Save & Test ntfy again.";
+  }
+  if (code === "invalid_payload" && /unknown field ["']?([^"']+)["']?/i.test(text)) {
+    const field = text.match(/unknown field ["']?([^"']+)["']?/i);
+    const fieldName = field && field[1] ? field[1].trim() : "a field";
+    return `The connected backend rejected ${action} because the GUI/backend protocol versions do not match: unsupported field ${fieldName}. Restart Aurora GUI and reconnect to the current backend.`;
+  }
+  return text || `control action ${action} failed`;
 }
 
 function normalizeControlBaseURL(baseURL) {
@@ -335,6 +350,7 @@ async function parseNDJSONStream(stream, onRecord, signal) {
 
 module.exports = {
   normalizeControlBaseURL,
+  friendlyProtocolMessage,
   callControlAction,
   getStatusSnapshot,
   startRun,

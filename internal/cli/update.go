@@ -113,7 +113,7 @@ func checkUpdateStatus(ctx context.Context, inv Invocation, request updateAction
 		includePrereleases = *request.IncludePrereleases
 	}
 	status, err := updater.Check(ctx, updater.Settings{
-		CurrentVersion:     buildinfo.Current().Version,
+		CurrentVersion:     runtimeVersion(inv),
 		IncludePrereleases: includePrereleases,
 	})
 	snapshot := buildUpdateStatusSnapshot(inv, cfg.Updates, &status)
@@ -191,7 +191,7 @@ func buildUpdateStatusSnapshot(inv Invocation, settings config.Updates, status *
 	build := buildinfo.Current()
 	snapshot := controlUpdateStatusSnapshot{
 		Settings:         buildUpdateSettingsSnapshot(settings),
-		CurrentVersion:   build.Version,
+		CurrentVersion:   runtimeVersion(inv),
 		InstallSupported: false,
 		InstallMessage:   "Install is not automated yet; update check and changelog display are available.",
 		Message:          "GitHub release checks are available. Safe Windows self-install remains deferred until signed/checksummed assets are published.",
@@ -200,7 +200,7 @@ func buildUpdateStatusSnapshot(inv Invocation, settings config.Updates, status *
 		return snapshot
 	}
 	snapshot.CheckedAt = formatSnapshotTime(status.CheckedAt)
-	snapshot.CurrentVersion = firstNonEmpty(strings.TrimSpace(status.CurrentVersion), build.Version)
+	snapshot.CurrentVersion = firstNonEmpty(strings.TrimSpace(status.CurrentVersion), runtimeVersion(inv), build.Version)
 	snapshot.LatestVersion = strings.TrimSpace(status.LatestVersion)
 	snapshot.UpdateAvailable = status.UpdateAvailable
 	snapshot.ReleaseURL = strings.TrimSpace(status.ReleaseURL)

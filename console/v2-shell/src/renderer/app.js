@@ -153,6 +153,10 @@ const state = {
     lastTest: null,
     error: "",
   },
+  backendCompatibility: {
+    ntfyRuntimeConfig: "unknown",
+    message: "",
+  },
   sideChat: { available: true, count: 0, items: [], message: "No side chat messages loaded yet." },
   dogfoodIssues: { available: true, count: 0, items: [], message: "No dogfood issues loaded yet." },
   selectedDogfoodIssueID: persistedShellSession.selectedDogfoodIssueID || "",
@@ -872,6 +876,104 @@ function displayErrorWithMessage(error, message) {
   return displayError;
 }
 
+function parseVersionParts(value) {
+  const match = String(value || "").trim().match(/v?(\d+)\.(\d+)\.(\d+)/i);
+  if (!match) {
+    return null;
+  }
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function versionAtLeast(value, minimum) {
+  const actual = parseVersionParts(value);
+  const required = parseVersionParts(minimum);
+  if (!actual || !required) {
+    return false;
+  }
+  for (let index = 0; index < required.length; index += 1) {
+    if (actual[index] > required[index]) {
+      return true;
+    }
+    if (actual[index] < required[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function backendVersionForCompatibility() {
+  const backend = state.snapshot && state.snapshot.backend ? state.snapshot.backend : {};
+  const runtime = state.snapshot && state.snapshot.runtime ? state.snapshot.runtime : {};
+  const updateStatus = state.updateStatus || {};
+  return backend.binary_version || runtime.version || runtime.binary_version || updateStatus.current_version || "";
+}
+
+function ntfyRuntimeConfigSupportState() {
+  const snapshot = state.snapshot || {};
+  const backend = snapshot.backend || {};
+  const runtime = snapshot.runtime || {};
+  const protocol = snapshot.protocol || {};
+  const protocolSupports = protocol.supports || {};
+  const backendSupports = backend.supports || {};
+  const fields = state.runtimeConfig && Array.isArray(state.runtimeConfig.mutable_fields)
+    ? state.runtimeConfig.mutable_fields
+    : [];
+  if (
+    backend.supports_ntfy_runtime_config === true ||
+    runtime.supports_ntfy_runtime_config === true ||
+    protocolSupports.ntfy_runtime_config === true ||
+    backendSupports.ntfy_runtime_config === true ||
+    fields.includes("ntfy.server_url")
+  ) {
+    return "yes";
+  }
+  const version = backendVersionForCompatibility();
+  if (version && versionAtLeast(version, "v1.2.1-dev")) {
+    return "yes";
+  }
+  if (version && !versionAtLeast(version, "v1.2.1-dev")) {
+    return "no";
+  }
+  if (state.runtimeConfig && fields.length > 0 && !fields.includes("ntfy.server_url")) {
+    return "no";
+  }
+  return "unknown";
+}
+
+function backendCompatibilityMessage() {
+  if (!state.connection.connected && !state.snapshot) {
+    return "";
+  }
+  if (ntfyRuntimeConfigSupportState() !== "no") {
+    return "";
+  }
+  const version = backendVersionForCompatibility() || "unknown";
+  return `Backend is running an older protocol (${version}) and cannot save Home ntfy settings. Restart Aurora GUI with the current orchestrator binary; if a run is actively processing, wait for a safe boundary before restarting.`;
+}
+
+function updateBackendCompatibilityNotice() {
+  const support = ntfyRuntimeConfigSupportState();
+  const message = backendCompatibilityMessage();
+  state.backendCompatibility = {
+    ntfyRuntimeConfig: support,
+    message,
+  };
+  if (message) {
+    state.ntfy.error = message;
+  } else if (state.ntfy.error && /older protocol|unknown field ["']?ntfy/i.test(state.ntfy.error)) {
+    state.ntfy.error = "";
+  }
+  return message;
+}
+
+function friendlyNtfyRuntimeConfigError(error) {
+  const message = error && error.message ? String(error.message) : "";
+  if (/unknown field ["']?ntfy["']?/i.test(message) || /older control protocol/i.test(message)) {
+    return "Backend is running an older control protocol that does not support Home ntfy settings. Restart Aurora GUI with the current orchestrator binary, then use Save & Test ntfy again.";
+  }
+  return message || "ntfy test failed";
+}
+
 function clearIssue() {
   state.lastIssue = null;
   state.homeError = "";
@@ -1487,14 +1589,21 @@ function renderNtfyCard() {
   const listening = cfg.listening || (configured ? "active during planner ask-human waits" : "not listening");
   const lastTest = state.ntfy.lastTest ? ` | last test: ${state.ntfy.lastTest.status || state.ntfy.lastTest.message || "sent"}` : "";
   const tokenLabel = cfg.auth_token_saved ? " | auth token saved" : "";
-  const error = state.ntfy.error ? ` | ${state.ntfy.error}` : "";
+  const compatibility = state.backendCompatibility && state.backendCompatibility.message ? state.backendCompatibility.message : "";
+  const errorText = state.ntfy.error || compatibility;
+  const error = errorText ? ` | ${errorText}` : "";
   refs.ntfyStatus.className = `ntfy-status ${configured ? "is-configured" : "is-missing"} ${state.ntfy.error ? "is-error" : ""}`;
   refs.ntfyStatus.textContent = configured
     ? `configured | listening: ${listening}${tokenLabel}${lastTest}${error}`
     : `not configured | listening: not listening${error}`;
   if (refs.ntfySaveTestButton) {
-    refs.ntfySaveTestButton.disabled = Boolean(state.ntfy.inFlight);
+    refs.ntfySaveTestButton.disabled = Boolean(state.ntfy.inFlight) || state.backendCompatibility.ntfyRuntimeConfig === "no";
     refs.ntfySaveTestButton.textContent = state.ntfy.inFlight ? "Testing..." : "Save & Test ntfy";
+    if (state.backendCompatibility.ntfyRuntimeConfig === "no") {
+      refs.ntfySaveTestButton.title = "Restart Aurora GUI with the current backend before saving ntfy settings.";
+    } else {
+      refs.ntfySaveTestButton.removeAttribute("title");
+    }
   }
 }
 
@@ -2564,9 +2673,22 @@ async function connect(options = {}) {
     clearReconnectTimer();
     state.reconnect.attempts = 0;
     clearIssue();
+    const compatibilityMessage = updateBackendCompatibilityNotice();
     renderAll();
     maybeFocusActionRequired();
-    setFlash("success", options.automatic ? "Reconnected to the control server." : "Connected to the control server.");
+    if (compatibilityMessage) {
+      state.lastIssue = {
+        scope: "backend protocol",
+        message: compatibilityMessage,
+        at: new Date().toISOString(),
+      };
+      state.homeError = compatibilityMessage;
+      renderIssue();
+      renderHomeDashboard();
+      setFlash("error", compatibilityMessage);
+    } else {
+      setFlash("success", options.automatic ? "Reconnected to the control server." : "Connected to the control server.");
+    }
     void autoTestModelHealth("connect");
   } catch (error) {
     state.connection = {
@@ -2636,6 +2758,7 @@ async function hydrateProtocolBackedPanels(refreshContracts = false) {
   } else {
     reportIssue("setup checks", setupHealthResult.reason, "Fresh-repo setup checks could not be refreshed.");
   }
+  updateBackendCompatibilityNotice();
   ensureSelectedWorker();
   ensureSelectedDogfoodIssue();
 
@@ -2882,6 +3005,13 @@ async function saveAndTestNtfy() {
     setFlash("error", "ntfy server URL and topic are required before testing.");
     return;
   }
+  const compatibilityMessage = updateBackendCompatibilityNotice();
+  if (state.backendCompatibility.ntfyRuntimeConfig === "no") {
+    state.ntfy.error = compatibilityMessage || "Backend is running an older protocol. Restart Aurora GUI before saving ntfy settings.";
+    renderNtfyCard();
+    reportIssue("ntfy test", displayErrorWithMessage(new Error(state.ntfy.error), state.ntfy.error), "Save & Test ntfy needs a backend that supports runtime ntfy config.");
+    return;
+  }
   state.ntfy.inFlight = true;
   state.ntfy.error = "";
   renderNtfyCard();
@@ -2908,8 +3038,8 @@ async function saveAndTestNtfy() {
     renderNtfyCard();
     setFlash("success", state.ntfy.lastTest.message || "ntfy config saved and test notification sent.");
   } catch (error) {
-    state.ntfy.error = error.message || "ntfy test failed";
-    reportIssue("ntfy test", error, "Configuration was not marked verified. Check the server URL, topic, and optional token.");
+    state.ntfy.error = friendlyNtfyRuntimeConfigError(error);
+    reportIssue("ntfy test", displayErrorWithMessage(error, state.ntfy.error), "Configuration was not marked verified. Check the server URL, topic, optional token, and backend protocol version.");
   } finally {
     state.ntfy.inFlight = false;
     renderNtfyCard();
@@ -3722,6 +3852,17 @@ async function restartBackend() {
   try {
     const guardBefore = staleActiveRunGuard();
     const backend = state.snapshot && state.snapshot.backend ? state.snapshot.backend : {};
+    const activeWork = Boolean(
+      state.snapshot &&
+      (
+        (state.snapshot.run && state.snapshot.run.actively_processing) ||
+        (state.snapshot.active_run_guard && state.snapshot.active_run_guard.currently_processing)
+      )
+    );
+    if (activeWork && !window.confirm("The backend is actively processing a run. Restarting can interrupt active work. Wait for a safe boundary unless you explicitly intend to restart now. Continue with backend restart?")) {
+      setFlash("info", "Backend restart cancelled. Active work was left running.");
+      return;
+    }
     if (guardBefore && backend.stale !== true) {
       setFlash("info", "Clearing stale active-run guard...");
       const recovery = await recoverStaleRunGuard("operator_recovery");

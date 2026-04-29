@@ -1084,7 +1084,7 @@ func invalidPayload(req RequestEnvelope, err error) ResponseEnvelope {
 		ID:    req.ID,
 		Type:  "response",
 		OK:    false,
-		Error: &ErrorEnvelope{Code: "invalid_payload", Message: err.Error()},
+		Error: &ErrorEnvelope{Code: "invalid_payload", Message: friendlyPayloadError(req.Action, err)},
 	}
 }
 
@@ -1099,6 +1099,46 @@ func actionError(req RequestEnvelope, code string, err error) ResponseEnvelope {
 		OK:    false,
 		Error: &ErrorEnvelope{Code: code, Message: err.Error()},
 	}
+}
+
+func friendlyPayloadError(action string, err error) string {
+	if err == nil {
+		return "invalid protocol payload"
+	}
+	message := strings.TrimSpace(err.Error())
+	if field := unknownJSONField(message); field != "" {
+		if strings.TrimSpace(action) == "set_runtime_config" && field == "ntfy" {
+			return "set_runtime_config does not support the ntfy payload on this backend protocol; restart Aurora GUI with the current orchestrator binary, then try Save & Test ntfy again"
+		}
+		return fmt.Sprintf("invalid %s payload: unsupported field %q; restart Aurora GUI if the frontend/backend protocol versions do not match", firstNonEmpty(strings.TrimSpace(action), "control"), field)
+	}
+	if strings.TrimSpace(action) != "" {
+		return fmt.Sprintf("invalid %s payload: %s", strings.TrimSpace(action), message)
+	}
+	return "invalid protocol payload: " + message
+}
+
+func unknownJSONField(message string) string {
+	const prefix = `json: unknown field "`
+	start := strings.Index(message, prefix)
+	if start < 0 {
+		return ""
+	}
+	rest := message[start+len(prefix):]
+	end := strings.Index(rest, `"`)
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:end])
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func isSQLiteBusyError(err error) bool {

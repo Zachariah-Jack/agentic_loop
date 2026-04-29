@@ -72,7 +72,7 @@ What now exists in the Aurora desktop shell:
 - read-only Saved Goal display on Home, with View more/View less and an explicit Edit Goal area with Save and Cancel
 - corrected mission-gauge geometry where 0 percent is bottom, 25 percent left, 50 percent top, 75 percent right, and completed color stops at the needle
 - run elapsed-time visibility in Home, Status, What Happened, and CLI/status output when timestamps are available, including active-only Total Build Time, Current Cycle Time, and recent cycle durations when event data exposes them
-- a Home ntfy card for server/topic/token entry, `Save & Test ntfy`, masked saved-token status, and immediate runtime-config updates for future human-intervention waits
+- a Home ntfy card for server/topic/token entry, `Save & Test ntfy`, masked saved-token status, explicit backend protocol compatibility detection, and immediate runtime-config updates for future human-intervention waits
 - a connection/settings pane for the local control server address
 - a progress and roadmap-alignment pane that shows planner-safe operator message, visual progress percent, progress confidence, progress basis, current focus, next intended step, and surfaced roadmap context when available
 - a status pane for latest run id, goal, elapsed time, stop reason, completion state, current verbosity, model health, executor failure details, and pending action summary
@@ -90,6 +90,7 @@ What now exists in the Aurora desktop shell:
 - a Codex/model readiness card that truthfully shows planner model health, the exact Codex executable path/version/config source the engine sees, required `gpt-5.5` executor model status, full-access verification, and unavailable-model errors without silent fallback
 - automatic model-health checks on GUI connect/reconnect and before Start Build / Continue Build, with fresh successful checks clearing stale older model errors for the checked component
 - backend identity visibility for the connected control server, including PID, start time, binary path/mtime, version, revision, and stale-backend restart warning
+- backend protocol/capability visibility so the GUI can warn when an older backend cannot accept newer runtime-config payloads such as Home ntfy settings
 - Copy Model Health for a safe support bundle containing planner/Codex/backend verification details without secrets
 - owned-backend cleanup and recovery support for dogfood launches, so obsolete dogfood-owned control-server processes and owned backend process trees for the same repo/address are stopped before a fresh one starts
 - target-repo binding for dogfood launches: `scripts/start-v2-dogfood.ps1 -RepoPath ...` starts the backend in that target repo, passes the expected repo path into the shell, verifies the backend reports the same repo before opening the UI, and the shell blocks Start/Continue with a `Wrong Repo Backend` recovery prompt if a stale server is serving another repo
@@ -178,7 +179,7 @@ The repair command builds `bin\orchestrator.exe`, moves that bin folder to the f
 5. Use the shell for status, AI Conversation, planner questions, artifacts, project files, workers, setup checks, snapshots, and approvals.
 6. Start on the Aurora dashboard: confirm System Online, check Project System, review Saved Goal, use Edit Goal when needed, then use Start Build / Continue.
 7. If the dashboard recommends starting or continuing a run, use Start Build / Continue; they call explicit `start_run` / `continue_run` protocol actions and return immediately while the control-server process runs the foreground loop.
-8. Configure the Home ntfy card when you want mobile human-intervention notifications. `Save & Test ntfy` updates runtime config and sends a real test notification without exposing the saved token.
+8. Configure the Home ntfy card when you want mobile human-intervention notifications. Use the server root in Server URL, for example `https://ntfy.sh`, and put the topic in the Topic field. `Save & Test ntfy` updates runtime config and sends a real test notification without exposing the saved token. If the GUI says the backend is running an older protocol, wait for active work to reach a safe boundary and restart Aurora GUI.
 9. If the planner asks a question, type the raw answer and click `Queue Raw Note`, reply through configured ntfy during ask-human waits, or open Action Required and click `Send Answer and Continue`; the shell queues `inject_control_message` and calls `continue_run` only when you choose that action.
 10. If a safe stop was requested, open Action Required and click `Clear Stop and Continue`; the shell clears the mechanical stop flag, then resumes through `continue_run` when the run is resumable.
 11. Capture friction and bugs in the Dogfood Notes pane while they are fresh; notes stay timestamped and tied to the repo/run context.
@@ -799,7 +800,7 @@ codex exec --model gpt-5.5 --sandbox danger-full-access -c 'approval_policy="nev
   - a read-only Saved Goal card with View more/View less, plus explicit Edit Goal Save/Cancel controls
   - Home-first AI setup/autofill, where the operator enters the first planner setup message before any generated-file preview appears
   - corrected gauge geometry and active-only Total Build Time, Current Cycle Time, and recent cycle duration rendering
-  - Home ntfy configuration and `Save & Test ntfy`, with token masking and no fake success if publishing fails
+- Home ntfy configuration and `Save & Test ntfy`, with token masking, protocol compatibility checks, and no fake success if publishing fails
   - pending-action detail viewing
   - a plain-English "What Happened?" summary with translated stop reasons and recommended next actions
   - a Live Output pane whose visible detail follows `quiet`, `normal`, `verbose`, and `trace`

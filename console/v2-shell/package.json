@@ -1,6 +1,6 @@
 {
   "name": "orchestrator-v2-shell",
-  "version": "1.2.1-dev",
+  "version": "1.2.2-dev",
   "private": true,
   "productName": "Aurora Orchestrator",
   "description": "Aurora Orchestrator AI Mission Control dashboard for the local orchestrator control protocol.",

@@ -23,34 +23,54 @@ import (
 
 var controlBackendStartedAt = time.Now().UTC()
 
+const controlProtocolVersion = "v2.2"
+
+type controlProtocolSupportSnapshot struct {
+	RuntimeConfig          bool `json:"runtime_config"`
+	NTFYRuntimeConfig      bool `json:"ntfy_runtime_config"`
+	TestNTFY               bool `json:"test_ntfy"`
+	BackendCompatibility   bool `json:"backend_compatibility"`
+	RuntimeConfigFieldList bool `json:"runtime_config_field_list"`
+}
+
+type controlProtocolSnapshot struct {
+	Version  string                         `json:"version"`
+	Supports controlProtocolSupportSnapshot `json:"supports"`
+}
+
 type controlBackendSnapshot struct {
-	PID              int    `json:"pid"`
-	StartedAt        string `json:"started_at"`
-	BinaryPath       string `json:"binary_path,omitempty"`
-	BinaryModifiedAt string `json:"binary_modified_at,omitempty"`
-	BinaryVersion    string `json:"binary_version"`
-	BinaryRevision   string `json:"binary_revision"`
-	BinaryBuildTime  string `json:"binary_build_time"`
-	RepoRoot         string `json:"repo_root"`
-	ControlAddress   string `json:"control_address,omitempty"`
-	Owner            string `json:"owner,omitempty"`
-	OwnerSessionID   string `json:"owner_session_id,omitempty"`
-	OwnerMetadata    string `json:"owner_metadata_path,omitempty"`
-	Stale            bool   `json:"stale"`
-	StaleReason      string `json:"stale_reason,omitempty"`
+	PID                       int                            `json:"pid"`
+	StartedAt                 string                         `json:"started_at"`
+	BinaryPath                string                         `json:"binary_path,omitempty"`
+	BinaryModifiedAt          string                         `json:"binary_modified_at,omitempty"`
+	BinaryVersion             string                         `json:"binary_version"`
+	BinaryRevision            string                         `json:"binary_revision"`
+	BinaryBuildTime           string                         `json:"binary_build_time"`
+	ProtocolVersion           string                         `json:"protocol_version"`
+	RepoRoot                  string                         `json:"repo_root"`
+	ControlAddress            string                         `json:"control_address,omitempty"`
+	Owner                     string                         `json:"owner,omitempty"`
+	OwnerSessionID            string                         `json:"owner_session_id,omitempty"`
+	OwnerMetadata             string                         `json:"owner_metadata_path,omitempty"`
+	Supports                  controlProtocolSupportSnapshot `json:"supports"`
+	SupportsNTFYRuntimeConfig bool                           `json:"supports_ntfy_runtime_config"`
+	Stale                     bool                           `json:"stale"`
+	StaleReason               string                         `json:"stale_reason,omitempty"`
 }
 
 type controlRuntimeSnapshot struct {
-	EngineMode             string   `json:"engine_mode"`
-	RepoRoot               string   `json:"repo_root"`
-	RepoReady              bool     `json:"repo_ready"`
-	RepoContractMissing    []string `json:"repo_contract_missing,omitempty"`
-	PlannerReady           bool     `json:"planner_ready"`
-	ExecutorReady          bool     `json:"executor_ready"`
-	NTFYReady              bool     `json:"ntfy_ready"`
-	Verbosity              string   `json:"verbosity"`
-	WorkerConcurrencyLimit int      `json:"worker_concurrency_limit"`
-	PermissionProfile      string   `json:"permission_profile"`
+	EngineMode                string   `json:"engine_mode"`
+	RepoRoot                  string   `json:"repo_root"`
+	ProtocolVersion           string   `json:"protocol_version"`
+	SupportsNTFYRuntimeConfig bool     `json:"supports_ntfy_runtime_config"`
+	RepoReady                 bool     `json:"repo_ready"`
+	RepoContractMissing       []string `json:"repo_contract_missing,omitempty"`
+	PlannerReady              bool     `json:"planner_ready"`
+	ExecutorReady             bool     `json:"executor_ready"`
+	NTFYReady                 bool     `json:"ntfy_ready"`
+	Verbosity                 string   `json:"verbosity"`
+	WorkerConcurrencyLimit    int      `json:"worker_concurrency_limit"`
+	PermissionProfile         string   `json:"permission_profile"`
 }
 
 type controlCheckpointSnapshot struct {
@@ -370,6 +390,7 @@ type controlAskHumanSnapshot struct {
 }
 
 type controlStatusSnapshot struct {
+	Protocol       controlProtocolSnapshot        `json:"protocol"`
 	Runtime        controlRuntimeSnapshot         `json:"runtime"`
 	Backend        controlBackendSnapshot         `json:"backend"`
 	ActiveRunGuard controlActiveRunGuardSnapshot  `json:"active_run_guard"`
@@ -511,6 +532,10 @@ func currentConfig(inv Invocation) config.Config {
 		cfg.Verbosity = config.VerbosityNormal
 	}
 	return config.WithDefaults(cfg)
+}
+
+func runtimeVersion(inv Invocation) string {
+	return firstNonEmpty(strings.TrimSpace(inv.Version), buildinfo.Current().Version)
 }
 
 func applyRuntimeConfigAtSafePoint(ctx context.Context, inv *Invocation, journalWriter *journal.Journal, run state.Run) error {
@@ -818,20 +843,23 @@ func buildControlStatusSnapshot(ctx context.Context, inv Invocation, requestedRu
 	}
 	repoContract := inspectTargetRepoContract(inv.RepoRoot)
 	snapshot := controlStatusSnapshot{
+		Protocol:       buildControlProtocolSnapshot(),
 		Backend:        buildControlBackendSnapshot(inv),
 		ActiveRunGuard: buildActiveRunGuardSnapshot(inv),
 		StopFlag:       buildControlStopFlagSnapshot(inv),
 		Runtime: controlRuntimeSnapshot{
-			EngineMode:             "headless_cli",
-			RepoRoot:               inv.RepoRoot,
-			RepoReady:              repoContract.Ready,
-			RepoContractMissing:    repoContract.Missing,
-			PlannerReady:           plannerAPIKeyStatus() == "present",
-			ExecutorReady:          executorAppServerState() == "ready",
-			NTFYReady:              ntfyBridgeState(cfg) == "ready",
-			Verbosity:              cfg.Verbosity,
-			WorkerConcurrencyLimit: cfg.WorkerConcurrencyLimit,
-			PermissionProfile:      cfg.Permissions.Profile,
+			EngineMode:                "headless_cli",
+			RepoRoot:                  inv.RepoRoot,
+			ProtocolVersion:           controlProtocolVersion,
+			SupportsNTFYRuntimeConfig: true,
+			RepoReady:                 repoContract.Ready,
+			RepoContractMissing:       repoContract.Missing,
+			PlannerReady:              plannerAPIKeyStatus() == "present",
+			ExecutorReady:             executorAppServerState() == "ready",
+			NTFYReady:                 ntfyBridgeState(cfg) == "ready",
+			Verbosity:                 cfg.Verbosity,
+			WorkerConcurrencyLimit:    cfg.WorkerConcurrencyLimit,
+			PermissionProfile:         cfg.Permissions.Profile,
 		},
 		PlannerStatus: controlPlannerStatusSnapshot{
 			Present:         false,
@@ -980,6 +1008,23 @@ func buildControlStatusSnapshot(ctx context.Context, inv Invocation, requestedRu
 	annotateControlRunActivity(&snapshot, run)
 
 	return snapshot, nil
+}
+
+func buildControlProtocolSnapshot() controlProtocolSnapshot {
+	return controlProtocolSnapshot{
+		Version:  controlProtocolVersion,
+		Supports: buildControlProtocolSupportSnapshot(),
+	}
+}
+
+func buildControlProtocolSupportSnapshot() controlProtocolSupportSnapshot {
+	return controlProtocolSupportSnapshot{
+		RuntimeConfig:          true,
+		NTFYRuntimeConfig:      true,
+		TestNTFY:               true,
+		BackendCompatibility:   true,
+		RuntimeConfigFieldList: true,
+	}
 }
 
 func annotateControlRunActivity(snapshot *controlStatusSnapshot, run state.Run) {
@@ -1497,13 +1542,16 @@ func buildControlStopFlagSnapshot(inv Invocation) controlStopFlagState {
 func buildControlBackendSnapshot(inv Invocation) controlBackendSnapshot {
 	build := buildinfo.Current()
 	snapshot := controlBackendSnapshot{
-		PID:             os.Getpid(),
-		StartedAt:       formatSnapshotTime(controlBackendStartedAt),
-		BinaryVersion:   firstNonEmpty(strings.TrimSpace(inv.Version), build.Version),
-		BinaryRevision:  build.Revision,
-		BinaryBuildTime: build.BuildTime,
-		RepoRoot:        inv.RepoRoot,
-		ControlAddress:  strings.TrimSpace(os.Getenv("ORCHESTRATOR_CONTROL_ADDR")),
+		PID:                       os.Getpid(),
+		StartedAt:                 formatSnapshotTime(controlBackendStartedAt),
+		BinaryVersion:             runtimeVersion(inv),
+		BinaryRevision:            build.Revision,
+		BinaryBuildTime:           build.BuildTime,
+		ProtocolVersion:           controlProtocolVersion,
+		RepoRoot:                  inv.RepoRoot,
+		ControlAddress:            strings.TrimSpace(os.Getenv("ORCHESTRATOR_CONTROL_ADDR")),
+		Supports:                  buildControlProtocolSupportSnapshot(),
+		SupportsNTFYRuntimeConfig: true,
 	}
 
 	executable, err := os.Executable()

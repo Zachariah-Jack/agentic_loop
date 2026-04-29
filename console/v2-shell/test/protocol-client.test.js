@@ -5,6 +5,7 @@ const path = require("node:path");
 
 const {
   normalizeControlBaseURL,
+  friendlyProtocolMessage,
   getStatusSnapshot,
   startRun,
   continueRun,
@@ -283,6 +284,28 @@ test("runtime config and update helpers use explicit protocol actions", async ()
   assert.match(requestBodies[5], /"action":"get_update_changelog"/);
 });
 
+test("protocol client turns old ntfy runtime-config schema errors into restart guidance", async () => {
+  const message = friendlyProtocolMessage("set_runtime_config", "json: unknown field \"ntfy\"", {
+    code: "invalid_payload",
+  });
+
+  assert.match(message, /older control protocol/);
+  assert.match(message, /Restart Aurora GUI/);
+
+  await assert.rejects(
+    () => setRuntimeConfig("127.0.0.1:44777", {
+      ntfy: { server_url: "https://ntfy.sh", topic: "aurora-test" },
+    }, {
+      fetchImpl: async () => new Response(JSON.stringify({
+        type: "response",
+        ok: false,
+        error: { code: "invalid_payload", message: "json: unknown field \"ntfy\"" },
+      }), { status: 400 }),
+    }),
+    /older control protocol/,
+  );
+});
+
 test("renderer exposes every timeout field and side-chat quick actions", () => {
   const root = path.resolve(__dirname, "..");
   const html = fs.readFileSync(path.join(root, "src", "renderer", "index.html"), "utf8");
@@ -352,6 +375,8 @@ test("renderer exposes Aurora dashboard, setup, timeline, and goal controls", ()
   assert.match(app, /renderAuroraDashboard/);
   assert.match(app, /switchAuroraSession/);
   assert.match(app, /saveAndTestNtfy/);
+  assert.match(app, /friendlyNtfyRuntimeConfigError/);
+  assert.match(app, /updateBackendCompatibilityNotice/);
   assert.match(app, /repair_project_setup/);
   assert.match(app, /friendlyRepoContractReadinessError/);
   assert.doesNotMatch(html, /Fill Starter Goal/);
@@ -1785,6 +1810,15 @@ test("currently-processing active-run guard shows Running", () => {
 
 test("debug bundle renders normalized loop state and checkpoint JSON", () => {
   const bundle = buildDebugBundleText({
+    protocol: {
+      version: "v2.2",
+      supports: { ntfy_runtime_config: true },
+    },
+    backend: {
+      binary_version: "v1.2.2-dev",
+      protocol_version: "v2.2",
+      supports_ntfy_runtime_config: true,
+    },
     active_run_guard: {
       present: true,
       current_backend: true,
@@ -1813,6 +1847,9 @@ test("debug bundle renders normalized loop state and checkpoint JSON", () => {
   }, null, [], { now: "2026-04-24T12:01:00Z" });
 
   assert.match(bundle, /Normalized loop state: ready_to_continue/);
+  assert.match(bundle, /Binary version: v1\.2\.2-dev/);
+  assert.match(bundle, /Backend protocol: v2\.2/);
+  assert.match(bundle, /Runtime config support: ntfy=yes/);
   assert.match(bundle, /Actively processing: false/);
   assert.match(bundle, /Waiting at safe point: true/);
   assert.match(bundle, /Execute ready: true/);
@@ -2039,6 +2076,9 @@ test("dogfood startup helper launches the control server and shell together", ()
   assert.match(script, /owner_session_id/);
   assert.match(script, /binary_mtime_at_launch/);
   assert.match(script, /Stop-StaleOwnedBackendIfPresent/);
+  assert.match(script, /Test-DogfoodBackendActivelyProcessing/);
+  assert.match(script, /actively processing run=/);
+  assert.match(script, /Wait for the run to reach a safe boundary/);
   assert.match(script, /Warn-IfUnknownProcessOwnsPort/);
   assert.match(script, /Wait-PortClear/);
   assert.match(script, /Clear-OwnedDogfoodPort/);

@@ -276,6 +276,11 @@ function Stop-StaleOwnedBackendIfPresent {
     return
   }
 
+  $activeStatus = Test-DogfoodBackendActivelyProcessing -Metadata $metadata
+  if ($activeStatus.active -eq $true) {
+    throw "dogfood.error: existing owned backend pid=$($metadata.pid) is actively processing run=$($activeStatus.run_id) version=$($activeStatus.backend_version) protocol=$($activeStatus.protocol_version). It was not stopped automatically. Wait for the run to reach a safe boundary, request Safe Stop, or close it manually if you truly want to interrupt active work."
+  }
+
   Stop-OwnedDogfoodBackend -Metadata $metadata -Reason "dogfood_restarting_owned_backend"
   Remove-Item -Path $backendMetaPath -Force -ErrorAction SilentlyContinue
 }
@@ -309,6 +314,36 @@ function Get-DogfoodStatusSnapshot {
   } | ConvertTo-Json -Depth 5
 
   return Invoke-RestMethod -Method Post -Uri "http://$ControlAddr/v2/control" -ContentType "application/json" -Body $envelope -TimeoutSec 2
+}
+
+function Test-DogfoodBackendActivelyProcessing {
+  param([Parameter(Mandatory=$true)][object]$Metadata)
+
+  try {
+    $response = Get-DogfoodStatusSnapshot
+    if (-not $response.ok) {
+      return [pscustomobject]@{ active = $false; reason = "status snapshot response was not ok" }
+    }
+    $payload = $response.payload
+    $guard = $payload.active_run_guard
+    $run = $payload.run
+    $active = $false
+    if ($null -ne $guard -and $guard.currently_processing -eq $true) {
+      $active = $true
+    }
+    if ($null -ne $run -and $run.actively_processing -eq $true) {
+      $active = $true
+    }
+    return [pscustomobject]@{
+      active = $active
+      run_id = if ($null -ne $run -and $run.id) { [string]$run.id } elseif ($null -ne $guard -and $guard.run_id) { [string]$guard.run_id } else { "" }
+      backend_version = if ($null -ne $payload.backend -and $payload.backend.binary_version) { [string]$payload.backend.binary_version } elseif ($null -ne $payload.update_status -and $payload.update_status.current_version) { [string]$payload.update_status.current_version } else { "" }
+      protocol_version = if ($null -ne $payload.protocol -and $payload.protocol.version) { [string]$payload.protocol.version } elseif ($null -ne $payload.backend -and $payload.backend.protocol_version) { [string]$payload.backend.protocol_version } else { "" }
+      reason = "status snapshot inspected before owned backend cleanup"
+    }
+  } catch {
+    return [pscustomobject]@{ active = $false; reason = $_.Exception.Message }
+  }
 }
 
 function Wait-DogfoodBackendRepoMatch {
