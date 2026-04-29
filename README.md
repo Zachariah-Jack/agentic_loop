@@ -68,7 +68,8 @@ What now exists in the Aurora desktop shell:
 - a tokenized dark GUI theme for readable file cards, selected states, text editors, textareas, inputs, selects, ntfy settings, chat composers, warnings, previews, context menus, buttons, and focus states
 - a top Aurora session tab strip so one GUI window can hold multiple independent repo sessions, with folder-picker `+ New`, close, and right-click rename
 - a guided Home dashboard that answers "am I connected, which repo is loaded, is the loop running, does it need me, what happened, and what should I click next"
-- a top always-visible status strip with plain connection labels (`Ready`, `Not Connected`, `Connecting`, `Reconnecting`), connected/connecting timers, repo root, run id, loop status, blocker, verbosity, update, and connect controls
+- a startup launcher window with Aurora branding, version/update status, Read Me, repo folder selection, disabled-until-valid Start Aurora, and quiet first-run backend build/start handoff
+- a top always-visible status strip with plain connection labels (`Ready`, `Not Connected`, `Connecting`, `Reconnecting`), repo root, run id, loop status, and attention state without timer clutter
 - real tab navigation for Home, Run, Action Required, Chat, Files, Live Output, Workers, Terminal, Settings, and Dogfood Notes instead of one giant scroll page
 - a simplified Run Control area with protocol-backed Start Build / Continue Build actions; terminal commands are hidden behind backup help
 - read-only Saved Goal display on Home, with View more/View less and an explicit Edit Goal area with Save and Cancel
@@ -87,8 +88,8 @@ What now exists in the Aurora desktop shell:
 - a fresh-repo startup checklist for Git, Git safe.directory trust, Orchestrator initialization, required files, Codex availability, planner config, global launcher status, ntfy, and writable state/log folders
 - Snapshot and View Logs controls for durable reports and later inspection
 - a read-only repo browser pane that lists one directory at a time and opens repo files through explicit protocol actions
-- embedded operator terminal tabs for local shell sessions, kept separate from engine run authority
-- an Action Required pane that surfaces primary executor approval-required state and planner `ask_human` pauses in plain English; executor approve/deny and planner answer-and-continue both go through explicit protocol actions
+- embedded operator terminal tabs for local shell sessions in a larger behind-the-scenes operational pane, kept separate from engine run authority
+- an Action Required pane that surfaces primary executor approval-required state and planner `ask_human` pauses in plain English, without repeatedly stealing navigation focus; executor approve/deny and planner answer-and-continue both go through explicit protocol actions
 - a Codex/model readiness card that truthfully shows planner model health, the exact Codex executable path/version/config source the engine sees, required `gpt-5.5` executor model status, full-access verification, and unavailable-model errors without silent fallback
 - automatic model-health checks on GUI connect/reconnect and before Start Build / Continue Build, with fresh successful checks clearing stale older model errors for the checked component
 - backend identity visibility for the connected control server, including PID, start time, binary path/mtime, version, revision, and stale-backend restart warning
@@ -98,14 +99,15 @@ What now exists in the Aurora desktop shell:
 - target-repo binding for dogfood launches: `scripts/start-v2-dogfood.ps1 -RepoPath ...` starts the backend in that target repo, passes the expected repo path into the shell, verifies the backend reports the same repo before opening the UI, and the shell blocks Start/Continue with a `Wrong Repo Backend` recovery prompt if a stale server is serving another repo
 - `Recover Backend / Unlock Repo` for dogfood-owned launches: restarts the owned backend after verifying the port is clear, refreshes the shell, reruns model health, and mechanically clears stale active-run guards without deleting run history or artifacts
 - SQLite busy/locked recovery for common GUI reads; persistent lock contention becomes a clear `state_database_locked` protocol error instead of trapping the user behind raw SQLite output
-- a Side Chat pane backed by the context-agent foundation; it answers from visible runtime status, has quick actions for "what is happening now" and "what changed while I was gone", and uses explicit audited protocol actions for planner reconsideration or Safe Stop
+- a right-side AI Conversation / Run Q&A panel backed by the context-agent foundation; it answers from visible runtime status, has quick actions for "what is happening now" and "what changed while I was gone", and keeps raw planner notes behind an explicit control
 - a Runtime Timeouts & Autonomy settings card for timeout presets, all seven per-timeout edits, and permission profile selection through `set_runtime_config`
 - an Updates card for GitHub release checks and changelog copying; install is disabled until safe Windows self-update assets are available
 - a Dogfood Notes pane that records quick timestamped friction notes tied to the repo and latest run when available
-- a Worker Panel that shows real worker ids, statuses, scopes, worktree paths, approval state, executor thread/turn metadata, and explicit operator-triggered worker actions for create, dispatch, remove, and integration preview
-- a Live Output pane backed by `/v2/events`, with readable planner/executor/worker/approval/model rows, category/current-run/text filtering, verbosity-aware detail, and trace-only raw payloads by default
+- a Worker Activity screen that shows real worker ids, statuses, scopes, worktree paths, approval state, executor thread/turn metadata, and keeps manual worker controls in advanced sections
+- a denser Live Output pane backed by `/v2/events`, with readable planner/executor/worker/approval/model rows, category/current-run/text filtering, verbosity-aware detail, and trace-only raw payloads by default
 - a Control Chat pane backed by real `inject_control_message`
-- a controls pane for Update Dashboard, Reload Outputs, safe stop, clear stop, `Clear Stop and Continue` for safe-stop pauses, and immediate verbosity changes that immediately affect Live Output
+- a controls pane for Refresh, Reload Outputs, safe stop, Clear Stop, and immediate verbosity changes that immediately affect Live Output; Clear Stop only clears the stop flag and never continues the run by itself
+- click-to-copy affordances on useful mission/status values such as repo path, run id, cycle/checkpoint details, and copied support bundles
 - persisted local shell state for practical dogfooding, including the last control-server address, auto-reconnect preference, last selected artifact/contract/repo file/worker/dogfood note, side-chat context policy, and activity filters
 - auto-reconnect and rehydration behavior so the shell can reattach to a restarted control server, resume the current status snapshot, reload pending context, workers, artifacts, dogfood notes, contract selections, and continue the live event stream with recent-history replay where available
 - a `scripts/start-v2-dogfood.ps1` helper that launches the owned control server hidden by default, opens the Electron shell, writes logs under `.orchestrator/logs`, and stops the owned control server when the shell exits
@@ -175,19 +177,20 @@ go run .\cmd\orchestrator install-global
 
 The repair command builds `bin\orchestrator.exe`, moves that bin folder to the front of the Windows User PATH, updates the current process PATH, reports every stale `orchestrator` it found, and prints a one-line PowerShell refresh/test command. It does not require admin rights and does not delete old installs.
 
-2. For a double-click style launch, run `scripts\Launch-Orchestrator-V2-Shell.vbs` or create a shortcut to it and pin that shortcut to the taskbar.
-3. Use `-DebugVisibleWindows` only when you intentionally want visible backend PowerShell windows for debugging.
-4. Leave auto-reconnect enabled in the shell for routine control-server restarts.
-5. Use the shell for status, AI Conversation, planner questions, artifacts, project files, workers, setup checks, snapshots, and approvals.
-6. Start on the Aurora dashboard: confirm System Online, check Project System, review Saved Goal, use Edit Goal when needed, then use Start Build / Continue.
-7. If the dashboard recommends starting or continuing a run, use Start Build / Continue; they call explicit `start_run` / `continue_run` protocol actions and return immediately while the control-server process runs the foreground loop.
-8. Configure the Home ntfy card when you want mobile human-intervention notifications. Use the server root in Server URL, for example `https://ntfy.sh`, and put the topic in the Topic field. `Save & Test ntfy` updates runtime config and sends a real test notification without exposing the saved token. If the GUI says the backend is running an older protocol, wait for active work to reach a safe boundary and restart Aurora GUI.
-9. If the planner asks a question, type the raw answer and click `Queue Raw Note`, reply through configured ntfy during ask-human waits, or open Action Required and click `Send Answer and Continue`; the shell queues `inject_control_message` and calls `continue_run` only when you choose that action.
-10. If a safe stop was requested, open Action Required and click `Clear Stop and Continue`; the shell clears the mechanical stop flag, then resumes through `continue_run` when the run is resumable.
-11. Capture friction and bugs in the Dogfood Notes pane while they are fresh; notes stay timestamped and tied to the repo/run context.
-12. Keep the headless CLI available for direct `run`, `continue`, `status`, and `doctor` use when you do not need the GUI.
-13. If the shell restarts, reconnect to the same control server and let it rehydrate current status, pending action, workers, artifacts, side-chat history, dogfood notes, and recent activity.
-14. If a run is shown as already active but nothing is progressing, or if SQLite reports a temporary lock, click `Recover Backend / Unlock Repo`. It only stops dogfood-owned backend processes or proven owned backend listeners, never unknown user-started processes.
+2. For a double-click style launch, run `scripts\Launch-Orchestrator-V2-Shell.vbs`, create a shortcut to it, or launch the Electron executable directly. The default app path opens the Aurora startup launcher first.
+3. In the startup launcher, choose the repo/project folder and click `Start Aurora`; the launcher handles the local backend preflight/build/start path quietly and then opens mission control for that repo.
+4. Use `-DebugVisibleWindows` only when you intentionally want visible backend PowerShell windows for debugging.
+5. Leave auto-reconnect enabled in the shell for routine control-server restarts.
+6. Use the shell for status, AI Conversation, planner questions, artifacts, project files, workers, setup checks, snapshots, and approvals.
+7. Start on the Aurora dashboard: confirm System Online, check Project System, review Saved Goal, use Edit Goal when needed, then use Start Build / Continue.
+8. If the dashboard recommends starting or continuing a run, use Start Build / Continue; they call explicit `start_run` / `continue_run` protocol actions and return immediately while the control-server process runs the foreground loop.
+9. Configure the Home ntfy card when you want mobile human-intervention notifications. The default server is `https://ntfy.sh`; put the topic in the Topic field. `Save & Test ntfy` updates runtime config and sends a real test notification without exposing the saved token. If the GUI says the backend is running an older protocol, wait for active work to reach a safe boundary and restart Aurora GUI.
+10. If the planner asks a question, type the raw answer and click `Queue Raw Note`, reply through configured ntfy during ask-human waits, or open Action Required and click `Send Answer and Continue`; the shell queues `inject_control_message` and calls `continue_run` only when you choose that action.
+11. If a safe stop was requested, open Action Required and click `Clear Stop`; this only clears the mechanical stop flag. Use Home `Continue Build` later when you explicitly want to resume.
+12. Capture friction and bugs in the Dogfood Notes pane while they are fresh; notes stay timestamped and tied to the repo/run context.
+13. Keep the headless CLI available for direct `run`, `continue`, `status`, and `doctor` use when you do not need the GUI.
+14. If the shell restarts, reconnect to the same control server and let it rehydrate current status, pending action, workers, artifacts, run Q&A history, dogfood notes, and recent activity.
+15. If a run is shown as already active but nothing is progressing, or if SQLite reports a temporary lock, click `Recover Backend / Unlock Repo`. It only stops dogfood-owned backend processes or proven owned backend listeners, never unknown user-started processes.
 
 V2 will preserve the current architecture:
 
@@ -843,20 +846,24 @@ Notes:
 
 - the shell talks only to the real loopback control server and event stream
 - default control server address is `http://127.0.0.1:44777`
-- the shell is still a proof console, but the Home dashboard is now the intended daily entry point
+- the shell is still a proof console, but normal daily use should start from the Aurora launcher instead of manually building and starting binaries
+- the startup launcher shows version/update status, a Read Me button, repo folder selection, and a disabled-until-ready Start Aurora button; when started from the launcher it quietly prepares the backend and opens mission control for the chosen repo
 - the top Aurora tab strip can hold multiple repo sessions in one window; every Start, Continue, setup, file, timeline, and ntfy action is routed to the active tab's repo/control-server address
-- the top strip uses plain labels: `Connection Status: Ready`, `Not Connected`, `Connecting`, or `Reconnecting`; `Loop Status: Running`, `Stopped`, `Needs You`, `Completed`, `No Run Yet`, or `Error`
+- the top strip uses plain labels: `Connection Status: Ready`, `Not Connected`, `Connecting`, or `Reconnecting`; `Loop Status: Running`, `Stopped`, `Needs You`, `Completed`, `No Run Yet`, or `Error`, without showing connection timers
 - artifact browsing is limited to surfaced `.orchestrator/artifacts/...` paths known to the engine
 - contract editing is limited to the canonical files only: `.orchestrator/brief.md`, `.orchestrator/roadmap.md`, `.orchestrator/constraints.md`, `.orchestrator/decisions.md`, `.orchestrator/human-notes.md`, `.orchestrator/goal.md`, and `AGENTS.md`; Home shows `goal.md` as read-only until Edit Goal is opened
 - the AI autofill wizard begins from the Home "Use AI to Generate Files & Goal" first-message composer, drafts selected canonical contract files and the goal through the real engine protocol, and previews the generated content before you save any file
 - Home ntfy settings use `set_runtime_config` plus `test_ntfy`; the engine publishes a real test message and never returns the saved auth token
 - the repo browser is read-only for arbitrary repo files in this slice and lists one directory at a time through explicit protocol actions
-- the terminal pane is an operator utility shell only; it supports multiple local tabs, but run control still belongs to the explicit engine protocol and control actions
+- the terminal pane is a large behind-the-scenes operator utility shell; it supports multiple local tabs, but run control still belongs to the explicit engine protocol and control actions
 - the Codex/model readiness card reports the exact Codex executable path/version/config source seen by the control server; `gpt-5.5` full-access is `Verified` only after the Codex probe succeeds, and unavailable-model errors are shown without silent fallback
-- the Side Chat pane is an observable-context assistant in this slice; normal messages never alter the active run, and any planner note or Safe Stop request goes through a visible audited protocol action
+- the right AI Conversation / Run Q&A area is an observable-context assistant in this slice; normal messages never alter the active run, and any planner note or Safe Stop request goes through a visible audited protocol action
 - the Dogfood Notes pane is a lightweight local capture path for friction and bug notes; it does not yet file GitHub issues automatically
-- the Worker Panel can now create workers, dispatch one bounded worker turn, remove idle workers, and build integration previews
-- the activity timeline is a filtered view over the real event stream plus shell-local terminal lifecycle events; it does not expose hidden reasoning
+- the Worker Activity screen primarily shows workers/sub-agents dispatched outside the main Codex conversation; advanced manual create/dispatch/remove/integration preview controls are collapsed
+- the activity timeline is a denser filtered view over the real event stream plus shell-local terminal lifecycle events; it does not expose hidden reasoning
+- Action Required no longer auto-snaps navigation back repeatedly; outstanding blockers remain visible through the badge/status surfaces while the operator investigates other screens
+- Clear Stop only clears the stop flag. It never continues/restarts the loop by itself.
+- mission/status values that are commonly reused for support or navigation expose click-to-copy and show a small copied confirmation
 - the shell now remembers useful local session state and can auto-reconnect to the same control server for daily dogfooding
 - on reconnect, the shell rehydrates current status, pending action context, recent artifacts, recent side-chat history, dogfood notes, workers, repo tree state, contract selection, and recent event backlog where the server still has buffered event history
 - worker apply and worker-specific approval controls are still deferred from the shell
@@ -871,7 +878,7 @@ The helper builds and launches the development binary at `dist\orchestrator.exe`
 
 In normal mode, the helper launches the owned control server hidden, opens only the Electron window, writes logs under `.orchestrator\logs`, requests safe stop when the shell exits, and then stops only the control-server process it launched. It starts the backend binary directly, not through a persistent PowerShell wrapper. It also stops stale dogfood-owned backends for the same repo/address before launching, kills only proven owned backend listener process trees if the first stop does not clear the port, waits for the port to clear, and refuses to kill unknown listeners. If the port cannot clear, the diagnostic output includes attempted PID/path/command line, kill methods used, current listener PID/path/command line, whether it matched ownership metadata, and the safe next action. Use the debug flag below if you want visible backend consoles.
 
-For a clickable Windows launch, use `scripts\Launch-Orchestrator-V2-Shell.vbs` or create a shortcut to that file and pin the shortcut. The VBS launcher starts the dogfood helper hidden so the user-facing experience is just the Electron app window.
+For a clickable Windows launch, use `scripts\Launch-Orchestrator-V2-Shell.vbs` or create a shortcut to that file and pin the shortcut. The VBS launcher starts the dogfood helper hidden and opens the Aurora startup launcher, so the user-facing experience begins with repo selection instead of a terminal.
 
 Useful flags:
 

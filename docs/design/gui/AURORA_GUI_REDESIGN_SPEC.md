@@ -10,12 +10,28 @@ The GUI must feel like a polished AI command center rather than a developer debu
 
 ## Core Layout
 
+- Startup launcher window before the main dashboard when Aurora is launched as an app/executable.
 - Top session tab strip for one Aurora window with multiple independent repo sessions.
 - Left vertical navigation rail for sections.
 - Left Project System drawer for canonical repo files, saved goal, and setup checks.
 - Center Mission Run dashboard with a large analog-style gauge, run metadata, timers, status chips, controls, and live activity timeline.
-- Right AI Conversation panel with visible Side Chat, raw note injection, and explicit context controls.
+- Right AI Conversation panel with visible Run Q&A, raw note injection behind an explicit details control, and clear context controls.
 - Lower-center mission controls for Start, Continue, Pause at Safe Point, Graceful Stop, Snapshot, Inject Note, and View Logs.
+
+## Startup Launcher Flow
+
+Launching Aurora as a normal Windows app opens a small startup window before the main dashboard unless a repo-scoped dogfood helper has already provided a target repo.
+
+The launcher must show:
+
+- Aurora branding and a short plain-English explanation for non-technical users
+- current app version
+- update status with a friendly up-to-date message or an update-available message
+- a Read Me button
+- repo/project folder selection with explanatory copy
+- a Start Aurora button that stays disabled until a valid target repo is selected
+
+Clicking Start Aurora mechanically prepares the selected repo, quietly builds/locates the local backend binary if needed, starts the local control server for that repo, closes/hides the launcher, and opens the main mission-control dashboard. It must not launch VS Code or random visible terminal windows.
 
 ## Multi-Session Tabs
 
@@ -121,7 +137,7 @@ Generated content is previewed first and saved only through explicit file-save a
 
 Home includes first-class ntfy configuration for the active repo/session:
 
-- server URL
+- server URL, defaulting to `https://ntfy.sh`
 - topic
 - optional auth token entry
 - Save & Test ntfy
@@ -159,6 +175,20 @@ Missing `.orchestrator/artifacts/` must not trap the user behind a raw Continue 
 ```powershell
 orchestrator init
 ```
+
+## Screen Purposes And Behavior
+
+- Home is the main product surface: Project System drawer, protected central mission gauge/timeline, right AI Conversation / Run Q&A, and the primary Start/Continue/Safe Stop controls.
+- Run is an operational detail view for current run state, progress/source detail, pending action, and what-happened summaries.
+- Chat is a conversation archive/orientation surface; the live composer stays in the Home right panel.
+- Live Output is a dense event monitor. It should show many useful rows at once, with raw payloads collapsed behind details.
+- Workers is Worker Activity: agents/sub-agents dispatched by planner/internal mechanisms or explicit advanced actions. It must not imply the human normally dispatches workers directly.
+- Terminal is a large behind-the-scenes operator shell pane. It is visibility/convenience only, not run authority.
+- Settings uses broad readable groups for connection troubleshooting, model health, runtime/autonomy, and updates.
+
+Action Required must not repeatedly force navigation back to itself. Outstanding blockers are surfaced via badge/banner/status while the operator can browse other screens. `Clear Stop` only clears the safe-stop flag; it must not call `continue_run` or restart the loop. Continue/Start remain separate explicit Home actions.
+
+Useful displayed values such as repo path, run id, artifact path, checkpoint ids, URLs, topics, and technical identifiers should be click-to-copy where practical, with a small transient copied confirmation.
 
 ## Global Launcher
 

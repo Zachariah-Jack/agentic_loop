@@ -101,17 +101,47 @@ function execFilePromise(command, args, options = {}) {
   });
 }
 
-function resolveBackendBinary(options = {}) {
+function repoRootPath() {
+  return path.resolve(__dirname, "..", "..", "..");
+}
+
+function backendBinaryCandidates(options = {}) {
   const metadata = loadBackendMetadata(options.metaPath || process.env.ORCHESTRATOR_V2_BACKEND_META || "");
   const fromMetadata = String(metadata && metadata.binary_path || "").trim();
-  if (fromMetadata && fs.existsSync(fromMetadata)) {
-    return fromMetadata;
+  const extension = process.platform === "win32" ? ".exe" : "";
+  return [
+    fromMetadata,
+    path.join(repoRootPath(), "dist", `orchestrator${extension}`),
+    path.resolve(__dirname, "..", "..", "dist", `orchestrator${extension}`),
+  ].filter(Boolean);
+}
+
+function resolveBackendBinary(options = {}) {
+  const candidates = backendBinaryCandidates(options);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
   }
-  const candidate = path.resolve(__dirname, "..", "..", "dist", process.platform === "win32" ? "orchestrator.exe" : "orchestrator");
-  if (fs.existsSync(candidate)) {
-    return candidate;
+  return candidates[0];
+}
+
+async function ensureBackendBinary(options = {}) {
+  const existing = resolveBackendBinary(options);
+  if (existing && fs.existsSync(existing)) {
+    return existing;
   }
-  return fromMetadata || candidate;
+
+  const outputPath = path.join(repoRootPath(), "dist", process.platform === "win32" ? "orchestrator.exe" : "orchestrator");
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  await execFilePromise("go", ["build", "-o", outputPath, "./cmd/orchestrator"], {
+    execFileImpl: options.execFileImpl,
+    execOptions: { cwd: repoRootPath() },
+  });
+  if (!fs.existsSync(outputPath)) {
+    throw new Error(`orchestrator backend binary was not produced at ${outputPath}`);
+  }
+  return outputPath;
 }
 
 async function allocateLoopbackAddress(preferredPort = 0) {
@@ -135,10 +165,7 @@ async function startBackendForRepo(options = {}) {
   if (!fs.existsSync(repoPath)) {
     throw new Error(`repo path does not exist: ${repoPath}`);
   }
-  const binaryPath = resolveBackendBinary(options);
-  if (!fs.existsSync(binaryPath)) {
-    throw new Error(`orchestrator backend binary was not found at ${binaryPath}. Build it with: go build -o .\\dist\\orchestrator.exe .\\cmd\\orchestrator`);
-  }
+  const binaryPath = await ensureBackendBinary(options);
   await execFilePromise(binaryPath, ["init"], {
     execFileImpl: options.execFileImpl,
     execOptions: { cwd: repoPath },
@@ -406,6 +433,8 @@ module.exports = {
   fileModifiedTime,
   killProcessTree,
   parseControlPort,
+  resolveBackendBinary,
+  ensureBackendBinary,
   listenerMatchesOwnedMetadata,
   listPortListeners,
   clearOwnedBackendPort,

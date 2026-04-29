@@ -738,7 +738,7 @@
         state: "safe_stop_requested",
         label: "Loop Status: Stopped",
         className: "loop-stopped",
-        detail: "Safe stop was requested. Use Clear Stop and Continue when you are ready to resume.",
+        detail: "Safe stop was requested. Clear Stop removes the flag; Continue Build remains separate.",
         stage: "safe stop requested",
         turn: safeStop.runID,
         lastUpdate,
@@ -888,7 +888,7 @@
       label: "Connection Status: Not Connected",
       className: "connection-not-connected",
       durationLabel: "Not connected",
-      detail: "Start the control server or click Connect.",
+      detail: "Choose a project in the launcher or reconnect to the local engine.",
       address,
     };
   }
@@ -905,13 +905,13 @@
     if (!connected) {
       return {
         state: reconnecting ? "reconnecting" : "disconnected",
-        title: reconnecting ? "Wait for the app to reconnect." : "Connect to the app engine.",
+        title: reconnecting ? "Wait for the app to reconnect." : "Start Aurora from the launcher.",
         detail: reconnecting
-          ? "The shell is trying to reconnect. You can also click Connect / Reconnect after the server is back."
-          : "Start the local engine, confirm the address, then connect. No repo or run state is available until the shell is connected.",
+          ? "The shell is trying to reconnect. You can also use Reconnect after the engine is back."
+          : "Choose a project folder in the startup launcher. Manual connection remains in Settings for troubleshooting only.",
         primaryAction: {
           id: "connect",
-          label: reconnecting ? "Reconnect Now" : "Connect",
+          label: reconnecting ? "Reconnect Now" : "Reconnect",
           enabled: true,
           kind: "protocol",
         },
@@ -971,10 +971,10 @@
       return {
         state: "safe_stop_requested",
         title: "Clear the safe stop when you are ready.",
-        detail: `${safeStop.message} This only clears the mechanical stop flag; the planner still decides what happens after continue_run resumes.`,
+        detail: `${safeStop.message} Clear Stop only clears the mechanical flag. Continue Build is a separate explicit action.`,
         primaryAction: {
-          id: "clear_stop_continue",
-          label: "Clear Stop and Continue",
+          id: "clear_stop",
+          label: "Clear Stop",
           enabled: true,
           kind: "protocol",
         },
@@ -1078,7 +1078,7 @@
         detail: "The loop appears active. Watch the activity timeline; use Safe Stop only if you want a clean stop at a safe boundary.",
         primaryAction: {
           id: "refresh_status",
-          label: "Update Dashboard",
+          label: "Refresh",
           enabled: true,
           kind: "protocol",
         },
@@ -1135,7 +1135,7 @@
       detail: "The latest run is not resumable. Enter a new goal to start a fresh build, or refresh the snapshot if you expected a different state.",
       primaryAction: {
         id: "refresh_status",
-        label: "Update Dashboard",
+        label: "Refresh",
         enabled: true,
         kind: "protocol",
       },
@@ -1194,7 +1194,7 @@
       continueDisabledReasons.push("The planner is waiting for your answer; use Action Required, then continue with the queued answer.");
     }
     if (stopRequested) {
-      continueDisabledReasons.push("Disabled because a safe stop was requested; use Clear Stop and Continue.");
+      continueDisabledReasons.push("Disabled because a safe stop was requested; use Clear Stop first.");
     }
     if (processing) {
       continueDisabledReasons.push("Disabled because the backend is already actively processing this run.");
@@ -1221,7 +1221,7 @@
       && !processing
       && Boolean(run && !run.completed && run.resumable !== false && !askHuman.present);
     const primaryNote = stopRequested
-      ? "Safe stop was requested. Use Clear Stop and Continue to clear the stop flag, then resume through continue_run."
+      ? "Safe stop was requested. Use Clear Stop to clear the flag; Continue Build remains separate."
       : askHuman.present
       ? "Planner is waiting for your answer. Open Action Required to send the answer and continue from the GUI."
       : executeReady
@@ -2135,9 +2135,9 @@
         : safeStop.present
         ? {
           title: "Safe Stop Requested",
-          requested: "Clear Stop and Continue",
+          requested: "Clear Stop",
           why: safeStop.message,
-          approveEffect: "Clear Stop and Continue removes the mechanical stop flag, then calls continue_run if the run is resumable.",
+          approveEffect: "Clear Stop removes the mechanical stop flag only. Continue Build stays under a separate explicit action.",
           denyEffect: "If you do nothing, the safe stop remains active and the run will not continue from the shell.",
           scope: `Run ${safeStop.runID}`,
         }
@@ -2473,8 +2473,8 @@
       `- Active-run guard waiting at safe point: ${activeGuard.waiting_at_safe_point ? "true" : "false"}`,
       `- Active-run guard last progress at: ${safeString(activeGuard.last_progress_at, "Unavailable")}`,
       `- Recovery recommendation: ${activeGuard.stale ? "Use Recover Backend / Unlock Repo. It preserves run history and artifacts." : "No stale active-run recovery indicated."}`,
-      `- Side Chat affects active run: no`,
-      `- Side Chat queued control messages: no`,
+      `- Run Q&A affects active run: no`,
+      `- Run Q&A queued control messages: no`,
       `- Last side-chat action timestamp: ${lastSideChatAction}`,
       "",
       "## Artifacts",
@@ -2630,10 +2630,10 @@
     return {
       available: listing.available !== false,
       nonInterfering: true,
-      modeLabel: "Side Chat - context assistant",
-      modeDescription: "Answers from observable runtime context. Side Chat only queues planner-visible notes, requests Safe Stop, or changes run control when you press an explicit audited action.",
-      inputLabel: "Ask Side Chat",
-      buttonLabel: "Ask Side Chat",
+      modeLabel: "Run Q&A - context assistant",
+      modeDescription: "Answers from observable runtime context. It does not affect the active run unless you press an explicit action such as Safe Stop or raw planner note.",
+      inputLabel: "Ask Aurora",
+      buttonLabel: "Ask Aurora",
       count: Number.isInteger(listing.count) ? listing.count : items.length,
       message: items.length === 0
         ? safeString(listing.message, "No side-chat conversation recorded yet. Use Control Chat or Action Required when you want to affect the active run.")
@@ -2644,7 +2644,7 @@
         source: safeString(item.source, "side_chat"),
         status: safeString(item.status, "recorded"),
         backendState: safeString(item.backend_state, "context_agent"),
-        responseMessage: safeString(item.response_message, "Side Chat has no reply recorded for this message."),
+        responseMessage: safeString(item.response_message, "No reply is recorded for this message."),
         createdAt: safeString(item.created_at, "Unavailable"),
         runID: safeString(item.run_id, "Unavailable"),
         contextPolicy: safeString(item.context_policy, "Unavailable"),

@@ -155,13 +155,13 @@ Current dogfood shell direction:
 
 - Home is the default guided dashboard.
 - The left sidebar behaves as real tab navigation, not scroll anchors.
-- The top strip uses plain-language `Connection Status` and `Loop Status` labels with timers and repo/run identity.
+- The top strip uses plain-language `Connection Status` and `Loop Status` labels with repo/run identity and attention state; connection timers must not dominate the header.
 - Dogfood-launched shells carry an expected target repo path. The shell compares that expected path with the backend-reported repo root on connect/reconnect; a mismatch is rendered as `Wrong Repo Backend`, Start/Continue are disabled, and the primary action is to restart the dogfood-owned backend for the target repo.
 - Start/Continue are shown as Start Build / Continue Build and call explicit protocol actions.
 - Loop status must distinguish `Running` from safe-pause states. A planner safe checkpoint with `planner_outcome:"execute"` and no executor thread/turn is `Ready to Continue`, not actively running; the primary action is `Continue Build / Dispatch Executor`.
 - Active-run guards are displayed as running only when the status snapshot says `currently_processing:true`; a guard or unfinished run record by itself is not enough.
 - Side Chat is currently a context assistant foundation. It persists raw messages and answers from observable runtime context only; it must plainly say that normal side messages do not affect planner/Codex flow, and that planner notes or Safe Stop requests are explicit audited protocol actions.
-- If a safe stop flag or `operator_stop_requested` state is present, Action Required shows `Safe stop was requested` and offers `Clear Stop and Continue`, which clears the mechanical flag and then uses the explicit `continue_run` protocol action when the run can resume.
+- If a safe stop flag or `operator_stop_requested` state is present, Action Required shows `Safe stop was requested` and offers `Clear Stop`, which clears only the mechanical flag. Starting or continuing remains a separate explicit Home action.
 - Backup terminal commands are hidden in advanced help, not presented as the primary path.
 - Stop reasons are translated for display while preserving the technical code in detail views.
 
@@ -379,7 +379,7 @@ Approval remains explicit operator action routed through engine protocol.
 
 Planner `ask_human` pauses are also Action Required states. When the status snapshot exposes an ask-human question or blocker, the shell shows "Planner needs your answer", displays the question/blocker in plain English, and provides a raw answer box. "Send Answer and Continue" queues the exact operator text through `inject_control_message` with `reason:"ask_human_answer"` and then calls `continue_run` for the same run. The shell does not interpret the answer or decide whether it resolves the blocker; the planner receives the raw intervention packet and decides the next step.
 
-Safe stop flags are also surfaced as Action Required because the operator must clear them before expecting unattended progress. `Clear Stop and Continue` must be a protocol-only mechanical sequence: `clear_stop_flag`, status refresh, then `continue_run` if the run is resumable. It must not infer why the stop was requested.
+Safe stop flags are also surfaced as Action Required because the operator must clear them before expecting unattended progress. `Clear Stop` must be a protocol-only mechanical sequence: `clear_stop_flag` and status refresh. It must not infer why the stop was requested, call `continue_run`, or restart the loop by itself.
 
 Codex readiness should also be visible to the operator. The required executor configuration is `gpt-5.5`, `danger-full-access`, approval `never`, and effort `xhigh`. The shell may only show model, effort, sandbox, or full-access state as verified after the engine's Codex probe succeeds using the same control-server environment. If not verifiable, it must say `Not verified` and provide a concrete check path such as model-test protocol actions or `orchestrator doctor`; it must not silently claim the strongest model or full access.
 

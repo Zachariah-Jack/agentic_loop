@@ -8,7 +8,8 @@ scriptPath = fso.GetParentFolderName(WScript.ScriptFullName)
 projectRoot = fso.GetParentFolderName(scriptPath)
 
 command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ _
-  & fso.BuildPath(projectRoot, "scripts\start-v2-dogfood.ps1") & """"
+  & fso.BuildPath(projectRoot, "scripts\start-v2-dogfood.ps1") & """ -RepoPath """ _
+  & projectRoot & """ -StartupLauncher -SkipBuild"
 
 ' Window style 0 keeps the launcher PowerShell hidden. The Electron window still appears.
 shell.Run command, 0, False

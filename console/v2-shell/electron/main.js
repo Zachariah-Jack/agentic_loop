@@ -1,8 +1,10 @@
 const path = require("node:path");
-const { app, BrowserWindow, dialog, ipcMain, Menu } = require("electron");
+const { execFile } = require("node:child_process");
+const { app, BrowserWindow, dialog, ipcMain, Menu, shell } = require("electron");
 const { createTerminalManager } = require("./terminal-manager");
 const { shutdownWindowStateByKey, shutdownAllWindowStates } = require("./window-state-cleanup");
-const { killProcessTree, restartOwnedBackend, startBackendForRepo } = require("./backend-manager");
+const { ensureBackendBinary, killProcessTree, restartOwnedBackend, startBackendForRepo } = require("./backend-manager");
+const packageInfo = require("../package.json");
 
 const {
   normalizeControlBaseURL,
@@ -55,6 +57,7 @@ const {
 
 const defaultAddress = "http://127.0.0.1:44777";
 const expectedRepoPath = String(process.env.ORCHESTRATOR_V2_EXPECTED_REPO || "").trim();
+const projectRoot = path.resolve(__dirname, "..", "..", "..");
 const windowState = new Map();
 
 app.setName("Aurora Orchestrator");
@@ -111,6 +114,10 @@ function connectionSnapshot(browserWindow) {
     address: state.address,
     message: state.message,
     expectedRepoPath: state.expectedRepoPath || expectedRepoPath,
+    repoPath: state.repoPath || state.expectedRepoPath || expectedRepoPath,
+    ownedBackend: Boolean(state.ownedBackend),
+    pid: state.pid || 0,
+    autoConnect: Boolean(state.autoConnect),
   };
 }
 
@@ -211,7 +218,7 @@ async function connectWindow(browserWindow, rawAddress) {
   return {
     connection: connectionSnapshot(browserWindow),
     snapshot,
-    expectedRepoPath,
+    expectedRepoPath: state.expectedRepoPath || expectedRepoPath,
   };
 }
 
@@ -224,7 +231,7 @@ function requireConnectedAddress(browserWindow, requestedAddress) {
   return normalizeControlBaseURL(state.address);
 }
 
-function createWindow() {
+function createWindow(options = {}) {
   const browserWindow = new BrowserWindow({
     width: 1380,
     height: 920,
@@ -246,6 +253,19 @@ function createWindow() {
   }
 
   const windowKey = browserWindow.webContents.id;
+  const state = stateForWindow(browserWindow);
+  if (options.address) {
+    state.address = options.address;
+  }
+  if (options.expectedRepoPath || options.repoPath) {
+    state.expectedRepoPath = options.expectedRepoPath || options.repoPath;
+    state.repoPath = options.repoPath || options.expectedRepoPath;
+  }
+  if (options.pid) {
+    state.pid = options.pid;
+  }
+  state.ownedBackend = Boolean(options.ownedBackend);
+  state.autoConnect = Boolean(options.autoConnect);
   browserWindow.loadFile(path.join(__dirname, "..", "src", "renderer", "index.html"));
   browserWindow.on("close", () => {
     const state = windowState.get(windowKey);
@@ -263,6 +283,161 @@ function createWindow() {
 function shutdownOwnedWindowState() {
   shutdownAllWindowStates(windowState);
 }
+
+function shouldOpenLauncher() {
+  if (String(process.env.ORCHESTRATOR_V2_FORCE_LAUNCHER || "").trim() === "1") {
+    return true;
+  }
+  if (String(process.env.ORCHESTRATOR_V2_SKIP_LAUNCHER || "").trim() === "1") {
+    return false;
+  }
+  return expectedRepoPath === "";
+}
+
+function createLauncherWindow() {
+  const launcherWindow = new BrowserWindow({
+    width: 680,
+    height: 640,
+    minWidth: 600,
+    minHeight: 560,
+    title: "Aurora Orchestrator Launcher",
+    icon: path.join(__dirname, "..", "assets", "icon.svg"),
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, "launcher-preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  if (!shouldShowNativeMenu()) {
+    launcherWindow.setAutoHideMenuBar(true);
+    launcherWindow.setMenuBarVisibility(false);
+  }
+
+  launcherWindow.loadFile(path.join(__dirname, "..", "src", "launcher", "index.html"));
+  return launcherWindow;
+}
+
+function parseUpdateStatus(output) {
+  const status = {
+    currentVersion: packageInfo.version,
+    latestVersion: "",
+    updateAvailable: false,
+    releaseURL: "",
+    installSupported: false,
+    installMessage: "",
+  };
+  for (const line of String(output || "").split(/\r?\n/)) {
+    const match = line.match(/^\s*([a-z_]+):\s*(.*)$/i);
+    if (!match) {
+      continue;
+    }
+    const key = match[1].toLowerCase();
+    const value = match[2].trim();
+    if (key === "current_version") {
+      status.currentVersion = value;
+    } else if (key === "latest_version" && value.toLowerCase() !== "unavailable") {
+      status.latestVersion = value;
+    } else if (key === "update_available") {
+      status.updateAvailable = value.toLowerCase() === "true";
+    } else if (key === "release_url" && value.toLowerCase() !== "unavailable") {
+      status.releaseURL = value;
+    } else if (key === "install_supported") {
+      status.installSupported = value.toLowerCase() === "true";
+    } else if (key === "install_message") {
+      status.installMessage = value;
+    }
+  }
+  return status;
+}
+
+function runBinary(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { windowsHide: true, timeout: options.timeout || 30000, cwd: options.cwd || projectRoot }, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function checkLauncherUpdates() {
+  try {
+    const binaryPath = await ensureBackendBinary();
+    const result = await runBinary(binaryPath, ["update", "check", "--include-prereleases"], { cwd: projectRoot });
+    const status = parseUpdateStatus(result.stdout);
+    return {
+      ok: true,
+      ...status,
+      message: status.updateAvailable
+        ? `Update Aurora Orchestrator to version ${status.latestVersion}.`
+        : "You are using the most up to date version of Aurora Orchestrator, have fun building things!",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      currentVersion: packageInfo.version,
+      latestVersion: "",
+      updateAvailable: false,
+      installSupported: false,
+      installMessage: "Automatic install is not available yet. Use Check for Updates again later or install a published release manually.",
+      message: `Update check could not complete: ${error.message}`,
+    };
+  }
+}
+
+ipcMain.handle("launcher:get-info", async () => ({
+  version: packageInfo.version,
+  projectRoot,
+  defaultRepoPath: expectedRepoPath,
+}));
+
+ipcMain.handle("launcher:open-readme", async () => {
+  const result = await shell.openPath(path.join(projectRoot, "README.md"));
+  return { ok: result === "", message: result };
+});
+
+ipcMain.handle("launcher:select-repo", async (event) => {
+  const browserWindow = browserWindowForEvent(event);
+  const result = await dialog.showOpenDialog(browserWindow, {
+    title: "Choose the repo or project folder Aurora should work on",
+    properties: ["openDirectory"],
+  });
+  if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+    return { cancelled: true };
+  }
+  const repoPath = result.filePaths[0];
+  return {
+    cancelled: false,
+    repoPath,
+    label: path.basename(repoPath),
+  };
+});
+
+ipcMain.handle("launcher:check-updates", async () => checkLauncherUpdates());
+
+ipcMain.handle("launcher:start", async (event, payload = {}) => {
+  const launcherWindow = browserWindowForEvent(event);
+  const repoPath = String(payload.repoPath || "").trim();
+  const session = await startBackendForRepo({ repoPath });
+  createWindow({
+    address: session.address,
+    expectedRepoPath: session.repoPath,
+    repoPath: session.repoPath,
+    pid: session.pid,
+    ownedBackend: true,
+    autoConnect: true,
+  });
+  if (!launcherWindow.isDestroyed()) {
+    launcherWindow.close();
+  }
+  return session;
+});
 
 ipcMain.handle("protocol:connect", async (event, payload = {}) => {
   return connectWindow(browserWindowForEvent(event), payload.address || defaultAddress);
@@ -674,11 +849,19 @@ app.whenReady().then(() => {
     Menu.setApplicationMenu(null);
   }
 
-  createWindow();
+  if (shouldOpenLauncher()) {
+    createLauncherWindow();
+  } else {
+    createWindow({ expectedRepoPath, repoPath: expectedRepoPath });
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+      if (shouldOpenLauncher()) {
+        createLauncherWindow();
+      } else {
+        createWindow({ expectedRepoPath, repoPath: expectedRepoPath });
+      }
     }
   });
 });

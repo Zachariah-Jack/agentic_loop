@@ -186,7 +186,7 @@ const state = {
     autoScroll: persistedShellSession.activityFilters.autoScroll !== false,
     categories: { ...persistedShellSession.activityFilters.categories },
   },
-  activeTab: persistedShellSession.activeTab || "home",
+  activeTab: "home",
   localEventSequence: 0,
   lastRefreshedAt: "",
   connectionTiming: {
@@ -228,7 +228,7 @@ const state = {
     kind: "info",
     text: persistedShellSession.lastConnected
       ? "Reattach to the loopback control server to resume the current operator view."
-      : "Start `orchestrator control serve`, then connect this early protocol shell.",
+      : "Choose a project in the Aurora launcher, then start mission control.",
   },
 };
 
@@ -309,6 +309,7 @@ function initializeRefs() {
   refs.auroraGauge = document.getElementById("aurora-gauge");
   refs.auroraProgressLabel = document.getElementById("aurora-progress-label");
   refs.auroraProgressSubtitle = document.getElementById("aurora-progress-subtitle");
+  refs.auroraCycleEstimate = document.getElementById("aurora-cycle-estimate");
   refs.auroraSystemState = document.getElementById("aurora-system-state");
   refs.auroraRepoLabel = document.getElementById("aurora-repo-label");
   refs.auroraBranchLabel = document.getElementById("aurora-branch-label");
@@ -1033,8 +1034,16 @@ function renderIssue() {
   refs.issueBody.textContent = `${state.lastIssue.message}\n${new Date(state.lastIssue.at).toLocaleString()}`;
 }
 
+function copyableAttributes(label, value) {
+  const text = String(value || "").trim();
+  if (text === "" || text === "Unavailable" || text === "None" || text === "No active run" || text.startsWith("No repo loaded")) {
+    return "";
+  }
+  return ` data-copy-value="${escapeHTML(text)}" data-copy-label="${escapeHTML(label)}" title="Click to copy ${escapeHTML(label)}"`;
+}
+
 function homeRow(label, value) {
-  return `<div class="home-kv"><span>${escapeHTML(label)}</span><strong title="${escapeHTML(value)}">${escapeHTML(value)}</strong></div>`;
+  return `<div class="home-kv"><span>${escapeHTML(label)}</span><strong class="copyable-value"${copyableAttributes(label, value)}>${escapeHTML(value)}</strong></div>`;
 }
 
 const projectFilePurposes = {
@@ -1145,13 +1154,11 @@ function renderTopStatus() {
   }));
 
   refs.topStatusBar.innerHTML = `
-    <div class="top-status-item top-status-hero ${escapeHTML(vm.connectionClass)}"><span>${escapeHTML(vm.connectionLabel)}</span><strong>${escapeHTML(vm.connectionDurationLabel)}</strong><small>${escapeHTML(vm.connectionDetail)}</small></div>
-    <div class="top-status-item top-status-hero ${escapeHTML(vm.loopClass)}"><span>${escapeHTML(vm.loopLabel)}</span><strong>${escapeHTML(vm.loopDetail)}</strong><small>${escapeHTML(vm.loopStage)} | ${escapeHTML(vm.loopTurn)} | updated ${escapeHTML(vm.loopLastUpdate)}</small></div>
-    <div class="top-status-item"><span>Engine Address</span><strong title="${escapeHTML(vm.address)}">${escapeHTML(vm.address)}</strong></div>
-    <div class="top-status-item top-status-wide"><span>Repo</span><strong title="${escapeHTML(vm.repoRoot)}">${escapeHTML(vm.repoRoot)}</strong></div>
-    <div class="top-status-item"><span>Run</span><strong title="${escapeHTML(vm.runID)}">${escapeHTML(vm.runID)}</strong></div>
-    <div class="top-status-item top-status-wide"><span>Stop / Blocker</span><strong title="${escapeHTML(vm.blocker)}">${escapeHTML(vm.blocker)}</strong></div>
-    <div class="top-status-item"><span>Verbosity</span><strong>${escapeHTML(vm.verbosity)}</strong></div>
+    <div class="top-status-item top-status-hero ${escapeHTML(vm.connectionClass)}"><span>Connection</span><strong>${escapeHTML(vm.connectionLabel)}</strong><small>${escapeHTML(vm.address)}</small></div>
+    <div class="top-status-item top-status-hero ${escapeHTML(vm.loopClass)}"><span>Run State</span><strong>${escapeHTML(vm.loopDetail)}</strong><small>${escapeHTML(vm.loopStage)}</small></div>
+    <div class="top-status-item top-status-wide"><span>Repo</span><strong class="copyable-value"${copyableAttributes("Repo path", vm.repoRoot)}>${escapeHTML(vm.repoRoot)}</strong></div>
+    <div class="top-status-item"><span>Run</span><strong class="copyable-value"${copyableAttributes("Run ID", vm.runID)}>${escapeHTML(vm.runID)}</strong></div>
+    <div class="top-status-item top-status-wide ${vm.blocker === "None" ? "" : "top-status-attention"}"><span>Attention</span><strong title="${escapeHTML(vm.blocker)}">${escapeHTML(vm.blocker)}</strong></div>
   `;
   updateStickyLayoutOffset();
 }
@@ -1197,8 +1204,9 @@ function maybeFocusActionRequired(options = {}) {
   if (!approval.needsAttention && !modelBlocking) {
     return;
   }
-  if (options.force || state.activeTab === "home" || state.activeTab === "run") {
-    setActiveTab("attention", { noScroll: false });
+  renderAttentionBadge();
+  if (options.announce) {
+    setFlash("info", "Action Required has a new item. You can keep browsing; the badge will stay visible.");
   }
 }
 
@@ -1251,7 +1259,7 @@ function renderHomeDashboard() {
   const actionBlockedByRunLaunch = (action.id === "start_run" && !canStartRun)
     || (action.id === "continue_run" && !canContinueRun);
 
-  refs.homePrimaryAction.textContent = state.runLaunch.inFlight ? "Launching run..." : (action.label || "Update Dashboard");
+  refs.homePrimaryAction.textContent = state.runLaunch.inFlight ? "Launching run..." : (action.label || "Refresh");
   refs.homePrimaryAction.disabled = action.enabled === false || state.runLaunch.inFlight || actionBlockedByRunLaunch;
   refs.homePrimaryAction.dataset.action = action.id || "refresh_status";
   refs.homeStartRun.textContent = runControl.startLabel || "Start Build";
@@ -1273,6 +1281,7 @@ function renderHomeDashboard() {
   if (refs.homeClearStopContinue) {
     refs.homeClearStopContinue.hidden = !(vm.approval.safeStop && vm.approval.safeStop.present);
     refs.homeClearStopContinue.disabled = state.runLaunch.inFlight;
+    refs.homeClearStopContinue.textContent = "Clear Stop";
   }
 
   const visibleHomeError = vm.repo && vm.repo.mismatch ? vm.repo.message : vm.homeError;
@@ -1422,6 +1431,9 @@ function renderAuroraDashboard() {
   refs.auroraGauge.style.setProperty("--gauge-angle", `${progressGeometry.needleAngleDegrees}deg`);
   refs.auroraProgressLabel.textContent = progressGeometry.known ? progressGeometry.percentLabel : "Phase";
   refs.auroraProgressSubtitle.textContent = "OVERALL PROGRESS";
+  if (refs.auroraCycleEstimate) {
+    refs.auroraCycleEstimate.textContent = cycleVM.cycleLabel;
+  }
   refs.auroraSystemState.textContent = runStateLabelForAurora(loopVM);
   refs.auroraRepoLabel.textContent = shortPathName(runtime.repo_root || activeRepoPath() || "No repo loaded");
   refs.auroraBranchLabel.textContent = latestBranchLabel(state.snapshot);
@@ -1444,10 +1456,9 @@ function renderAuroraDashboard() {
     || String(statusVM.latestPlannerOutcome || "").toLowerCase() !== "unavailable";
   refs.auroraStatusChips.innerHTML = [
     chipHTML("Planner", plannerActive && !executorActive, "planner"),
-    chipHTML("Executor / Codex", executorActive, "executor"),
+    chipHTML("Executor", executorActive, "executor"),
     chipHTML("Waiting", loopVM.state === "idle" || loopVM.state === "stopped", "waiting"),
     chipHTML("Human Input", approvalVM.needsAttention || statusVM.stopReason === "planner_ask_human", "human"),
-    chipHTML("Paused", loopVM.state === "stopped", "paused"),
     chipHTML("Complete", loopVM.state === "completed" || statusVM.completed, "complete"),
   ].join("");
 
@@ -1593,7 +1604,7 @@ function renderNtfyCard() {
   const cfg = state.runtimeConfig && state.runtimeConfig.ntfy ? state.runtimeConfig.ntfy : {};
   if (!state.ntfy.dirty) {
     if (refs.ntfyServerURL && document.activeElement !== refs.ntfyServerURL) {
-      refs.ntfyServerURL.value = cfg.server_url || "";
+      refs.ntfyServerURL.value = cfg.server_url || "https://ntfy.sh";
     }
     if (refs.ntfyTopic && document.activeElement !== refs.ntfyTopic) {
       refs.ntfyTopic.value = cfg.topic || "";
@@ -1872,7 +1883,7 @@ function renderConnection() {
     ),
   }));
   refs.connectionBadge.className = `badge ${vm.className}`;
-  refs.connectionBadge.textContent = `${vm.label} | ${vm.durationLabel}`;
+  refs.connectionBadge.textContent = vm.label;
   refs.connectionDetails.textContent = shellHelpers.buildConnectionDetails(state.connection, state.reconnect);
   renderTopStatus();
   renderDisconnectedBanner();
@@ -1895,7 +1906,7 @@ function renderConnectionTimers() {
     ),
   }));
   refs.connectionBadge.className = `badge ${vm.className}`;
-  refs.connectionBadge.textContent = `${vm.label} | ${vm.durationLabel}`;
+  refs.connectionBadge.textContent = vm.label;
   renderTopStatus();
 }
 
@@ -2129,7 +2140,7 @@ function renderApproval() {
   } else if (safeStop.present) {
     const rows = [
       ["What happened?", "Safe stop was requested."],
-      ["Recommended Action", "Use Clear Stop and Continue when you are ready to resume."],
+      ["Recommended Action", "Use Clear Stop to remove the stop flag. Continue Build is a separate Home action when you are ready."],
       ["Run ID", safeStop.runID],
       ["Stop Flag Present", safeStop.flagPresent ? "yes" : "no"],
       ["Reason", safeStop.reason],
@@ -2144,7 +2155,7 @@ function renderApproval() {
       ${rows
         .map(([label, value]) => `<div class="detail-row"><div class="detail-label">${escapeHTML(label)}</div><div class="detail-value">${escapeHTML(value)}</div></div>`)
         .join("")}
-      <div class="button-row"><button class="button button-primary" data-summary-action="clear_stop_continue">Clear Stop and Continue</button></div>
+      <div class="button-row"><button class="button button-primary" data-summary-action="clear_stop">Clear Stop</button></div>
     `;
   } else if (vm.staleGuard && vm.staleGuard.present) {
     refs.approvalBody.innerHTML = `
@@ -3364,7 +3375,7 @@ async function autoTestModelHealth(trigger = "connect") {
     setFlash("error", `Model health check needs attention: ${state.modelTests.error}`);
     maybeFocusActionRequired();
   } else {
-    setFlash("success", "Planner and Codex model checks completed.");
+    recordLocalActivity("model_health_check_completed", { trigger }, "Planner and Codex model checks completed.");
   }
 }
 
@@ -3382,27 +3393,18 @@ async function clearStop() {
   try {
     await window.orchestratorConsole.clearStop(activeRunID(), state.address);
     await refreshStatus({ quiet: true });
-    setFlash("success", "Safe stop flag cleared.");
+    setFlash("success", "Safe stop flag cleared. Use Continue Build when you are ready.");
   } catch (error) {
     reportIssue("clear stop", error);
   }
 }
 
 async function clearStopAndContinue() {
-  try {
-    state.actionRequired.status = "Clearing safe stop and preparing to continue...";
-    renderApproval();
-    await window.orchestratorConsole.clearStop(activeRunID(), state.address);
-    await refreshStatus({ quiet: true });
-    state.actionRequired.status = "Safe stop cleared. Continuing the run...";
-    setFlash("success", "Safe stop cleared. Continuing through the engine protocol...");
-    await continueRunFromHome({ skipAskHumanGuard: false });
-  } catch (error) {
-    state.actionRequired.status = `Clear Stop and Continue failed: ${error.message}`;
-    reportIssue("clear stop and continue", error);
-  } finally {
-    renderApproval();
-  }
+  state.actionRequired.status = "Clearing safe stop only. Continue Build remains a separate Home action.";
+  renderApproval();
+  await clearStop();
+  state.actionRequired.status = "Safe stop cleared. Continue Build is available when the run is resumable.";
+  renderApproval();
 }
 
 function currentAskHumanViewModel() {
@@ -3978,6 +3980,9 @@ function handleSummaryAction(action) {
     case "recover_backend":
       void restartBackend();
       return;
+    case "clear_stop":
+      void clearStop();
+      return;
     case "clear_stop_continue":
       void clearStopAndContinue();
       return;
@@ -4517,6 +4522,9 @@ function handleHomePrimaryAction() {
     case "recover_backend":
       void restartBackend();
       return;
+    case "clear_stop":
+      void clearStop();
+      return;
     case "clear_stop_continue":
       void clearStopAndContinue();
       return;
@@ -4534,7 +4542,7 @@ function handleIncomingEvent(event) {
     scheduleSoftRefresh();
   }
   if (event && (event.event === "executor_approval_required" || event.event === "approval_required" || event.event === "worker_approval_required" || event.event === "executor_turn_failed" || event.event === "fault_recorded" || event.event === "stop_flag_detected" || event.event === "human.question.presented" || (event.event === "planner_turn_completed" && payload.planner_outcome === "ask_human"))) {
-    maybeFocusActionRequired({ force: true });
+    maybeFocusActionRequired({ announce: state.activeTab !== "attention" });
   }
 }
 
@@ -4543,6 +4551,9 @@ function handleConnectionState(connection) {
   const wasConnecting = state.connection.status === "connecting";
   if (connection && connection.expectedRepoPath) {
     state.expectedRepoPath = connection.expectedRepoPath;
+  }
+  if (connection && connection.address) {
+    state.address = connection.address;
   }
   state.connection = connection;
   if (connection.connected) {
@@ -4644,6 +4655,14 @@ function wireEvents() {
     openSessionContextMenu(tab.getAttribute("data-session-id") || "", event);
   });
   document.addEventListener("click", (event) => {
+    const copyable = event.target.closest("[data-copy-value]");
+    if (copyable) {
+      event.preventDefault();
+      event.stopPropagation();
+      const label = copyable.getAttribute("data-copy-label") || "Value";
+      void copyText(copyable.getAttribute("data-copy-value") || "", `${label} copied.`);
+      return;
+    }
     if (refs.sessionContextMenu && !refs.sessionContextMenu.contains(event.target)) {
       state.sessionMenu.open = false;
       renderSessionTabs();
@@ -4659,7 +4678,7 @@ function wireEvents() {
   refs.homeOpenLiveOutput.addEventListener("click", openLiveOutput);
   refs.homeCopyDebugBundle.addEventListener("click", () => void copyDebugBundle());
   refs.homeRecoverBackend.addEventListener("click", () => void restartBackend());
-  refs.homeClearStopContinue.addEventListener("click", () => void clearStopAndContinue());
+  refs.homeClearStopContinue.addEventListener("click", () => void clearStop());
   refs.homeSafeStop.addEventListener("click", () => void safeStop());
   refs.homeStartRun.addEventListener("click", () => void startRunFromHome());
   refs.homeContinueRun.addEventListener("click", () => void continueRunFromHome());
@@ -4992,6 +5011,13 @@ async function initialize() {
   initializeRefs();
   wireEvents();
   state.connection = await window.orchestratorConsole.getConnectionState();
+  if (state.connection && state.connection.address) {
+    state.address = state.connection.address;
+  }
+  if (state.connection && state.connection.expectedRepoPath) {
+    state.expectedRepoPath = state.connection.expectedRepoPath;
+  }
+  const shouldAutoConnect = Boolean(state.connection && state.connection.autoConnect);
   state.terminal = await window.orchestratorConsole.getTerminalState();
   refs.verbositySelect.value = persistedShellSession.verbosity || "normal";
   refs.sideChatContextPolicy.value = persistedShellSession.sideChatContextPolicy || "repo_and_latest_run_summary";
@@ -5008,7 +5034,9 @@ async function initialize() {
     renderConnectionTimers();
     renderAuroraDashboard();
   }, 1000);
-  if (persistedShellSession.lastConnected && state.reconnect.enabled) {
+  if (shouldAutoConnect) {
+    void connect({ quiet: true, automatic: true, trigger: "launcher_start" });
+  } else if (persistedShellSession.lastConnected && state.reconnect.enabled) {
     void connect({ quiet: true, automatic: true, trigger: "startup_resume" });
   }
 }
@@ -5017,7 +5045,9 @@ function escapeHTML(value) {
   return String(value || "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 window.addEventListener("DOMContentLoaded", () => {

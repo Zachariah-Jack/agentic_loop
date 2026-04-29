@@ -104,6 +104,7 @@ const {
   ownerMarker,
   fileModifiedTime,
   listenerMatchesOwnedMetadata,
+  resolveBackendBinary,
   clearOwnedBackendPort,
   restartOwnedBackend,
 } = require("../electron/backend-manager");
@@ -458,14 +459,34 @@ test("Aurora shell uses full-window mission-control zones and theme tokens", () 
     assert.match(css, new RegExp(token.replace("-", "\\-")));
   }
 
-  assert.match(css, /body\s*\{[\s\S]*grid-template-rows:\s*54px 48px 46px minmax\(0, 1fr\) 28px/);
+  assert.match(css, /body\s*\{[\s\S]*grid-template-rows:\s*50px 42px 38px minmax\(0, 1fr\) 24px/);
   assert.match(css, /\.workspace-shell\s*\{[\s\S]*grid-template-columns:\s*64px minmax\(0, 1fr\)/);
-  assert.match(css, /\.aurora-shell\s*\{[\s\S]*grid-template-columns:\s*336px minmax\(460px, 1fr\) 384px/);
+  assert.match(css, /\.aurora-shell\s*\{[\s\S]*grid-template-columns:\s*320px minmax\(560px, 1fr\) 380px/);
   assert.match(css, /\.side-nav-item::before\s*\{[\s\S]*content:\s*attr\(data-icon\)/);
   assert.match(html, /class="aurora-project-panel"/);
   assert.match(html, /class="aurora-mission-panel"/);
   assert.match(html, /class="aurora-chat-panel"/);
+  assert.match(html, /id="aurora-cycle-estimate"/);
   assert.doesNotMatch(html, /A polished control surface for planner-led runs/);
+});
+
+test("Aurora launcher provides app-first startup, repo selection, and update status", () => {
+  const root = path.resolve(__dirname, "..");
+  const main = fs.readFileSync(path.join(root, "electron", "main.js"), "utf8");
+  const preload = fs.readFileSync(path.join(root, "electron", "launcher-preload.js"), "utf8");
+  const html = fs.readFileSync(path.join(root, "src", "launcher", "index.html"), "utf8");
+  const launcher = fs.readFileSync(path.join(root, "src", "launcher", "launcher.js"), "utf8");
+
+  assert.match(main, /createLauncherWindow/);
+  assert.match(main, /ORCHESTRATOR_V2_FORCE_LAUNCHER/);
+  assert.match(main, /launcher:start/);
+  assert.match(main, /startBackendForRepo/);
+  assert.match(main, /checkLauncherUpdates/);
+  assert.match(preload, /auroraLauncher/);
+  assert.match(html, /Choose Your Project/);
+  assert.match(html, /Start Aurora/);
+  assert.match(html, /Read Me/);
+  assert.match(launcher, /Preparing Aurora/);
 });
 
 test("Electron shell hides the native menu unless explicitly requested", () => {
@@ -481,6 +502,7 @@ test("Electron shell hides the native menu unless explicitly requested", () => {
 test("Aurora readable controls cover selected files, editors, inputs, ntfy, and chat", () => {
   const root = path.resolve(__dirname, "..");
   const css = fs.readFileSync(path.join(root, "src", "renderer", "styles.css"), "utf8");
+  const appSource = fs.readFileSync(path.join(root, "src", "renderer", "app.js"), "utf8");
 
   assert.match(css, /\.project-file-card:active[\s\S]*color:\s*var\(--text-primary\)/);
   assert.match(css, /\.project-file-card\.is-goal-card\.is-saved[\s\S]*border-color:\s*rgba\(53, 226, 125, 0\.7\)/);
@@ -489,6 +511,11 @@ test("Aurora readable controls cover selected files, editors, inputs, ntfy, and 
   assert.match(css, /\.ntfy-status[\s\S]*background:\s*var\(--surface-input\)[\s\S]*color:\s*var\(--text-secondary\)/);
   assert.match(css, /\.side-chat-item[\s\S]*color:\s*var\(--text-primary\)/);
   assert.match(css, /select option\s*\{[\s\S]*background:\s*#07111f[\s\S]*color:\s*#eff7ff/);
+  assert.match(css, /\.events-list\s*\{[\s\S]*gap:\s*5px/);
+  assert.match(css, /\.panel-terminal\s*\{[\s\S]*grid-column:\s*1 \/ -1/);
+  assert.match(css, /\.copyable-value/);
+  assert.match(appSource, /data-copy-value/);
+  assert.match(appSource, /cfg\.server_url \|\| "https:\/\/ntfy\.sh"/);
 });
 
 test("Aurora gauge progress normalization uses the speedometer geometry", () => {
@@ -538,6 +565,8 @@ test("dogfood launcher preserves Electron environment assignments", () => {
 
   assert.match(script, /\$artifactsPath = Join-Path \$resolvedRepoPath/);
   assert.match(script, /dogfood\.step: repair target repo setup/);
+  assert.match(script, /\[switch\]\$StartupLauncher/);
+  assert.match(script, /ORCHESTRATOR_V2_FORCE_LAUNCHER/);
   assert.match(script, /`\$env:ORCHESTRATOR_V2_SHELL_ADDR/);
   assert.match(script, /Electron shell exited before a window could stay open/);
 });
@@ -1020,14 +1049,15 @@ test("long roadmap and planner progress text is grouped into collapsible status 
   assert.equal(basis.open, false);
 });
 
-test("buildRecommendedActionViewModel guides disconnected users to connect", () => {
+test("buildRecommendedActionViewModel guides disconnected users to launcher/reconnect", () => {
   const vm = buildRecommendedActionViewModel(null, {
     connection: { connected: false, status: "disconnected", address: "http://127.0.0.1:44777" },
   });
 
   assert.equal(vm.state, "disconnected");
-  assert.equal(vm.title, "Connect to the app engine.");
+  assert.equal(vm.title, "Start Aurora from the launcher.");
   assert.equal(vm.primaryAction.id, "connect");
+  assert.equal(vm.primaryAction.label, "Reconnect");
   assert.equal(vm.primaryAction.enabled, true);
 });
 
@@ -1359,10 +1389,23 @@ test("safe stop state becomes Action Required with clear-stop continue guidance"
   assert.equal(approval.safeStop.present, true);
   assert.match(approval.summary, /Safe stop was requested/);
   assert.equal(recommended.state, "safe_stop_requested");
-  assert.equal(recommended.primaryAction.id, "clear_stop_continue");
+  assert.equal(recommended.primaryAction.id, "clear_stop");
   assert.equal(controls.continueEnabled, false);
   assert.match(controls.continueDisabledReason, /safe stop was requested/i);
   assert.equal(loop.state, "safe_stop_requested");
+});
+
+test("renderer no longer auto-forces Action Required or continues from Clear Stop", () => {
+  const root = path.resolve(__dirname, "..");
+  const appSource = fs.readFileSync(path.join(root, "src", "renderer", "app.js"), "utf8");
+  const maybeFocusBody = appSource.match(/function maybeFocusActionRequired[\s\S]*?\n\}/)[0];
+  const clearStopBody = appSource.match(/async function clearStopAndContinue[\s\S]*?function currentAskHumanViewModel/)[0];
+
+  assert.doesNotMatch(maybeFocusBody, /setActiveTab\("attention"/);
+  assert.match(maybeFocusBody, /renderAttentionBadge/);
+  assert.doesNotMatch(clearStopBody, /continueRunFromHome/);
+  assert.match(clearStopBody, /Clearing safe stop only/);
+  assert.match(appSource, /data-summary-action="clear_stop"/);
 });
 
 test("non-actionable approval metadata does not create Action Required state", () => {
@@ -1575,7 +1618,7 @@ test("debug bundle includes safe run diagnosis fields and excludes secrets", () 
   assert.match(bundle, /Progress basis: No code changes were made/);
   assert.match(bundle, /Stop flag present: yes/);
   assert.match(bundle, /Latest stop_flag_detected event: 2026-04-23T10:11:00Z/);
-  assert.match(bundle, /Side Chat affects active run: no/);
+  assert.match(bundle, /Run Q&A affects active run: no/);
   assert.match(bundle, /Last side-chat action timestamp: 2026-04-23T10:10:00Z/);
   assert.match(bundle, /Secrets\/API keys\/auth tokens are intentionally excluded/);
   assert.doesNotMatch(bundle, /sk-secret123456/);
@@ -2161,12 +2204,15 @@ test("dogfood startup helper launches the control server and shell together", ()
   assert.match(script, /Invoke-RestMethod/);
   assert.match(launcher, /WindowStyle Hidden/);
   assert.match(launcher, /start-v2-dogfood\.ps1/);
+  assert.match(launcher, /StartupLauncher/);
+  assert.match(launcher, /SkipBuild/);
 });
 
 test("backend ownership helpers avoid killing unknown processes", () => {
   assert.equal(isOwnedBackend({ owner: ownerMarker, pid: 1234 }), true);
   assert.equal(isOwnedBackend({ owner: "someone-else", pid: 1234 }), false);
   assert.equal(metadataMatchesAddress({ control_addr: "127.0.0.1:44777" }, "http://127.0.0.1:44777"), true);
+  assert.match(resolveBackendBinary({ metaPath: path.join(__dirname, "missing-backend-meta.json") }), /dist[\\/]+orchestrator(?:\.exe)?$/);
   assert.equal(metadataMatchesAddress({ control_addr: "127.0.0.1:44777" }, "http://127.0.0.1:44778"), false);
   assert.equal(listenerMatchesOwnedMetadata({
     pid: 111,
@@ -2659,8 +2705,8 @@ test("buildSideChatViewModel normalizes recorded side chat messages", () => {
 
   assert.equal(vm.count, 1);
   assert.equal(vm.nonInterfering, true);
-  assert.match(vm.modeDescription, /explicit audited action/);
-  assert.equal(vm.buttonLabel, "Ask Side Chat");
+  assert.match(vm.modeDescription, /explicit action/);
+  assert.equal(vm.buttonLabel, "Ask Aurora");
   assert.equal(vm.items[0].rawText, "What remains before release?");
   assert.equal(vm.items[0].backendState, "context_agent");
   assert.equal(vm.items[0].runID, "run_22");

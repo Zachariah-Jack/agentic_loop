@@ -3,6 +3,7 @@ param(
   [string]$ControlAddr = "127.0.0.1:44777",
   [switch]$SkipBuild,
   [switch]$SkipInstall,
+  [switch]$StartupLauncher,
   [switch]$DebugVisibleWindows
 )
 
@@ -388,7 +389,7 @@ if (-not $SkipBuild) {
   & go build -o $binaryPath (Join-Path $projectRoot "cmd\orchestrator")
 }
 
-if (-not (Test-Path $binaryPath)) {
+if (-not $StartupLauncher -and -not (Test-Path $binaryPath)) {
   throw "orchestrator binary not found at $binaryPath"
 }
 
@@ -409,6 +410,35 @@ $controlOut = Join-Path $logsPath "v2-control-server.out.log"
 $controlErr = Join-Path $logsPath "v2-control-server.err.log"
 $shellOut = Join-Path $logsPath "v2-shell.out.log"
 $shellErr = Join-Path $logsPath "v2-shell.err.log"
+
+if ($StartupLauncher) {
+  Write-Host "dogfood.step: launch Aurora startup launcher"
+  $launcherCommand = "`$env:ORCHESTRATOR_V2_FORCE_LAUNCHER = `"1`"; Remove-Item Env:\ORCHESTRATOR_V2_EXPECTED_REPO -ErrorAction SilentlyContinue; cd `"$shellPath`"; npm run dev"
+  if ($DebugVisibleWindows) {
+    Start-Process powershell -WorkingDirectory $shellPath -ArgumentList @(
+      "-NoExit",
+      "-ExecutionPolicy", "Bypass",
+      "-Command", $launcherCommand
+    )
+    Write-Host "dogfood.status: startup launcher opened in debug-visible mode"
+    return
+  }
+  $shellProcess = Start-Process powershell -WorkingDirectory $shellPath -WindowStyle Hidden -PassThru -RedirectStandardOutput $shellOut -RedirectStandardError $shellErr -ArgumentList @(
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-Command", $launcherCommand
+  )
+  Start-Sleep -Seconds 2
+  if ($shellProcess.HasExited) {
+    $shellOutTail = if (Test-Path $shellOut) { (Get-Content $shellOut -Tail 40 | Out-String).Trim() } else { "" }
+    $shellErrTail = if (Test-Path $shellErr) { (Get-Content $shellErr -Tail 80 | Out-String).Trim() } else { "" }
+    throw "dogfood.error: Aurora startup launcher exited before a window could stay open. exit_code=$($shellProcess.ExitCode) shell_out=$shellOut shell_err=$shellErr`n--- shell stdout tail ---`n$shellOutTail`n--- shell stderr tail ---`n$shellErrTail"
+  }
+  Write-Host "dogfood.status: startup launcher opened"
+  Write-Host "dogfood.logs: $logsPath"
+  Wait-Process -Id $shellProcess.Id
+  return
+}
 
 Write-Host "dogfood.step: repair target repo setup"
 Push-Location $resolvedRepoPath

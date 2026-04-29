@@ -39,14 +39,14 @@
         <div class="top-status-item"><span>Verbosity</span><strong>normal</strong></div>
       </div>
       <div class="top-status-actions">
-        <button id="top-refresh" class="button" title="Gets the latest run, connection, planner, worker, and approval state.">Update Dashboard</button>
-        <button id="top-reconnect" class="button button-primary">Connect</button>
+        <button id="top-refresh" class="button" title="Gets the latest run, connection, planner, worker, and approval state.">Refresh</button>
+        <button id="top-reconnect" class="button button-primary">Reconnect</button>
       </div>
     </section>
 
     <section id="disconnected-banner" class="connection-banner">
       <strong>Connection Status: Not Connected.</strong>
-      <span>Start the Orchestrator engine for your repo, confirm the address, then click Connect.</span>
+      <span>Choose a project from the launcher, or use Settings to reconnect to a local engine.</span>
     </section>
 
     <div class="workspace-shell">
@@ -66,9 +66,9 @@
     <main class="app-grid">
       <section id="home-dashboard" class="panel panel-home aurora-dashboard" data-pane="home">
         <div class="aurora-topline">
-          <div>
-            <div class="eyebrow">Aurora Orchestrator</div>
-            <h2>Operator Dashboard</h2>
+            <div>
+              <div class="eyebrow">Aurora Orchestrator</div>
+            <h2>Home</h2>
             <p id="home-recommendation-title" class="home-recommendation-title">Connect to the control server.</p>
             <p id="home-recommendation-detail" class="home-recommendation-detail">Start the local control server, then connect this shell.</p>
             <p id="home-refresh-meta" class="panel-meta">Last refreshed: Not refreshed yet</p>
@@ -162,7 +162,7 @@
                 <h3 id="aurora-stage">Waiting</h3>
                 <p id="aurora-action">No active run yet.</p>
               </div>
-              <button id="home-primary-action" class="button button-primary">Connect</button>
+              <button id="home-primary-action" class="button button-primary">Reconnect</button>
             </div>
             <div class="cycle-explainer">
               <div>
@@ -182,6 +182,7 @@
                 <div class="aurora-gauge-inner">
                   <strong id="aurora-progress-label">Phase</strong>
                   <span id="aurora-progress-subtitle">No planner progress available yet.</span>
+                  <small id="aurora-cycle-estimate" class="gauge-cycle-label">Cycle unavailable</small>
                 </div>
               </div>
             </div>
@@ -203,11 +204,11 @@
               <button id="aurora-view-logs" class="button">View Logs</button>
             </div>
             <div class="mission-secondary-controls">
-              <button id="home-refresh-everything" class="button" title="Gets the latest run, connection, planner, worker, and approval state.">Update Dashboard</button>
+              <button id="home-refresh-everything" class="button" title="Gets the latest run, connection, planner, worker, and approval state.">Refresh</button>
               <button id="home-open-live-output" class="button">Open Live Output</button>
               <button id="home-copy-debug-bundle" class="button">Copy Debug Bundle</button>
               <button id="home-recover-backend" class="button button-danger-soft">Recover Backend / Unlock Repo</button>
-              <button id="home-clear-stop-continue" class="button button-primary" hidden>Clear Stop and Continue</button>
+              <button id="home-clear-stop-continue" class="button button-primary" hidden>Clear Stop</button>
               <button id="home-safe-stop" class="button button-danger-soft hidden-control">Safe Stop</button>
             </div>
             <details class="advanced-help">
@@ -256,7 +257,7 @@
             <div class="panel-header">
               <div>
                 <h3>AI Conversation</h3>
-                <div class="panel-meta">Side chat stays separate from run control; notes are explicit.</div>
+                <div class="panel-meta">Run conversation and side questions live here; raw planner notes are explicit.</div>
               </div>
               <button id="home-open-contracts" class="button button-mini">Files</button>
             </div>
@@ -267,8 +268,8 @@
             </div>
             <div id="side-chat-body" class="side-chat-list aurora-side-chat"></div>
             <label class="field">
-              <span>Side chat / copilot question</span>
-              <textarea id="side-chat-message" rows="4" placeholder="What is happening now?"></textarea>
+              <span>Ask Aurora about this run</span>
+              <textarea id="side-chat-message" rows="4" placeholder="Ask what changed, what is blocked, or what Aurora is doing."></textarea>
             </label>
             <div class="inline-control">
               <label class="field">
@@ -279,7 +280,7 @@
                   <option value="none">none</option>
                 </select>
               </label>
-              <button id="send-side-chat-message" class="button button-primary">Ask Side Chat</button>
+              <button id="send-side-chat-message" class="button button-primary">Ask Aurora</button>
             </div>
             <div class="button-row button-row-wrap">
               <button id="side-chat-what-now" class="button button-secondary">What is happening now?</button>
@@ -290,13 +291,14 @@
               <button id="side-chat-copy-conversation" class="button button-secondary">Copy chat</button>
               <button id="side-chat-copy-support" class="button button-secondary">Copy support</button>
             </div>
-            <div class="control-note-box">
+            <details class="control-note-box">
+              <summary>Send a raw note to the planner</summary>
               <label class="field">
                 <span>Planner input for next safe point</span>
                 <textarea id="control-message" rows="4" placeholder="Type the raw note. The app will not rewrite it."></textarea>
               </label>
               <button id="send-control-message" class="button">Queue Raw Note</button>
-            </div>
+            </details>
             <div class="quick-button-grid hidden-control">
               <button id="home-open-latest-artifact" class="button">Open Latest Artifact</button>
               <button id="home-quick-live-output" class="button">Open Live Output</button>
@@ -315,8 +317,8 @@
           <input id="address-input" type="text" placeholder="http://127.0.0.1:44777" />
         </label>
         <label class="activity-toggle connection-toggle"><input id="auto-reconnect" type="checkbox" checked /> Auto reconnect and rehydrate</label>
-        <button id="connect-button" class="button button-primary">Connect</button>
-        <p id="connection-details" class="panel-note">Start <code>orchestrator control serve</code> first. This shell talks only to the loopback control server and event stream.</p>
+        <button id="connect-button" class="button button-primary">Reconnect</button>
+        <p id="connection-details" class="panel-note">Aurora normally starts from the launcher. This connection panel is for troubleshooting or attaching to a local engine.</p>
         <div id="issue-box" class="issue-box" hidden>
           <div class="viewer-heading">Last Protocol Issue</div>
           <div id="issue-body" class="issue-body"></div>
@@ -416,7 +418,7 @@
       <section class="panel panel-controls" data-pane="run">
         <h2>Run Controls</h2>
         <div class="button-row">
-          <button id="refresh-status" class="button" title="Gets the latest run, connection, planner, worker, and approval state.">Update Dashboard</button>
+          <button id="refresh-status" class="button" title="Gets the latest run, connection, planner, worker, and approval state.">Refresh</button>
           <button id="refresh-artifacts" class="button" title="Reloads generated planner/executor/context files.">Reload Outputs</button>
           <button id="safe-stop" class="button">Safe Stop</button>
           <button id="clear-stop" class="button">Clear Stop</button>
@@ -436,15 +438,15 @@
       </section>
 
       <section id="control-chat-panel" class="panel panel-chat" data-pane="chat">
-        <h2>AI Conversation</h2>
-        <p class="panel-note">The primary conversation composer now lives on the right side of the Aurora dashboard. Raw run notes still route through <code>inject_control_message</code> and are consumed only at safe planner boundaries.</p>
+        <h2>Conversation Archive</h2>
+        <p class="panel-note">Home contains the live conversation panel. This screen is the quiet archive and orientation surface for messages that do not directly drive run control.</p>
         <button class="button button-primary" data-tab-target="home">Open Aurora Dashboard</button>
       </section>
 
       <section class="panel panel-side-chat" data-pane="chat">
         <div class="panel-header">
-          <h2>Side Chat Notes</h2>
-          <div class="panel-meta">Side chat is visible in the home dashboard. Normal messages do not affect the active run.</div>
+          <h2>Side Notes</h2>
+          <div class="panel-meta">Side questions explain observable context. Raw planner notes remain a separate explicit action.</div>
         </div>
         <div class="non-interfering-banner">Open Home to chat, inject raw notes, or ask the observable-context assistant what changed.</div>
       </section>
@@ -530,8 +532,8 @@
 
       <section id="workers-panel" class="panel panel-workers" data-pane="workers">
         <div class="panel-header">
-          <h2>Workers</h2>
-          <div class="panel-meta">Explicit operator-triggered worker actions only. Apply and advanced worker control remain deferred.</div>
+          <h2>Worker Activity</h2>
+          <div class="panel-meta">Agents and workers dispatched by the planner or explicit advanced actions outside the main Codex conversation.</div>
         </div>
         <div class="worker-layout">
           <div class="worker-list-shell">
@@ -544,7 +546,8 @@
             <div class="viewer-heading">Selected Worker</div>
             <div id="worker-detail-body" class="detail-grid"></div>
 
-            <div class="worker-form-shell">
+            <details class="worker-form-shell advanced-worker-controls">
+              <summary>Advanced manual worker controls</summary>
               <div class="viewer-heading">Create Worker</div>
               <label class="field">
                 <span>Worker name</span>
@@ -555,18 +558,20 @@
                 <textarea id="worker-create-scope" rows="3" placeholder="Inspect the shell layout and wiring boundaries."></textarea>
               </label>
               <button id="worker-create" class="button button-primary">Create Worker</button>
-            </div>
+            </details>
 
-            <div class="worker-form-shell">
+            <details class="worker-form-shell advanced-worker-controls">
+              <summary>Dispatch selected worker</summary>
               <div class="viewer-heading">Dispatch Worker</div>
               <label class="field">
                 <span>Bounded executor prompt</span>
                 <textarea id="worker-dispatch-prompt" rows="5" placeholder="Inspect the shell, summarize the next bounded edit, and write only within the assigned scope."></textarea>
               </label>
               <button id="worker-dispatch" class="button button-primary">Dispatch Selected Worker</button>
-            </div>
+            </details>
 
-            <div class="worker-form-shell">
+            <details class="worker-form-shell advanced-worker-controls">
+              <summary>Integration preview</summary>
               <div class="viewer-heading">Integrate Worker Outputs</div>
               <label class="field">
                 <span>Worker IDs (comma-separated)</span>
@@ -577,7 +582,7 @@
                 <button id="worker-remove" class="button">Remove Selected Worker</button>
               </div>
               <div class="panel-note">Integration builds a preview artifact only. Manual apply is still deferred from this shell slice.</div>
-            </div>
+            </details>
 
             <div class="worker-form-shell">
               <div class="viewer-heading">Latest Worker Action Result</div>
@@ -769,7 +774,7 @@
     </main>
     </div>
 
-    <footer id="flash-message" class="flash flash-info">Start <code>orchestrator control serve</code>, then connect this early protocol shell.</footer>
+    <footer id="flash-message" class="flash flash-info">Choose a project in the Aurora launcher, then start mission control.</footer>
 
     <script src="./shell-helpers.js"></script>
     <script src="./view-model.js"></script>

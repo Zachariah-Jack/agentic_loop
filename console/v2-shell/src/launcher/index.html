@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Aurora Orchestrator Launcher</title>
+    <link rel="icon" href="../../assets/icon.svg" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="launcher-shell">
+      <section class="launcher-hero">
+        <div class="brand-row">
+          <img src="../../assets/icon.svg" alt="" />
+          <div>
+            <span>Aurora Orchestrator</span>
+            <h1>Start building with AI</h1>
+          </div>
+        </div>
+        <p>
+          Aurora helps you run long AI-assisted build loops against a project folder.
+          It is designed for iterative application work, and it can also support other
+          long-running AI-driven projects.
+        </p>
+        <div class="version-row">
+          <span>Current version</span>
+          <strong id="launcher-version">Loading...</strong>
+        </div>
+      </section>
+
+      <section class="launcher-card update-card">
+        <div>
+          <h2>Updates</h2>
+          <p id="update-message">Checking for updates...</p>
+        </div>
+        <button id="check-updates" class="button">Check for Updates</button>
+      </section>
+
+      <section class="launcher-card repo-card">
+        <div>
+          <h2>Choose Your Project</h2>
+          <p>
+            Pick the target repo or project folder Aurora should work on. The app will
+            prepare its local engine quietly and open mission control for that folder.
+          </p>
+        </div>
+        <button id="select-repo" class="button">Choose Folder</button>
+        <div id="selected-repo" class="selected-repo" aria-live="polite">No folder selected yet.</div>
+      </section>
+
+      <section class="launcher-actions">
+        <button id="readme" class="button button-secondary">Read Me</button>
+        <button id="start" class="button button-primary" disabled>Start Aurora</button>
+      </section>
+
+      <p id="launcher-status" class="launcher-status">Select a project folder to begin.</p>
+    </main>
+
+    <script src="./launcher.js"></script>
+  </body>
+</html>

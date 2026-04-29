@@ -4087,3 +4087,521 @@ code {
     padding-left: 12px;
   }
 }
+
+/* Dogfood UX overhaul: launcher-era mission-control density and layout guardrails. */
+body {
+  grid-template-rows: 50px 42px 38px minmax(0, 1fr) 24px;
+}
+
+.app-header {
+  min-height: 50px;
+}
+
+.brand-lockup h1 {
+  font-size: 1.12rem;
+}
+
+.session-tab-strip {
+  min-height: 42px;
+}
+
+.top-status-strip {
+  min-height: 38px;
+  padding-block: 4px;
+}
+
+.top-status-grid {
+  display: grid;
+  grid-template-columns: minmax(146px, 0.92fr) minmax(150px, 0.98fr) minmax(190px, 1.35fr) minmax(118px, 0.72fr) minmax(160px, 1fr);
+  gap: 7px;
+}
+
+.top-status-item {
+  min-width: 0;
+  padding: 5px 8px;
+}
+
+.top-status-item span,
+.top-status-item small {
+  font-size: 0.62rem;
+}
+
+.top-status-item strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top-status-attention {
+  border-color: rgba(255, 184, 77, 0.35);
+}
+
+.top-status-actions .button {
+  min-height: 28px;
+  padding: 5px 10px;
+}
+
+.connection-banner {
+  padding-block: 7px;
+}
+
+.panel-home.aurora-dashboard {
+  overflow: hidden;
+}
+
+.aurora-topline {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 8px 10px;
+}
+
+.aurora-topline h2 {
+  font-size: 1.12rem;
+}
+
+.home-recommendation-title,
+.home-recommendation-detail {
+  max-width: 84ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aurora-status-orbit {
+  min-width: 190px;
+  padding: 7px 10px;
+}
+
+.aurora-shell {
+  grid-template-columns: 320px minmax(560px, 1fr) 380px;
+  gap: 10px;
+}
+
+.aurora-project-panel,
+.aurora-mission-panel,
+.aurora-chat-panel {
+  border-radius: 12px;
+}
+
+.aurora-project-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-height: 0;
+  padding: 10px;
+  overflow: auto;
+}
+
+.aurora-project-panel > .panel-header {
+  gap: 8px;
+}
+
+.aurora-project-panel .panel-header h3 {
+  font-size: 0.82rem;
+}
+
+.aurora-project-panel .button {
+  min-height: 30px;
+  padding: 6px 9px;
+}
+
+.project-file-list {
+  flex: 0 0 auto;
+  max-height: min(250px, 28vh);
+  gap: 7px;
+  padding-right: 2px;
+  overflow: auto;
+}
+
+.project-file-card {
+  min-height: 54px;
+  padding: 8px;
+  border-radius: 10px;
+}
+
+.project-file-purpose,
+.project-file-meta {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-editor,
+.ntfy-card,
+.setup-health,
+.ai-setup-first-message {
+  padding: 9px;
+  border: 1px solid rgba(112, 151, 205, 0.18);
+  border-radius: 10px;
+  background: rgba(5, 14, 29, 0.52);
+}
+
+.goal-editor {
+  flex: 0 0 auto;
+  max-height: 190px;
+  overflow: auto;
+}
+
+.saved-goal-card p {
+  max-height: 66px;
+  overflow: auto;
+}
+
+.ntfy-card {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 7px;
+}
+
+.ntfy-card .field {
+  gap: 4px;
+}
+
+.setup-health {
+  max-height: 150px;
+  overflow: auto;
+}
+
+.setup-check {
+  padding: 7px;
+}
+
+.aurora-mission-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(300px, 38vh) auto auto auto auto minmax(0, 1fr);
+  gap: 8px;
+  min-height: 0;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.mission-header {
+  min-height: 0;
+  padding: 9px 10px;
+}
+
+.mission-header h3 {
+  font-size: 1.05rem;
+}
+
+.mission-header p,
+.cycle-explainer p {
+  display: -webkit-box;
+  max-height: 38px;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.cycle-explainer {
+  padding: 8px 10px;
+}
+
+.mission-gauge-zone {
+  min-height: 300px;
+  max-height: 38vh;
+  padding: 0;
+  overflow: visible;
+}
+
+.aurora-gauge {
+  width: clamp(300px, 39vh, 390px);
+}
+
+.aurora-gauge-inner {
+  inset: 30%;
+}
+
+.aurora-gauge-inner strong {
+  font-size: clamp(42px, 5.2vh, 60px);
+}
+
+.gauge-cycle-label {
+  color: var(--accent-cyan);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.mission-chip-row {
+  gap: 7px;
+  justify-content: center;
+}
+
+.mission-chip {
+  min-height: 24px;
+  padding: 5px 8px;
+}
+
+.mission-facts {
+  grid-template-columns: 0.9fr 1.1fr;
+  gap: 8px;
+  max-height: 150px;
+  overflow: auto;
+}
+
+.run-id-card {
+  grid-column: 1 / 2;
+}
+
+.mission-timers,
+.cycle-history,
+.mission-meta-grid {
+  min-height: 0;
+}
+
+.cycle-history {
+  max-height: 94px;
+  overflow: auto;
+}
+
+.mission-meta-grid {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.home-kv {
+  min-width: 0;
+}
+
+.home-kv strong,
+.detail-value,
+.summary-value {
+  overflow-wrap: anywhere;
+}
+
+.copyable-value[data-copy-value] {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: rgba(110, 231, 255, 0.54);
+  text-underline-offset: 3px;
+}
+
+.copyable-value[data-copy-value]:hover {
+  color: var(--accent-cyan);
+}
+
+.mission-controls,
+.mission-secondary-controls {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.mission-controls .button,
+.mission-secondary-controls .button {
+  min-height: 32px;
+  padding: 6px 8px;
+}
+
+.mission-secondary-controls {
+  opacity: 0.88;
+}
+
+.advanced-help {
+  margin: 0;
+}
+
+.timeline-panel {
+  min-height: 0;
+  padding: 9px;
+}
+
+.aurora-timeline {
+  max-height: none;
+  min-height: 0;
+}
+
+.aurora-chat-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 9px;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.chat-mode-strip {
+  min-height: 28px;
+}
+
+.aurora-side-chat,
+.side-chat-list {
+  flex: 1 1 auto;
+  min-height: 160px;
+  max-height: none;
+  overflow: auto;
+}
+
+.side-chat-item {
+  padding: 9px;
+  border-radius: 10px;
+}
+
+.aurora-chat-panel .field {
+  flex: 0 0 auto;
+}
+
+.aurora-chat-panel textarea {
+  min-height: 78px;
+}
+
+.control-note-box {
+  flex: 0 0 auto;
+  padding: 8px;
+  border: 1px solid rgba(112, 151, 205, 0.18);
+  border-radius: 10px;
+  background: rgba(5, 14, 29, 0.48);
+}
+
+.control-note-box summary,
+.advanced-worker-controls summary,
+.advanced-help summary {
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.control-note-box[open] {
+  display: grid;
+  gap: 8px;
+}
+
+.panel-progress {
+  grid-column: span 7;
+}
+
+.panel-status,
+.panel-pending {
+  grid-column: span 5;
+}
+
+.panel-summary {
+  grid-column: 1 / -1;
+}
+
+.panel-connection {
+  grid-column: span 4;
+}
+
+.panel-models,
+.panel-settings {
+  grid-column: span 8;
+}
+
+.panel-updates,
+.panel-controls {
+  grid-column: span 4;
+}
+
+.panel-terminal,
+.panel-events {
+  grid-column: 1 / -1;
+}
+
+.panel-terminal {
+  display: grid;
+  grid-template-rows: auto auto minmax(360px, 1fr) auto auto auto;
+  min-height: calc(100vh - 170px);
+}
+
+.terminal-output {
+  min-height: 360px;
+  max-height: none;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.settings-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.events-list {
+  gap: 5px;
+  max-height: calc(100vh - 230px);
+}
+
+.event-card {
+  grid-template-columns: 4px minmax(0, 1fr);
+  gap: 8px;
+  border-radius: 7px;
+}
+
+.event-card-body {
+  padding: 6px 8px 6px 0;
+}
+
+.event-header {
+  gap: 8px;
+}
+
+.event-name {
+  font-size: 0.82rem;
+  line-height: 1.25;
+}
+
+.event-label-row {
+  gap: 5px;
+}
+
+.event-chip,
+.event-time,
+.event-sequence {
+  font-size: 0.66rem;
+}
+
+.event-subhead {
+  margin-top: 3px;
+  font-size: 0.7rem;
+}
+
+.event-details summary {
+  padding-block: 2px;
+  font-size: 0.7rem;
+}
+
+.event-payload {
+  max-height: 150px;
+  font-size: 0.72rem;
+}
+
+.worker-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.92fr) minmax(420px, 1.08fr);
+  align-items: stretch;
+}
+
+.worker-list,
+.worker-detail-shell {
+  max-height: calc(100vh - 190px);
+  overflow: auto;
+}
+
+.worker-card {
+  padding: 8px;
+  border-radius: 8px;
+}
+
+.worker-counts {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.advanced-worker-controls {
+  padding: 8px;
+}
+
+@media (max-width: 1320px) {
+  .aurora-shell {
+    grid-template-columns: 306px minmax(510px, 1fr) 352px;
+  }
+
+  .aurora-gauge {
+    width: clamp(290px, 36vh, 360px);
+  }
+}

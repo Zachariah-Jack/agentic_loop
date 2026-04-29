@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.4.0-dev - 2026-04-29
+
+- Added an app-first Aurora startup launcher with branding, version/update status, Read Me, repo folder selection, disabled-until-ready Start Aurora, and quiet backend build/start handoff for normal Windows use.
+- Reworked the Home dashboard around dogfood feedback: compact header/status strip, calmer first-load state, protected central gauge space, cleaner Project System/ntfy/setup density, right-side Run Q&A, and no dominant Connect/Update Dashboard controls.
+- Changed safe-stop recovery so `Clear Stop` only clears the mechanical stop flag; `Continue Build` remains a separate explicit protocol action.
+- Stopped Action Required from repeatedly hijacking navigation. Outstanding issues now remain visible through badges/status while the operator can inspect other screens.
+- Redesigned secondary surfaces for purpose and density: Run as operational detail, Chat as conversation archive/orientation, Workers as worker activity with advanced manual controls collapsed, Terminal as a larger behind-the-scenes pane, Settings as broader grouped cards, and Live Output as denser monitoring rows.
+- Added click-to-copy affordances for useful mission/status values and reduced noisy successful planner/Codex health-check flashes.
+
+Known limits:
+
+- The launcher can check release status and quietly build/start the local backend, but safe self-install remains disabled until signed/checksummed Windows assets exist.
+- Worker apply and worker-specific approvals remain deferred; the Worker Activity screen shows available state and keeps advanced manual controls clearly secondary.
+
 ## v1.3.0-dev - 2026-04-29
 
 - Rebuilt the Aurora GUI Home surface as a full-window mission-control dashboard with a compact command bar, session tabs, top status strip, far-left icon rail, persistent Project System drawer, dominant Mission Run panel, and integrated right AI Conversation panel.
